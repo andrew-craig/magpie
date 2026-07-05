@@ -125,7 +125,7 @@ docker run --rm \
   --network magpie-net \
   -v <workspace>:/work:ro \
   -v <output-dir>:/out \
-  -e ANTHROPIC_API_KEY \
+  -e OPENROUTER_API_KEY \
   magpie-reviewer review /work /out/findings.json
 ```
 
@@ -141,7 +141,7 @@ docker run --rm \
 
 - Dedicated bridge network `magpie-net` with no default forwarding.
 - Host `iptables` + `ipset`: allow DNS + established/related; allow destination IPs resolved
-  from the LLM API host (`api.anthropic.com` initially — provider configurable, allowlist
+  from the LLM API host (`openrouter.ai` initially — provider configurable, allowlist
   derived from config); drop everything else from that bridge. Adapted from Anthropic's
   `init-firewall.sh`, but applied **on the host** so the container needs no `NET_ADMIN` and a
   compromised agent can't touch its own firewall.
@@ -236,7 +236,6 @@ magpie/
   `reopened`/`synchronize`, gated by a repo allowlist in config (don't auto-run on every repo
   the app could be installed on).
 - **Review posture:** `COMMENT` only — magpie never approves or requests changes.
-- **LLM provider:** Anthropic via `ANTHROPIC_API_KEY` to start; provider/model configurable
-  (Pi supports 20+ providers), with the egress allowlist derived from the configured provider.
+- **LLM provider:** OpenRouter with model configurable
 - **Limits:** concurrency 2, 10-minute job timeout, ~4k-changed-lines diff cap, 4 GB / 2 CPU
   per container.
