@@ -25,13 +25,17 @@ allows GitHub doesn't save you.
 
 Prompt-level defenses cannot be relied on; the fix is **capability separation**:
 
-1. **The agent container holds nothing worth stealing except the LLM API key.**
-   No GitHub token, no `.git-credentials`, no credential helper, no secrets in env.
+1. **The agent container holds no secret worth stealing — not even the LLM API key.**
+   No GitHub token, no `.git-credentials`, no credential helper, no long-lived LLM key in env.
+   The real provider key lives in a host-side gateway; the container authenticates to that
+   gateway with a short-lived, budget-capped, per-job virtual key that is worthless to exfiltrate.
 2. **The host orchestrator does all privileged work** — it mints installation tokens, clones
    the repo, and posts the review. The agent only ever sees a credential-free checkout and
    emits findings as data.
-3. **Network egress from the container is default-deny**, allowlisted to the LLM API endpoint
-   only (pattern taken from Claude Code's own `.devcontainer/init-firewall.sh`).
+3. **Network egress from the container is default-deny**, forced through a host-side gateway
+   that is the container's *only* reachable destination; the gateway alone can talk to the LLM
+   provider. Filtering is by hostname, not IP (see §5 on why IP allowlisting a CDN-fronted API
+   is inadequate).
 4. Even a fully prompt-injected agent can therefore, at worst, produce a garbage review —
    which a human reads before acting on.
 
@@ -50,26 +54,32 @@ PR content execute in a context holding secrets.
 ┌─ Host: magpie orchestrator (Node/TS, systemd service) ──────────────┐
 │                                                                     │
 │  webhook server ──▶ HMAC verify ──▶ filter events ──▶ job queue     │
-│                                                     (p-queue,      │
-│                                                      concurrency 2)│
-│  per job:                                                          │
-│   1. mint installation token (1h TTL)                              │
-│   2. git clone/fetch refs/pull/N/head into /var/lib/magpie/work/…  │
-│      (token in URL only on host; checkout handed over cred-free)   │
-│   3. docker run (hardened, isolated bridge net) ──▶ Pi review      │
-│   4. parse findings JSON from container output                     │
-│   5. POST /repos/…/pulls/N/reviews (inline comments + summary)     │
-│   6. cleanup: rm workspace, container auto-removed (--rm)          │
+│                                                     (p-queue,       │
+│                                                      concurrency 2)  │
+│  per job:                                                           │
+│   1. mint installation token (1h TTL)                               │
+│   2. git clone/fetch refs/pull/N/head into /var/lib/magpie/work/…   │
+│      (token in URL only on host; checkout handed over cred-free)    │
+│   3. mint per-job virtual key on the LiteLLM gateway (budget-capped) │
+│   4. docker run (hardened, isolated bridge net) ──▶ Pi review        │
+│   5. parse findings JSON from container output                      │
+│   6. POST /repos/…/pulls/N/reviews (inline comments + summary)      │
+│   7. cleanup: rm workspace, revoke virtual key, container --rm       │
 └─────────────────────────────────────────────────────────────────────┘
-                        │ docker run
-                        ▼
-┌─ Container: magpie-reviewer (ephemeral, per job) ────────────────────┐
-│  non-root · read-only rootfs · cap-drop=ALL · mem/cpu/pids limits   │
-│  isolated bridge network → host iptables allows LLM API only        │
-│  contents: repo checkout (ro) + Pi + review extension               │
-│  secret: LLM API key only                                           │
-│  runs: pi -p --mode json --no-session … → findings via tool call    │
-└─────────────────────────────────────────────────────────────────────┘
+          │ docker run
+          ▼
+┌─ Container: magpie-reviewer ──────────┐                                    openrouter.ai
+│  ephemeral · non-root · ro rootfs     │                                        ▲ HTTPS
+│  cap-drop=ALL · mem/cpu/pids limits   │   ┌─ LiteLLM gateway (host, own user) ─┴─┐
+│  egress default-deny → gateway is     │   │  holds real OpenRouter key           │
+│  the ONLY reachable host              │   │  per-job virtual keys + spend budgets │
+│  contents: repo checkout (ro, no .git)│   │  egress allowlist: openrouter.ai only │
+│           + Pi + review extension     │   └───────────────────────────────────────┘
+│  secret: none long-lived              │              ▲
+│  Pi base URL → gateway ───────────────┼──────────────┘  OpenAI-compat API,
+│  runs: pi -p --mode json …            │                 per-job virtual key
+│  → findings via report_findings       │                 (localhost only)
+└───────────────────────────────────────┘
 ```
 
 ## Components
@@ -125,11 +135,20 @@ docker run --rm \
   --network magpie-net \
   -v <workspace>:/work:ro \
   -v <output-dir>:/out \
-  -e OPENROUTER_API_KEY \
+  -e OPENAI_BASE_URL=http://gateway:4000 \
+  -e OPENAI_API_KEY=<per-job-virtual-key> \
   magpie-reviewer review /work /out/findings.json
 ```
 
-- Repo mounted **read-only**; a separate small writable mount for the findings file.
+- **No long-lived provider key in the container.** Pi's provider base URL points at the
+  host-side LiteLLM gateway (§5), and the only credential injected is a short-lived per-job
+  virtual key the orchestrator mints before the run and revokes on cleanup. Even a fully
+  prompt-injected agent has no key worth exfiltrating. (Exact env var names depend on how Pi
+  overrides base URL/key — confirm against `pi-ai` provider config; the transparent-proxy
+  fallback in §5 needs no in-container key at all.)
+- Repo mounted **read-only, with `.git` stripped** so no lazy blob fetch or `git` invocation
+  can try to reach `origin` (which egress-blocks anyway); the agent works the plain worktree.
+- A separate small writable mount for the findings file.
 - Entry script runs Pi headless:
   `pi -p --mode json --no-session --no-extensions -e /opt/magpie/review-extension.js
   --tools read,grep,find,ls --append-system-prompt "$(cat /opt/magpie/reviewer-prompt.md)"`
@@ -137,18 +156,46 @@ docker run --rm \
   no `write`/`edit`** — removes the entire "injected shell command" class.
 - The orchestrator also parses the NDJSON event stream from stdout for logging/cost telemetry.
 
-### 5. Egress allowlist (host-side)
+### 5. Egress control: credential-injecting LLM gateway (host-side)
 
-- Dedicated bridge network `magpie-net` with no default forwarding.
-- Host `iptables` + `ipset`: allow DNS + established/related; allow destination IPs resolved
-  from the LLM API host (`openrouter.ai` initially — provider configurable, allowlist
-  derived from config); drop everything else from that bridge. Adapted from Anthropic's
-  `init-firewall.sh`, but applied **on the host** so the container needs no `NET_ADMIN` and a
-  compromised agent can't touch its own firewall.
-- Note GitHub is deliberately **not** allowlisted — the agent has no reason to reach it, and
-  GitHub is a proven exfiltration channel.
-- Applied by an idempotent `scripts/setup-network.sh` run at boot (systemd oneshot), with
-  periodic re-resolution of the API host IPs.
+The container's only permitted egress destination is a **host-side LiteLLM gateway**, which
+holds the real provider key and brokers all LLM traffic. This does three jobs at once —
+credential custody, hostname-based egress filtering, and hard cost enforcement — and removes
+the last secret from the container.
+
+**Why not an IP allowlist.** The obvious approach (host `iptables`/`ipset` allowing IPs
+resolved from `openrouter.ai`) is inadequate: OpenRouter sits behind Cloudflare, whose edge
+IPs are shared across millions of domains. Allowlisting those IPs effectively allowlists a huge
+slice of the internet, including plausible exfil endpoints — so it does *not* deliver the "can
+only reach the LLM API" property the threat model claims. Filtering must be by **hostname/SNI**,
+which a gateway (or an SNI-filtering proxy) does natively.
+
+**Gateway (LiteLLM proxy).**
+- Runs on the host as its **own unprivileged user**, outside the container's blast radius,
+  reachable from `magpie-net` only as the configured egress target (nothing else on the host).
+- Holds the single real `OPENROUTER_API_KEY`. Exposes an **OpenAI-compatible** endpoint; Pi is
+  pointed at it via provider base-URL override, so the container never sees the real key.
+- **Per-job virtual keys:** the orchestrator mints a fresh LiteLLM virtual key before each run
+  (scoped model + spend/request budget) and revokes it on cleanup. A leaked virtual key is
+  short-lived and budget-capped — worthless to steal, which is the point. This is also the
+  **hard cost cap** Pi itself lacks (no `--max-turns`/budget flag): the gateway cuts the job
+  off at its budget regardless of what the agent does.
+- **Upstream egress:** only the gateway process may reach the network, and only to the provider
+  host. Enforce with host `iptables` on `magpie-net` (default-deny; the bridge may reach only
+  the gateway's listen address) plus, if you want defense-in-depth on the gateway's own
+  outbound, an SNI/domain allowlist limiting it to `openrouter.ai` (provider configurable).
+- GitHub is deliberately **never** reachable from the container or the gateway — the agent has
+  no reason to reach it and GitHub is a proven exfiltration channel.
+
+**Fallback (no base-URL override in Pi).** If Pi can't be pointed at a custom base URL, run a
+transparent TLS-terminating egress proxy (e.g. mitmproxy / squid ssl-bump) that the container
+trusts via an injected CA, injects `Authorization: Bearer <key>` for `openrouter.ai`, and
+denies all other hosts. Same security properties (no in-container key, hostname filtering);
+more moving parts (CA distribution, `NODE_EXTRA_CA_CERTS`). Prefer the gateway.
+
+- Dedicated bridge network `magpie-net` with no default forwarding, applied by an idempotent
+  `scripts/setup-network.sh` at boot (systemd oneshot). The gateway runs as its own systemd
+  service started before the orchestrator.
 
 ### 6. Pi review run and structured output
 
@@ -168,9 +215,11 @@ established **tool-call-as-structured-output** pattern, which Pi supports first-
   title/description **clearly delimited as untrusted data**, plus reviewer instructions
   (focus on correctness/security/clarity; no style nitpicking that a linter would catch;
   cite file:line for every finding).
-- Cost control: Pi lacks a hard `--max-turns`/cost cap flag today, so the orchestration layer
-  is the enforcement point — wall-clock timeout, diff-size cap (skip or summarize-only above
-  ~4k changed lines), and post-hoc cost logging from the NDJSON usage events.
+- Cost control: Pi lacks a hard `--max-turns`/cost cap flag today, so enforcement lives
+  outside Pi. The **per-job virtual-key budget on the LiteLLM gateway (§5) is the hard cap** —
+  the run is cut off at its spend/request limit no matter what the agent does. The
+  orchestration layer adds a wall-clock timeout and a diff-size cap (skip or summarize-only
+  above ~4k changed lines); NDJSON usage events give post-hoc cost logging.
 
 ### 7. Publishing the review
 
@@ -204,13 +253,16 @@ magpie/
 │   └── review-extension/        # Pi extension: report_findings tool + reviewer prompt
 ├── docker/
 │   └── reviewer/Dockerfile      # node + git + pi + extension, pinned versions
+├── gateway/
+│   └── litellm.config.yaml      # LiteLLM: real provider key, model routing, virtual-key budgets
 ├── scripts/
-│   ├── setup-network.sh         # magpie-net bridge + iptables/ipset egress allowlist
+│   ├── setup-network.sh         # magpie-net bridge + iptables: container → gateway only
 │   └── install.sh               # systemd units, dirs, cloudflared notes
 ├── systemd/
 │   ├── magpie.service           # orchestrator
+│   ├── magpie-gateway.service   # LiteLLM gateway (own user, started before orchestrator)
 │   └── magpie-firewall.service  # oneshot network setup at boot
-└── config.example.toml          # app id, key path, provider/model, limits, repo allowlist
+└── config.example.toml          # app id, key path, gateway URL, provider/model, limits, repo allowlist
 ```
 
 ## Implementation milestones
@@ -222,8 +274,11 @@ magpie/
    diff-hunk anchoring, single review with inline comments, out-of-diff fallback to summary.
 3. **Containerize:** reviewer image, hardened `docker run`, read-only workspace handoff,
    credential stripping, findings via mounted output dir.
-4. **Network lockdown:** `magpie-net` + host iptables/ipset allowlist; verify from inside the
-   container that only the LLM API is reachable (automated check in the entry script).
+4. **Network lockdown + credential-injecting gateway:** stand up the LiteLLM gateway (own user,
+   real key), point Pi at it via base-URL override, mint/revoke a per-job virtual key with a
+   spend budget; `magpie-net` + host iptables so the container can reach *only* the gateway.
+   Startup assertion in the entry script: fail closed if any host other than the gateway is
+   reachable, and confirm no long-lived provider key is present in the container env.
 5. **Production hardening:** Cloudflare Tunnel, systemd units, timeouts/concurrency/diff-size
    caps, incremental re-review + comment minimization, cost logging, `synchronize` dedup.
 6. **Nice-to-haves (later):** `@magpie review` comment command for on-demand re-review,
@@ -236,6 +291,7 @@ magpie/
   `reopened`/`synchronize`, gated by a repo allowlist in config (don't auto-run on every repo
   the app could be installed on).
 - **Review posture:** `COMMENT` only — magpie never approves or requests changes.
-- **LLM provider:** OpenRouter with model configurable
+- **LLM provider:** OpenRouter with model configurable, reached through a host-side LiteLLM
+  gateway that holds the key and enforces per-job budgets (container gets only a virtual key).
 - **Limits:** concurrency 2, 10-minute job timeout, ~4k-changed-lines diff cap, 4 GB / 2 CPU
   per container.
