@@ -13,6 +13,8 @@
   "dependencies": {
     "@octokit/auth-app": "^7.1.5",
     "@octokit/rest": "^21.1.1",
+    "@octokit/webhooks": "^14.2.0",
+    "p-queue": "^8.1.1",
     "smol-toml": "^1.7.0",
     "zod": "^4.4.3"
   },
