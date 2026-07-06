@@ -8,7 +8,8 @@
   "scripts": {
     "build": "npm run build --workspace=@magpie/orchestrator",
     "dev": "npm run dev --workspace=@magpie/orchestrator",
-    "start": "npm run start --workspace=@magpie/orchestrator"
+    "start": "npm run start --workspace=@magpie/orchestrator",
+    "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

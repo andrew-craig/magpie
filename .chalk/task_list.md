@@ -10,7 +10,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_6431** · P1 · open · Job queue — p-queue concurrency + per-job timeout  (parent: epic_04f9)
 - **task_9af4** · P1 · open · Webhook server + HMAC signature verification  (parent: epic_04f9)
 - **task_9b61** · P1 · open · End-to-end integration on a test repo  (parent: epic_04f9)
-- **task_9c52** · P1 · open · Configuration loading — config.example.toml + typed loader  (parent: epic_04f9)
 - **task_ada6** · P1 · open · Workspace clone + credential stripping  (parent: epic_04f9)
 - **task_b5cf** · P1 · open · GitHub App auth + installation token minting  (parent: epic_04f9)
 - **task_c53d** · P1 · open · Pi host runner — run Pi against the diff  (parent: epic_04f9)
