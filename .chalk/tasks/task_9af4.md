@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_60fc,task_9c52]
+blocked_by: [task_9c52]
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:02Z
-updated_at: 2026-07-05T22:57:02Z
+updated_at: 2026-07-06T00:31:59Z
 ---
 Receive GitHub App webhook deliveries on localhost and verify their authenticity before doing anything with the payload.
 

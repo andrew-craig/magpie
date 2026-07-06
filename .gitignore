@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# secrets / local config
+.env
+.env.*
+*.pem
+config.toml
+
+# editor/OS cruft
+.DS_Store
+*.log

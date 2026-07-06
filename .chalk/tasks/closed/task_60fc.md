@@ -2,14 +2,14 @@
 id: task_60fc
 title: Project scaffolding — npm workspaces + orchestrator package
 type: task
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:56:41Z
-updated_at: 2026-07-05T22:56:41Z
+updated_at: 2026-07-06T00:31:59Z
 ---
 Stand up the repository skeleton so all later work has somewhere to live.
 
@@ -29,3 +29,14 @@ Acceptance criteria:
 - npm run dev starts the placeholder entrypoint.
 
 Dependencies: none — foundation task.
+
+## Review (tech lead)
+Reviewed by tech lead; implemented by sonnet subagent.
+- Files: root package.json (npm workspaces, type=module), packages/orchestrator/{package.json,tsconfig.json,src/index.ts}, .gitignore, package-lock.json.
+- Acceptance criteria independently re-verified from a clean rebuild:
+  1. npm install wires workspace — node_modules/@magpie/orchestrator symlink confirmed.
+  2. npm run build — tsc clean, exit 0, dist/ produced.
+  3. npm run dev (and start) — prints "magpie orchestrator starting", exit 0.
+- Node v22.22.2; ESM/NodeNext, strict TS. Scope-clean: no docker/gateway/systemd/review-extension (correctly deferred).
+- Deferred: ESLint/Prettier (per task, not cheap enough to add now).
+Verdict: APPROVED.

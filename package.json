@@ -1,0 +1,18 @@
+{
+  "name": "magpie",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@magpie/orchestrator",
+    "dev": "npm run dev --workspace=@magpie/orchestrator",
+    "start": "npm run start --workspace=@magpie/orchestrator"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.2"
+  }
+}
