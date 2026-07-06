@@ -29,6 +29,24 @@ export interface JobDescriptor {
   repo: string;
   prNumber: number;
   headSha: string;
+  /**
+   * `owner/repo` full name of the PR's *base* repository, as reported by
+   * `payload.repository.full_name`. Optional so existing callers/tests that
+   * only ever populated the fields above keep compiling; set by the
+   * event-filtering stage (see filter.ts) which is the only producer that
+   * has this available.
+   */
+  baseFullName?: string;
+  /**
+   * GitHub App installation id the webhook delivery was scoped to (needed to
+   * mint an installation token for this job later). Absent if the delivery
+   * payload didn't include one (defensively tolerated by the filter).
+   */
+  installationId?: number;
+  /** Pre-push head SHA, present only for `synchronize` deliveries. */
+  before?: string;
+  /** Post-push head SHA, present only for `synchronize` deliveries. */
+  after?: string;
 }
 
 /** Terminal state of a job once it has left the queue. */
