@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_60fc]
+blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:56:49Z
-updated_at: 2026-07-05T22:56:49Z
+updated_at: 2026-07-06T00:31:59Z
 ---
 Provide a single typed config object the rest of the orchestrator reads from.
 
