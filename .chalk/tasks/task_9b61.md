@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_d4a8,task_3c49,task_292c]
+blocked_by: [task_d4a8,task_292c]
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:58:17Z
-updated_at: 2026-07-06T06:05:21Z
+updated_at: 2026-07-06T12:43:45Z
 ---
 Wire the pieces into one pipeline and prove the full loop against a real test repo — the milestone exit criterion.
 

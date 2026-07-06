@@ -2,14 +2,14 @@
 id: task_3c49
 title: Event filtering + repo allowlist gating
 type: task
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:34Z
-updated_at: 2026-07-06T06:05:21Z
+updated_at: 2026-07-06T12:43:45Z
 ---
 Decide which verified webhook events actually turn into review jobs.
 
@@ -29,3 +29,6 @@ Acceptance criteria:
 - Accepted events produce a well-formed job descriptor handed to the queue.
 
 Dependencies: task_9c52 (allowlist config), task_9af4 (event source).
+
+## Review (tech lead) — APPROVED
+filter.ts: createPullRequestFilter(config, enqueue, logger?) -> OnPullRequest. Injected enqueue callback (not concrete JobQueue) keeps policy unit-testable. Gating order action->draft->base-repo allowlist; uses payload.repository.full_name (base repo) correctly. JobDescriptor extended additively (baseFullName, installationId, before/after) — dedup key untouched. Never throws into the webhook emitter (whole body try/catch + per-field validation via lenient payload view). 12 tests cover every acceptance criterion. Independently re-ran: build clean, verified in merged tree (53/53).

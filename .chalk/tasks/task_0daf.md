@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_ada6]
+blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:46Z
-updated_at: 2026-07-05T22:57:46Z
+updated_at: 2026-07-06T12:43:45Z
 ---
 Compute the unified diff of the PR from the checked-out workspace, to feed to Pi as the review input.
 
