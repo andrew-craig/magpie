@@ -2,14 +2,14 @@
 id: task_9c52
 title: Configuration loading — config.example.toml + typed loader
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:56:49Z
-updated_at: 2026-07-06T00:31:59Z
+updated_at: 2026-07-06T01:51:11Z
 ---
 Provide a single typed config object the rest of the orchestrator reads from.
 
