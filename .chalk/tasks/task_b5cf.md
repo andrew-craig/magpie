@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_9c52]
+blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:14Z
-updated_at: 2026-07-05T22:57:14Z
+updated_at: 2026-07-06T03:34:17Z
 ---
 Authenticate as the GitHub App and mint short-lived installation tokens for per-job privileged work (clone + posting the review).
 

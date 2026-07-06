@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_9c52,task_9af4]
+blocked_by: [task_9af4]
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:34Z
-updated_at: 2026-07-05T22:57:34Z
+updated_at: 2026-07-06T03:34:17Z
 ---
 Decide which verified webhook events actually turn into review jobs.
 

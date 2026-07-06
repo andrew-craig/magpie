@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_9c52** · P1 · in_progress · Configuration loading — config.example.toml + typed loader  (parent: epic_04f9)
 - **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
 - **task_0daf** · P1 · open · PR diff generation  (parent: epic_04f9)
 - **task_292c** · P1 · open · Post single summary comment to the PR  (parent: epic_04f9)
