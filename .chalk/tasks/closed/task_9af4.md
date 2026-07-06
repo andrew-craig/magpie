@@ -2,14 +2,14 @@
 id: task_9af4
 title: Webhook server + HMAC signature verification
 type: task
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:02Z
-updated_at: 2026-07-06T03:34:17Z
+updated_at: 2026-07-06T06:05:21Z
 ---
 Receive GitHub App webhook deliveries on localhost and verify their authenticity before doing anything with the payload.
 
@@ -28,3 +28,13 @@ Acceptance criteria:
 - Server binds to the configured host/port and logs startup.
 
 Dependencies: task_60fc (scaffolding), task_9c52 (config: secret + host/port).
+
+## Review (tech lead)
+Implemented by sonnet subagent; reviewed + integration-verified by tech lead.
+- Files: packages/orchestrator/src/server.ts (+ server.test.ts). Dep added: @octokit/webhooks ^14.2.0.
+- Approach: `node:http` + `createNodeMiddleware(webhooks, {path:"/webhook"})`; raw body reaches the verifier (no JSON parser in front) — signature check precedes any dispatch. Verified `pull_request` events re-emit onto an `onPullRequest` seam (no filtering/queueing — correctly scoped). GET /healthz answered directly; unknown routes 404. Promisified listen()/close(); binds config.server.host/port; port 0 for tests.
+- Exports: `createWebhookServer(config, onPullRequest): WebhookServer`, `WEBHOOK_PATH`, `HEALTHZ_PATH`, `PullRequestEvent`, `OnPullRequest`.
+- Tests (5): signed delivery accepted + seam fires; wrong-secret rejected + seam does NOT fire; body-tampered-after-signing rejected; healthz 200; unknown route 404. On ephemeral port with afterEach close.
+- Note: original agent run was killed mid-flight and its worktree auto-cleaned; resumed from transcript and rebuilt from scratch.
+- Verified in merged wave1-integration tree: tsc clean, full suite 27/27 green.
+Verdict: APPROVED.

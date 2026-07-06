@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_b5cf,task_c53d]
+blocked_by: [task_c53d]
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:58:08Z
-updated_at: 2026-07-05T22:58:08Z
+updated_at: 2026-07-06T06:05:21Z
 ---
 Publish the review result back to the PR as one summary comment authored by the GitHub App identity.
 

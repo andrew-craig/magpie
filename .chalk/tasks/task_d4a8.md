@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 2
 labels: []
-blocked_by: [task_9af4]
+blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:14Z
-updated_at: 2026-07-05T22:57:14Z
+updated_at: 2026-07-06T06:05:21Z
 ---
 Let GitHub webhooks reach the local webhook server during development without a public inbound port or the Cloudflare Tunnel (which lands in a later milestone).
 
