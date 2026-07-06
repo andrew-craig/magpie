@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_b5cf]
+blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:34Z
-updated_at: 2026-07-05T22:57:34Z
+updated_at: 2026-07-06T06:05:21Z
 ---
 Check out the PR head into a per-job workspace on the host, then remove all credentials from the checkout.
 
