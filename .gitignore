@@ -4,6 +4,7 @@ dist/
 # secrets / local config
 .env
 .env.*
+!.env.example
 *.pem
 config.toml
 
