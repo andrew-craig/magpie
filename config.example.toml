@@ -1,0 +1,90 @@
+# Magpie orchestrator configuration.
+#
+# Copy this file to `config.toml` (repo-root, git-ignored) and fill it in, or
+# point MAGPIE_CONFIG at a config file living elsewhere. See packages/orchestrator/src/config.ts
+# for the loader that parses and validates this file.
+#
+# ---------------------------------------------------------------------------
+# Secrets — deliberately kept OUT of this file and read from the environment
+# instead, so `config.toml` never needs to hold anything sensitive:
+#
+#   MAGPIE_WEBHOOK_SECRET     (required) GitHub App webhook secret, used to
+#                             verify the X-Hub-Signature-256 header on
+#                             incoming webhook deliveries.
+#
+#   MAGPIE_LLM_API_KEY        (required for now) API key for the LLM provider
+#                             configured in [llm] below. This is the *real*
+#                             provider key; once the M4 LiteLLM gateway lands,
+#                             the orchestrator will mint short-lived per-job
+#                             virtual keys instead and this will stop being a
+#                             long-lived secret. Until then, treat it as
+#                             sensitive.
+#
+#   MAGPIE_GITHUB_PRIVATE_KEY (optional) PEM contents of the GitHub App
+#                             private key. If set, this takes priority over
+#                             `github.private_key_path` below and the file on
+#                             disk is never read. Useful for containerized or
+#                             CI deployments where mounting a PEM file is
+#                             awkward.
+# ---------------------------------------------------------------------------
+
+# List of "owner/repo" pairs that magpie is allowed to automatically review.
+# Required — the array itself must be present (an empty array is valid, and
+# means "review nothing yet"), so an operator must consciously opt repos in
+# rather than magpie silently reviewing every repo the GitHub App is
+# installed on.
+# NOTE: this is a top-level key, so it must stay ABOVE the first [section]
+# header — TOML assigns bare keys appearing after a header to that section.
+repo_allowlist = [
+  # "my-org/my-repo",
+]
+
+[github]
+# GitHub App ID, shown on the app's settings page. Required.
+app_id = "123456"
+
+# Path to the GitHub App private key (.pem), used to mint installation
+# tokens. Required, UNLESS the MAGPIE_GITHUB_PRIVATE_KEY env var supplies the
+# key contents directly (in which case this field is ignored).
+private_key_path = "/etc/magpie/github-app.private-key.pem"
+
+[llm]
+# Base URL of the OpenAI-compatible LLM API the reviewer talks to.
+# Default: "https://openrouter.ai/api/v1"
+base_url = "https://openrouter.ai/api/v1"
+
+# Model identifier to request from the provider. Required.
+# Example: "anthropic/claude-sonnet-4.5"
+model = "anthropic/claude-sonnet-4.5"
+
+[server]
+# Host/interface the webhook HTTP server listens on.
+# Default: "127.0.0.1" (localhost only; expose via Cloudflare Tunnel, not by
+# binding a public interface).
+host = "127.0.0.1"
+
+# Port the webhook HTTP server listens on.
+# Default: 8787
+port = 8787
+
+[limits]
+# Hard wall-clock timeout for a single review job, in seconds. A job that
+# exceeds this is killed (container stopped, workspace deleted).
+# Default: 600 (10 minutes)
+job_timeout_seconds = 600
+
+# Maximum number of review jobs the orchestrator will run at once.
+# Default: 2
+concurrency = 2
+
+# Diff-size cap, in changed lines. PRs whose diff exceeds this are skipped or
+# summarized only, rather than fully reviewed, to bound cost and latency.
+# Default: 4000
+max_diff_lines = 4000
+
+[workspace]
+# Directory where PR checkouts are cloned for review jobs.
+# Default: "/var/lib/magpie/work"
+# For local development, point this at a directory under your home or repo
+# checkout (e.g. "./.magpie-work") instead of the production system path.
+work_dir = "/var/lib/magpie/work"
