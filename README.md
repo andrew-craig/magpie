@@ -18,6 +18,25 @@ npm install
 npm run build
 ```
 
+### Configuration
+
+Non-secret settings live in `config.toml` at the repo root — copy
+`config.example.toml` to `config.toml` and fill it in (it is git-ignored).
+
+Secrets are kept **out** of `config.toml` and read from the environment. Copy
+`.env.example` to `.env` (also git-ignored) and set:
+
+- `MAGPIE_WEBHOOK_SECRET` — the GitHub App webhook secret
+- `MAGPIE_LLM_API_KEY` — the LLM provider API key
+
+The GitHub App private key stays a `.pem` file on disk; point
+`github.private_key_path` in `config.toml` at it (don't put it in `.env`).
+
+The `dev` and `start` scripts load `.env` automatically via Node's built-in
+`--env-file-if-exists`, so no dotenv dependency is required and the file is
+optional — in production, supply these vars via a systemd `EnvironmentFile=`
+instead.
+
 ## Running
 
 ```bash
