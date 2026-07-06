@@ -29,8 +29,11 @@ Wants=network-online.target
 Type=notify
 # Run as the same unprivileged user that owns ~/.cloudflared (cert.pem +
 # tunnel credentials JSON), set up by `cloudflared tunnel login` /
-# `cloudflared tunnel create`. Change to match whichever account you ran
-# scripts/setup-cloudflared.sh as (MAGPIE_CLOUDFLARED_USER).
+# `cloudflared tunnel create`. `magpie` is a placeholder: you MUST change it
+# to whichever account you ran scripts/setup-cloudflared.sh as
+# (MAGPIE_CLOUDFLARED_USER, default $USER) — that's where the credentials
+# file lives, and cloudflared can't start if it can't read it. The setup
+# script prints the exact `sed` command to do this on install.
 User=magpie
 Group=magpie
 ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run

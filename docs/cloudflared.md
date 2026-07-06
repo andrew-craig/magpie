@@ -128,6 +128,11 @@ before changing anything.
 
 ```bash
 sudo cp systemd/cloudflared.service /etc/systemd/system/cloudflared.service
+# The unit ships with User=/Group=magpie as a placeholder. Set them to the
+# account that owns ~/.cloudflared (the user you ran the steps above as),
+# or cloudflared won't be able to read its credentials file and will fail to
+# start. e.g. for the current user:
+sudo sed -i "s/^User=.*/User=$USER/; s/^Group=.*/Group=$USER/" /etc/systemd/system/cloudflared.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now cloudflared.service
 sudo systemctl status cloudflared.service
@@ -163,6 +168,7 @@ If it fails, check in order:
 3. Is the orchestrator running and listening on `127.0.0.1:8787`
    (`sudo systemctl status magpie.service` / `curl http://127.0.0.1:8787/`)?
 4. Does the webhook secret in GitHub match `MAGPIE_WEBHOOK_SECRET`? A
-   mismatch causes the orchestrator to reject with 401, not a tunnel-level
-   failure — Recent Deliveries will still show the request reaching the
-   server, just with a non-200 response.
+   mismatch fails HMAC verification and the orchestrator rejects the delivery
+   with HTTP 400 (via `@octokit/webhooks`; see `server.ts`), not a
+   tunnel-level failure — Recent Deliveries will still show the request
+   reaching the server, just with a non-200 (400) response.
