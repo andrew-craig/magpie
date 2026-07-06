@@ -177,7 +177,7 @@ export class JobQueue {
    * does not reject. Timeouts, run() failures, and dedup are all reported
    * via the returned {@link JobOutcome}.
    */
-  async enqueue(
+  enqueue(
     job: JobDescriptor,
     run: JobRunner,
     cleanup?: JobCleanup,
@@ -206,27 +206,47 @@ export class JobQueue {
       this.#pendingByKey.set(key, entry);
 
       void this.#queue.add(async () => {
-        if (entry.cancelled) {
-          return;
+        // The whole body is guarded so the enqueue() promise ALWAYS settles.
+        // #runOne never rejects, but a logger or map operation throwing would
+        // otherwise leave resolveOutcome uncalled and hang every caller
+        // awaiting this job. On any unexpected throw, log and resolve failed.
+        try {
+          // Already superseded: resolveSkipped() settled this promise as
+          // "skipped" when the newer job replaced it, so just bail out.
+          if (entry.cancelled) {
+            return;
+          }
+          // Only clear the map entry if it's still ours (a newer job may
+          // already have replaced it and re-registered under the same key).
+          if (this.#pendingByKey.get(key) === entry) {
+            this.#pendingByKey.delete(key);
+          }
+
+          const start = Date.now();
+          this.#logger.info({ event: "start", ...jobLogFields(job) });
+
+          const outcome = await this.#runOne(job, run, cleanup, start);
+
+          this.#logger.info({
+            event: "finish",
+            ...jobLogFields(job),
+            durationMs: outcome.durationMs,
+            outcome: outcome.outcome,
+          });
+          resolveOutcome(outcome);
+        } catch (err) {
+          this.#logger.error({
+            event: "queue-task-error",
+            ...jobLogFields(job),
+            error: serializeError(err),
+          });
+          resolveOutcome({
+            id: job.id,
+            outcome: "failed",
+            durationMs: 0,
+            error: err,
+          });
         }
-        // Only clear the map entry if it's still ours (a newer job may
-        // already have replaced it and re-registered under the same key).
-        if (this.#pendingByKey.get(key) === entry) {
-          this.#pendingByKey.delete(key);
-        }
-
-        const start = Date.now();
-        this.#logger.info({ event: "start", ...jobLogFields(job) });
-
-        const outcome = await this.#runOne(job, run, cleanup, start);
-
-        this.#logger.info({
-          event: "finish",
-          ...jobLogFields(job),
-          durationMs: outcome.durationMs,
-          outcome: outcome.outcome,
-        });
-        resolveOutcome(outcome);
       });
     });
   }

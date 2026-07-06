@@ -174,6 +174,41 @@ describe("JobQueue", () => {
     expect(outcome.error).toBe(boom);
   });
 
+  it("settles (not hangs) when the queue task itself throws (e.g. logger error)", async () => {
+    // Guards against a regression where an unexpected throw inside the
+    // queue-task body (before resolveOutcome) leaves enqueue() pending
+    // forever, hanging every caller awaiting the job.
+    const throwingLogger: Logger = {
+      info() {
+        throw new Error("logger exploded");
+      },
+      error() {
+        // swallow so the catch-path logging doesn't itself throw
+      },
+    };
+    const queue = new JobQueue({
+      concurrency: 1,
+      jobTimeoutMs: 5000,
+      logger: throwingLogger,
+    });
+
+    let ranBody = false;
+    const outcomePromise = queue.enqueue(makeJob(), async () => {
+      ranBody = true;
+    });
+
+    // If the fix regresses, this race resolves to "HUNG".
+    const result = await Promise.race([
+      outcomePromise,
+      sleep(200).then(() => "HUNG" as const),
+    ]);
+
+    expect(result).not.toBe("HUNG");
+    expect((result as { outcome: string }).outcome).toBe("failed");
+    // The throw happened on the "start" log, before run() was invoked.
+    expect(ranBody).toBe(false);
+  });
+
   it("skips a superseded, not-yet-started job for the same PR", async () => {
     const queue = new JobQueue({ concurrency: 1, jobTimeoutMs: 5000 });
 

@@ -86,9 +86,9 @@ export async function mintInstallationToken(
  * same `@octokit/auth-app` flow as {@link mintInstallationToken}; Octokit
  * manages the token's lifetime for the calls made through this client.
  */
-export async function createInstallationOctokit(
+export function createInstallationOctokit(
   params: InstallationAuthParams,
-): Promise<Octokit> {
+): Octokit {
   return new Octokit({
     authStrategy: createAppAuth,
     auth: {
