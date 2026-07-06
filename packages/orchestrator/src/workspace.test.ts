@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createWorkspace } from "./workspace.js";
+import { CREDENTIAL_HELPER_ARGS, createWorkspace } from "./workspace.js";
 
 // NOTE: everything here runs fully offline against a local bare-git fixture
 // repo — no network, no real GitHub credentials. We use the `baseUrlOverride`
@@ -231,5 +231,61 @@ describe("createWorkspace", () => {
       const message = err instanceof Error ? err.message : String(err);
       return !message.includes(FAKE_TOKEN) && message.includes("REDACTED");
     });
+  });
+});
+
+describe("CREDENTIAL_HELPER_ARGS", () => {
+  // These tests pin the exact git-credential precedence behavior the args
+  // rely on: our ephemeral helper reads the token from $GIT_TOKEN, and the
+  // leading empty `credential.helper=` reset must beat any ambient
+  // system/global credential helper on the host. We isolate git's config via
+  // GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM so the outcome doesn't depend on the
+  // machine actually running the test.
+
+  const AMBIENT_SECRET = "WRONG-AMBIENT-SECRET-must-not-win";
+  let ambientConfig: string;
+
+  beforeEach(() => {
+    // A global git config whose credential helper would answer first (and
+    // wrongly) if our reset didn't clear it — this is exactly the failure
+    // mode a host with `gh`/keychain credentials configured would hit.
+    ambientConfig = join(root, "ambient.gitconfig");
+    execFileSync("git", [
+      "config",
+      "--file",
+      ambientConfig,
+      "credential.helper",
+      `!f() { echo username=ambient; echo password=${AMBIENT_SECRET}; }; f`,
+    ]);
+  });
+
+  /** Runs `git <args> credential fill` for github.com with the given env. */
+  function credentialFill(args: string[], env: NodeJS.ProcessEnv): string {
+    return execFileSync("git", [...args, "credential", "fill"], {
+      input: "protocol=https\nhost=github.com\n\n",
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: ambientConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...env,
+      },
+    });
+  }
+
+  it("resolves to x-access-token + $GIT_TOKEN, overriding the host's ambient helper", () => {
+    const out = credentialFill(CREDENTIAL_HELPER_ARGS, { GIT_TOKEN: FAKE_TOKEN });
+    expect(out).toContain("username=x-access-token");
+    expect(out).toContain(`password=${FAKE_TOKEN}`);
+    expect(out).not.toContain(AMBIENT_SECRET);
+  });
+
+  it("without the leading reset, the ambient helper wins (proving the reset is load-bearing)", () => {
+    // Drop the first two args (the `-c credential.helper=` reset); the ambient
+    // helper is now consulted first and answers with the wrong secret.
+    const withoutReset = CREDENTIAL_HELPER_ARGS.slice(2);
+    const out = credentialFill(withoutReset, { GIT_TOKEN: FAKE_TOKEN });
+    expect(out).toContain(`password=${AMBIENT_SECRET}`);
+    expect(out).not.toContain(`password=${FAKE_TOKEN}`);
   });
 });
