@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "p-queue": "^8.1.1",
     "smol-toml": "^1.7.0",
     "zod": "^4.4.3"
   },
