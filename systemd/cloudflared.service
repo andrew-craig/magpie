@@ -1,0 +1,45 @@
+# cloudflared.service — outbound-only Cloudflare Tunnel for magpie's webhook
+# ingress (PLAN.md Milestone 5). Runs `cloudflared tunnel run`, which reads
+# /etc/cloudflared/config.yml (rendered by scripts/setup-cloudflared.sh from
+# cloudflared/config.example.yml) for the tunnel name/UUID, credentials-file
+# path, and ingress rules (hostname -> http://localhost:8787).
+#
+# Note on `cloudflared service install`: cloudflared ships a built-in
+# subcommand that generates and installs an equivalent unit for you. We
+# commit this file instead (rather than relying on that command) so the
+# service definition is reviewable and reproducible from source control like
+# every other magpie systemd unit — install it by copying it into place
+# (see docs/cloudflared.md), not by running `cloudflared service install`.
+#
+# Install:
+#   sudo cp systemd/cloudflared.service /etc/systemd/system/cloudflared.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cloudflared.service
+#
+# This unit makes NO inbound listening socket on the host; cloudflared only
+# opens outbound connections to Cloudflare's edge network.
+
+[Unit]
+Description=Cloudflare Tunnel (magpie webhook ingress)
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Run as the same unprivileged user that owns ~/.cloudflared (cert.pem +
+# tunnel credentials JSON), set up by `cloudflared tunnel login` /
+# `cloudflared tunnel create`. Change to match whichever account you ran
+# scripts/setup-cloudflared.sh as (MAGPIE_CLOUDFLARED_USER).
+User=magpie
+Group=magpie
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
