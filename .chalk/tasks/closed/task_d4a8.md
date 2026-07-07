@@ -2,14 +2,14 @@
 id: task_d4a8
 title: smee.io dev relay setup
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:14Z
-updated_at: 2026-07-07T09:48:54Z
+updated_at: 2026-07-07T12:48:37Z
 ---
 Let GitHub webhooks reach the local webhook server during development without a public inbound port or the Cloudflare Tunnel (which lands in a later milestone).
 

@@ -2,14 +2,14 @@
 id: task_0daf
 title: PR diff generation
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:46Z
-updated_at: 2026-07-07T09:16:37Z
+updated_at: 2026-07-07T12:48:37Z
 ---
 Compute the unified diff of the PR from the checked-out workspace, to feed to Pi as the review input.
 
