@@ -7,8 +7,9 @@
 // GitHub App private key). See PLAN.md "Repository layout" / "Defaults
 // chosen" for the surrounding design.
 
-import { readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseToml, TomlError } from "smol-toml";
 import { z } from "zod";
 
@@ -106,9 +107,81 @@ export class ConfigError extends Error {
   }
 }
 
+// Directory containing this source file at runtime (packages/orchestrator/src
+// when run via tsx, packages/orchestrator/dist when run from the build).
+// Computed once from import.meta.url so the DEFAULT config location never
+// depends on process.cwd() — npm workspace scripts run with cwd set to the
+// orchestrator package dir, but the documented config.toml location is the
+// repo root, so cwd is the wrong thing to resolve against (see .env loading,
+// which has the same problem and was already fixed in the package.json
+// scripts via --env-file-if-exists=../../.env).
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Walk up from `startDir` looking for a directory containing `filename`.
+ * Returns the full path to that file, or `undefined` if no ancestor (up to
+ * and including the filesystem root) contains it.
+ */
+function findUp(startDir: string, filename: string): string | undefined {
+  let dir = startDir;
+  for (;;) {
+    const candidate = join(dir, filename);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * Walk up from `startDir` looking for the workspace/repo root, marked by a
+ * `.git` entry or a `package.json` with a `workspaces` field. Falls back to
+ * `startDir` itself if no marker is found on the way to the filesystem root
+ * (shouldn't happen for a normal checkout, but keeps this total).
+ */
+function findWorkspaceRoot(startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const pkgPath = join(dir, "package.json");
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+          workspaces?: unknown;
+        };
+        if (pkg.workspaces) return dir;
+      } catch {
+        // Malformed package.json on the way up — ignore and keep walking.
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return startDir;
+    dir = parent;
+  }
+}
+
+/**
+ * Default `config.toml` location when neither an explicit path nor
+ * `MAGPIE_CONFIG` is given. Independent of `process.cwd()`: walks up from
+ * `startDir` (this module's own directory in production) to the nearest
+ * ancestor that already contains `config.toml`, falling back to
+ * `<repo-root>/config.toml` (repo root = nearest ancestor with a `.git` dir
+ * or a `package.json` declaring `workspaces`) so that a missing-file error
+ * still points at the conventional location. Exported as a pure,
+ * dependency-injectable function so tests can exercise the walk-up logic
+ * against a hermetic fixture instead of the real repo layout.
+ */
+export function resolveDefaultConfigPath(startDir: string): string {
+  return (
+    findUp(startDir, "config.toml") ??
+    join(findWorkspaceRoot(startDir), "config.toml")
+  );
+}
+
 function resolveConfigPath(explicit?: string): string {
-  const candidate = explicit ?? process.env.MAGPIE_CONFIG ?? "config.toml";
-  return resolvePath(process.cwd(), candidate);
+  const candidate = explicit ?? process.env.MAGPIE_CONFIG;
+  if (candidate) return resolvePath(process.cwd(), candidate);
+  return resolveDefaultConfigPath(MODULE_DIR);
 }
 
 function formatZodIssue(issue: z.core.$ZodIssue): string {
@@ -119,8 +192,12 @@ function formatZodIssue(issue: z.core.$ZodIssue): string {
 /**
  * Load and validate the magpie configuration.
  *
- * Path resolution order: `configPath` argument -> `MAGPIE_CONFIG` env var ->
- * `./config.toml` (relative to `process.cwd()`).
+ * Path resolution order: `configPath` argument (resolved against
+ * `process.cwd()` if relative) -> `MAGPIE_CONFIG` env var (same) ->
+ * cwd-independent default (see {@link resolveDefaultConfigPath}), so the
+ * default location resolves the same way whether the process is launched
+ * from the repo root or from `packages/orchestrator/` (as the npm workspace
+ * `dev`/`start` scripts do).
  *
  * Throws {@link ConfigError} with every problem found aggregated into one
  * message if the file is missing/malformed, required fields are missing or
@@ -189,8 +266,14 @@ export function loadConfig(configPath?: string): Config {
   if (envPrivateKey) {
     githubPrivateKey = envPrivateKey;
   } else if (typeof rawPrivateKeyPath === "string" && rawPrivateKeyPath.length > 0) {
+    // A relative private_key_path is what the user wrote *in the TOML file*,
+    // so resolve it relative to that file's directory rather than
+    // process.cwd() — otherwise the meaning of the same config.toml would
+    // change depending on where the orchestrator happens to be launched
+    // from, which is exactly the cwd-dependence this task removes for the
+    // config file itself. Absolute paths are unaffected either way.
     try {
-      githubPrivateKey = readFileSync(resolvePath(process.cwd(), rawPrivateKeyPath), "utf-8");
+      githubPrivateKey = readFileSync(resolvePath(dirname(resolvedPath), rawPrivateKeyPath), "utf-8");
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       problems.push(

@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_ada6,task_0daf]
+blocked_by: [task_0daf]
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:58:00Z
-updated_at: 2026-07-05T22:58:00Z
+updated_at: 2026-07-06T12:43:45Z
 ---
 Run the Pi coding agent DIRECTLY ON THE HOST over the PR checkout + diff and capture a plain-text review summary.
 

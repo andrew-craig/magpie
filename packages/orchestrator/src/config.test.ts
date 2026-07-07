@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConfigError, loadConfig } from "./config.js";
+import { ConfigError, loadConfig, resolveDefaultConfigPath } from "./config.js";
 
 const REQUIRED_ENV = {
   MAGPIE_WEBHOOK_SECRET: "test-webhook-secret",
@@ -11,13 +11,16 @@ const REQUIRED_ENV = {
 
 let workDir: string;
 let savedEnv: NodeJS.ProcessEnv;
+let savedCwd: string;
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "magpie-config-test-"));
   savedEnv = { ...process.env };
+  savedCwd = process.cwd();
 });
 
 afterEach(() => {
+  process.chdir(savedCwd);
   rmSync(workDir, { recursive: true, force: true });
   // Restore process.env exactly: clear everything added/changed, then
   // restore original keys, so tests never leak env state into each other.
@@ -275,5 +278,87 @@ model = "anthropic/claude-sonnet-4.5"
     const config = loadConfig();
 
     expect(config.github.appId).toBe("123456");
+  });
+
+  it("resolves a relative private_key_path against the config file's directory, not process.cwd()", () => {
+    // The PEM lives next to config.toml in workDir, but the private_key_path
+    // in the TOML is written as a bare relative filename. If it were (still)
+    // resolved against process.cwd(), chdir-ing away from workDir before
+    // calling loadConfig would break resolution.
+    writePemFile();
+    const configPath = writeConfig(MINIMAL_TOML("github-app.pem"));
+    Object.assign(process.env, REQUIRED_ENV);
+
+    const unrelatedDir = mkdtempSync(join(tmpdir(), "magpie-config-cwd-"));
+    try {
+      process.chdir(unrelatedDir);
+
+      const config = loadConfig(configPath);
+
+      expect(config.secrets.githubPrivateKey).toContain("BEGIN PRIVATE KEY");
+    } finally {
+      rmSync(unrelatedDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveDefaultConfigPath", () => {
+  // These exercise the walk-up logic directly against a hermetic fixture
+  // tree (rather than the real repo layout) so the test doesn't depend on
+  // where this package happens to sit on disk.
+
+  it("finds an existing config.toml in an ancestor directory, however deeply nested the start dir is", () => {
+    const rootConfigPath = writeConfig("# fixture root config\n");
+    const nestedStartDir = join(workDir, "packages", "orchestrator", "src");
+    mkdirSync(nestedStartDir, { recursive: true });
+
+    expect(resolveDefaultConfigPath(nestedStartDir)).toBe(rootConfigPath);
+  });
+
+  it("falls back to the workspace root (marked by .git) when no ancestor has a config.toml", () => {
+    mkdirSync(join(workDir, ".git"));
+    const nestedStartDir = join(workDir, "packages", "orchestrator", "src");
+    mkdirSync(nestedStartDir, { recursive: true });
+
+    expect(resolveDefaultConfigPath(nestedStartDir)).toBe(
+      join(workDir, "config.toml"),
+    );
+  });
+
+  it("falls back to the workspace root (marked by a workspaces package.json) when there is no .git either", () => {
+    writeFileSync(
+      join(workDir, "package.json"),
+      JSON.stringify({ workspaces: ["packages/*"] }),
+      "utf-8",
+    );
+    const nestedStartDir = join(workDir, "packages", "orchestrator", "src");
+    mkdirSync(nestedStartDir, { recursive: true });
+
+    expect(resolveDefaultConfigPath(nestedStartDir)).toBe(
+      join(workDir, "config.toml"),
+    );
+  });
+
+  it("resolves the same file regardless of process.cwd() (cwd-independence)", () => {
+    const rootConfigPath = writeConfig("# fixture root config\n");
+    const nestedStartDir = join(workDir, "packages", "orchestrator", "src");
+    mkdirSync(nestedStartDir, { recursive: true });
+
+    const cwdA = mkdtempSync(join(tmpdir(), "magpie-config-cwdA-"));
+    const cwdB = mkdtempSync(join(tmpdir(), "magpie-config-cwdB-"));
+    try {
+      process.chdir(cwdA);
+      const resolvedFromA = resolveDefaultConfigPath(nestedStartDir);
+
+      process.chdir(cwdB);
+      const resolvedFromB = resolveDefaultConfigPath(nestedStartDir);
+
+      expect(resolvedFromA).toBe(rootConfigPath);
+      expect(resolvedFromB).toBe(rootConfigPath);
+      expect(resolvedFromA).toBe(resolvedFromB);
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true });
+      rmSync(cwdB, { recursive: true, force: true });
+    }
   });
 });

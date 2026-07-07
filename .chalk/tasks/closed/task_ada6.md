@@ -2,14 +2,14 @@
 id: task_ada6
 title: Workspace clone + credential stripping
 type: task
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:57:34Z
-updated_at: 2026-07-06T06:05:21Z
+updated_at: 2026-07-06T12:43:45Z
 ---
 Check out the PR head into a per-job workspace on the host, then remove all credentials from the checkout.
 
@@ -27,3 +27,6 @@ Acceptance criteria:
 - Cleanup fully removes the workspace directory.
 
 Dependencies: task_b5cf (installation token for the clone URL).
+
+## Review (tech lead) — APPROVED (security-critical, scrutinized)
+workspace.ts: createWorkspace({owner,repo,prNumber,headSha,token,workDir,baseUrlOverride?}) -> {dir, cleanup}. git init + named origin remote + fetch --filter=blob:none refs/pull/N/head + checkout --detach FETCH_HEAD. CORRECT ORDER: stripCredentials runs AFTER checkout, so blobless on-demand blob fetch still has an authenticated origin. Credential scrub: remote set-url origin <tokenless> (derived via URL parse, works for github + file:// fixture), rm .git/FETCH_HEAD, rm .git/logs; never writes credential helper/.git-credentials. All git via execFile (no shell); token redacted from all thrown git errors. Test greps ENTIRE workspace tree incl .git for token -> zero matches; also tests wrong-sha throw+cleanup, missing ref, double cleanup. Base URL injectable seam for hermetic local-fixture testing. 8 tests. Re-ran independently; merged tree 53/53.
