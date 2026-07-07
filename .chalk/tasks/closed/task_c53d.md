@@ -2,14 +2,14 @@
 id: task_c53d
 title: Pi host runner — run Pi against the diff
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:58:00Z
-updated_at: 2026-07-07T21:22:12Z
+updated_at: 2026-07-07T22:57:57Z
 ---
 Run the Pi coding agent DIRECTLY ON THE HOST over the PR checkout + diff and capture a plain-text review summary.
 
