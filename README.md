@@ -48,3 +48,9 @@ Currently this only starts the placeholder orchestrator entrypoint
 (`packages/orchestrator/src/index.ts`) — the webhook server, job queue, and reviewer
 container described in PLAN.md are not implemented yet (see the chalk tasks under
 `epic_04f9`).
+
+## Webhook ingress (production)
+
+For exposing the orchestrator's webhook endpoint to GitHub via an
+outbound-only Cloudflare Tunnel (no inbound ports), see
+[docs/cloudflared.md](docs/cloudflared.md) and `scripts/setup-cloudflared.sh`.
