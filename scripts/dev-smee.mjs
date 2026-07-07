@@ -46,14 +46,14 @@ if (!source) {
 }
 
 const port = process.env.MAGPIE_SMEE_PORT || 8787;
-const path = process.env.MAGPIE_SMEE_PATH || "/webhook";
+const rawPath = process.env.MAGPIE_SMEE_PATH || "/webhook";
+const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
 const target = `http://localhost:${port}${path}`;
 
 console.log(`[dev-smee] relaying ${source} -> ${target}`);
 
-const smee = new SmeeClient({ source, target, logger: console });
-
 try {
+  const smee = new SmeeClient({ source, target, logger: console });
   await smee.start();
   console.log(`[dev-smee] relay active: ${source} -> ${target}`);
 } catch (err) {
