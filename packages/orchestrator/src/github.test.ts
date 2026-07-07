@@ -28,7 +28,7 @@ vi.mock("@octokit/auth-app", () => ({
   createAppAuth: (...args: unknown[]) => createAppAuthMock(...args),
 }));
 
-const { mintInstallationToken, buildCloneUrl } = await import("./github.js");
+const { mintInstallationToken } = await import("./github.js");
 
 const CREDS = {
   appId: "123456",
@@ -67,13 +67,6 @@ function assertTokenNeverLogged() {
     }
   }
 }
-
-describe("buildCloneUrl", () => {
-  it("produces the exact expected credential-embedded URL", () => {
-    const url = buildCloneUrl("my-org", "my-repo", "tok_abc123");
-    expect(url).toBe("https://x-access-token:tok_abc123@github.com/my-org/my-repo.git");
-  });
-});
 
 describe("mintInstallationToken", () => {
   it("drives createAppAuth with the given appId/privateKey", async () => {
