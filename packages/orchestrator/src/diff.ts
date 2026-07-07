@@ -82,8 +82,13 @@ export async function computePrDiff(
   });
 
   const changedFiles = files.map((file) => file.filename);
+  // `additions`/`deletions` are typed as required `number` in GitHub's
+  // diff-entry schema, but this sum feeds the `maxDiffLines` security cap
+  // below: a missing field at runtime would make the sum `NaN`, and
+  // `NaN > maxDiffLines` is `false` — the cap would fail open on a huge PR.
+  // `?? 0` keeps a malformed/missing field from silently defeating the cap.
   const changedLineCount = files.reduce(
-    (total, file) => total + file.additions + file.deletions,
+    (total, file) => total + (file.additions ?? 0) + (file.deletions ?? 0),
     0,
   );
   const tooLarge = changedLineCount > maxDiffLines;

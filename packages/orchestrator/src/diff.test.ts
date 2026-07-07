@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Octokit } from "@octokit/rest";
 import { computePrDiff } from "./diff.js";
 
 // NOTE: everything here runs fully offline. We hand-roll a fake Octokit
@@ -45,7 +46,7 @@ describe("computePrDiff", () => {
     const { octokit, get, paginate } = fakeOctokit(files, diffText);
 
     const result = await computePrDiff({
-      octokit: octokit as never,
+      octokit: octokit as unknown as Octokit,
       owner: "acme",
       repo: "widgets",
       prNumber: 42,
@@ -83,7 +84,7 @@ describe("computePrDiff", () => {
     const { octokit, get } = fakeOctokit(files);
 
     const result = await computePrDiff({
-      octokit: octokit as never,
+      octokit: octokit as unknown as Octokit,
       owner: "acme",
       repo: "widgets",
       prNumber: 7,
@@ -102,7 +103,7 @@ describe("computePrDiff", () => {
     const { octokit } = fakeOctokit([], "");
 
     const result = await computePrDiff({
-      octokit: octokit as never,
+      octokit: octokit as unknown as Octokit,
       owner: "acme",
       repo: "widgets",
       prNumber: 99,
