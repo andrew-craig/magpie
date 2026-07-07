@@ -27,6 +27,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+# cloudflared signals readiness via sd_notify only once it has established
+# outbound connections to Cloudflare's edge. Disable the start timeout so a
+# slow network or a briefly-unreachable edge at boot doesn't cause systemd to
+# SIGKILL the process before it finishes connecting (the default is 90s).
+# Restart=on-failure below still covers genuine crashes once it's up.
+TimeoutStartSec=0
 # Run as the same unprivileged user that owns ~/.cloudflared (cert.pem +
 # tunnel credentials JSON), set up by `cloudflared tunnel login` /
 # `cloudflared tunnel create`. `magpie` is a placeholder: you MUST change it

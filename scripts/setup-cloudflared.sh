@@ -106,7 +106,21 @@ if [[ "$MAGPIE_TUNNEL_SERVICE" != http://localhost:* && "$MAGPIE_TUNNEL_SERVICE"
   exit 1
 fi
 
-CLOUDFLARED_HOME="$(eval echo "~${MAGPIE_CLOUDFLARED_USER}")/.cloudflared"
+# Resolve the run-as user's home via getent (the passwd database) rather than
+# `eval echo ~user`: no shell eval of a username (which could carry special
+# characters), and it doubles as an existence check — a typo'd user is caught
+# here instead of silently producing a wrong ~/.cloudflared path downstream.
+# `|| true`: getent exits non-zero when the user has no passwd entry, which
+# under `set -euo pipefail` would abort the script before we can print a
+# useful message — swallow it and let the emptiness check below report it.
+USER_HOME="$(getent passwd "$MAGPIE_CLOUDFLARED_USER" | cut -d: -f6 || true)"
+if [[ -z "$USER_HOME" ]]; then
+  log "ERROR: user '$MAGPIE_CLOUDFLARED_USER' does not exist on this system"
+  log "(no passwd entry). Set MAGPIE_CLOUDFLARED_USER to the account whose"
+  log "~/.cloudflared holds cert.pem and the tunnel credentials file."
+  exit 1
+fi
+CLOUDFLARED_HOME="$USER_HOME/.cloudflared"
 
 log "hostname:        $MAGPIE_TUNNEL_HOSTNAME"
 log "tunnel name:     $MAGPIE_TUNNEL_NAME"
@@ -172,6 +186,12 @@ fi
 
 if [[ -f "$CLOUDFLARED_HOME/cert.pem" ]]; then
   log "cloudflared already authenticated ($CLOUDFLARED_HOME/cert.pem present)"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  # Under --dry-run, cert.pem is expected to be absent (the interactive login
+  # hasn't run yet). Don't exit — continue so the operator sees the full plan,
+  # with placeholder values standing in for what login/create would produce.
+  log "DRY-RUN: cloudflared not yet authenticated ($CLOUDFLARED_HOME/cert.pem"
+  log "absent); continuing to show what would be done."
 else
   log ""
   log "=========================================================================="
@@ -192,22 +212,14 @@ fi
 #    via `cloudflared tunnel list`).
 # ---------------------------------------------------------------------------
 
-TUNNEL_LIST_OUTPUT="$(cloudflared tunnel list --output json 2>/dev/null || echo '[]')"
-
+# Look up the tunnel's UUID by name from `cloudflared tunnel list`. We parse
+# the plain-text table (columns: ID  NAME  CREATED  CONNECTIONS) with awk
+# rather than `--output json` + python3, so the script carries no implicit
+# Python dependency. `$2 == name` matches the NAME column exactly and never
+# matches the header row (whose second column is the literal string "NAME").
 TUNNEL_UUID=""
-if command -v python3 >/dev/null 2>&1; then
-  TUNNEL_UUID="$(printf '%s' "$TUNNEL_LIST_OUTPUT" | python3 -c '
-import json, sys
-name = sys.argv[1]
-try:
-    tunnels = json.load(sys.stdin)
-except Exception:
-    tunnels = []
-for t in tunnels or []:
-    if t.get("name") == name:
-        print(t.get("id", ""))
-        break
-' "$MAGPIE_TUNNEL_NAME" 2>/dev/null || true)"
+if command -v cloudflared >/dev/null 2>&1; then
+  TUNNEL_UUID="$(cloudflared tunnel list 2>/dev/null | awk -v name="$MAGPIE_TUNNEL_NAME" '$2 == name {print $1}' || true)"
 fi
 
 if [[ -n "$TUNNEL_UUID" ]]; then
@@ -217,19 +229,7 @@ else
   run cloudflared tunnel create "$MAGPIE_TUNNEL_NAME"
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    TUNNEL_LIST_OUTPUT="$(cloudflared tunnel list --output json 2>/dev/null || echo '[]')"
-    TUNNEL_UUID="$(printf '%s' "$TUNNEL_LIST_OUTPUT" | python3 -c '
-import json, sys
-name = sys.argv[1]
-try:
-    tunnels = json.load(sys.stdin)
-except Exception:
-    tunnels = []
-for t in tunnels or []:
-    if t.get("name") == name:
-        print(t.get("id", ""))
-        break
-' "$MAGPIE_TUNNEL_NAME" 2>/dev/null || true)"
+    TUNNEL_UUID="$(cloudflared tunnel list 2>/dev/null | awk -v name="$MAGPIE_TUNNEL_NAME" '$2 == name {print $1}' || true)"
   else
     TUNNEL_UUID="<TUNNEL-UUID>"
   fi
