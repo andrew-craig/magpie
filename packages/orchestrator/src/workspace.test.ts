@@ -8,9 +8,9 @@ import { CREDENTIAL_HELPER_ARGS, createWorkspace } from "./workspace.js";
 // NOTE: everything here runs fully offline against a local bare-git fixture
 // repo — no network, no real GitHub credentials. We use the `baseUrlOverride`
 // test seam documented on `CreateWorkspaceParams` to point `createWorkspace`
-// at a `file://` path instead of deriving a github.com URL via
-// `buildCloneUrl`. The fake "token" below is never a real credential; it's
-// only used to prove it doesn't end up anywhere in the resulting workspace.
+// at a `file://` path instead of deriving a github.com URL. The fake "token"
+// below is never a real credential; it's only used to prove it doesn't end up
+// anywhere in the resulting workspace.
 
 const FAKE_TOKEN = "ghs_super-secret-installation-token-fixture-xyz";
 

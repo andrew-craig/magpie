@@ -17,10 +17,8 @@
 // SECURITY: per the project's core threat model (see PLAN.md /
 // AGENTS.md — capability separation, indirect prompt injection), this token
 // is a real secret. It is never given to the reviewer container, and it must
-// never be written to disk or logged anywhere on the host either. Treat
-// every value that embeds it (the token itself, and the clone URL built from
-// it in {@link buildCloneUrl}) as write-once, memory-only, host-side-git-use
-// only.
+// never be written to disk or logged anywhere on the host either. Treat the
+// token itself as write-once, memory-only, host-side-git-use only.
 //
 // We use `@octokit/auth-app` for the JWT + installation-token exchange and
 // `@octokit/rest` for a ready-to-use authenticated client (needed later for
@@ -97,18 +95,6 @@ export function createInstallationOctokit(
       installationId: params.installationId,
     },
   });
-}
-
-/**
- * Build a credential-embedded HTTPS clone URL for host-side `git` use.
- *
- * SECURITY: the returned string embeds a live installation token in plain
- * text. NEVER log it, write it to disk, or otherwise persist it — pass it
- * directly to `git` (e.g. as a remote URL for a single `clone`/`fetch`
- * invocation) and let it fall out of scope immediately after.
- */
-export function buildCloneUrl(owner: string, repo: string, token: string): string {
-  return `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
 }
 
 /** The slice of {@link Config} that GitHub App auth needs. */
