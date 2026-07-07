@@ -2,14 +2,14 @@
 id: task_560a
 title: Remove unused buildCloneUrl token-in-URL footgun from github.ts
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-07T00:01:32Z
-updated_at: 2026-07-07T08:40:31Z
+updated_at: 2026-07-07T09:12:33Z
 ---
 
 ## Context
