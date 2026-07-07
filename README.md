@@ -54,3 +54,9 @@ container described in PLAN.md are not implemented yet (see the chalk tasks unde
 For exposing the orchestrator's webhook endpoint to GitHub via an
 outbound-only Cloudflare Tunnel (no inbound ports), see
 [docs/cloudflared.md](docs/cloudflared.md) and `scripts/setup-cloudflared.sh`.
+
+## Webhook ingress (development)
+
+For receiving real GitHub webhook deliveries locally during development,
+without a public inbound port, see [docs/smee.md](docs/smee.md) and
+`npm run dev:smee`.
