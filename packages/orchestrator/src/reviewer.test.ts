@@ -227,6 +227,42 @@ describe("runReview", () => {
     // process died from SIGTERM rather than needing a SIGKILL escalation.
     expect(elapsedMs).toBeLessThan(4_000);
   }, 10_000);
+
+  it("kills pi and resolves ok:false/aborted promptly when the caller's AbortSignal fires", async () => {
+    // Simulates queue.ts's backstop timeout firing (see queue.ts's
+    // QUEUE_TIMEOUT_GRACE_MS): the AbortSignal fires well before this
+    // module's own `jobTimeoutSeconds` timeout would, so runReview must kill
+    // `pi` and settle on its own rather than waiting out the (here, much
+    // longer) configured timeout.
+    const piBinary = writeFakePi(
+      [
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        // Never emits assistant output and never exits on its own — only
+        // SIGTERM (from the abort signal) should end this process.
+        `setTimeout(() => {}, 60000);`,
+      ].join("\n"),
+    );
+
+    const controller = new AbortController();
+    const start = Date.now();
+
+    const resultPromise = runReview(
+      baseParams({ piBinary, config: testConfig({ jobTimeoutSeconds: 600 }), signal: controller.signal }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+
+    const result = await resultPromise;
+    const elapsedMs = Date.now() - start;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("aborted");
+    }
+    // Proves it did NOT wait anywhere near the (600s) configured timeout.
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
 });
 
 describe("buildPromptPayload (untrusted-data fence)", () => {

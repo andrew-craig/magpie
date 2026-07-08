@@ -65,6 +65,18 @@ export interface RunReviewParams {
    * real `pi` binary or a live LLM.
    */
   piBinary?: string;
+  /**
+   * The queue's per-job abort signal (see queue.ts's `JobRunner`/`#runOne`).
+   * The queue's own timeout is a strictly-later backstop over this module's
+   * own `config.limits.jobTimeoutSeconds` timeout (see queue.ts's module doc
+   * comment and `QUEUE_TIMEOUT_GRACE_MS`) — it should normally never fire
+   * before `runReview`'s own timeout above. If it ever does (this module
+   * failed to honour its own budget for some reason), `pi` is killed exactly
+   * like a timeout: SIGTERM, then SIGKILL after `KILL_GRACE_MS` if it hasn't
+   * exited, and `runReview` still resolves (never throws) with
+   * `{ ok: false, reason: "aborted" }`.
+   */
+  signal?: AbortSignal;
 }
 
 /** Token/cost telemetry summed across every assistant turn in the run. */
@@ -105,7 +117,7 @@ export type ReviewResult =
  * callers can always post a "review failed" note instead of going silent.
  */
 export async function runReview(params: RunReviewParams): Promise<ReviewResult> {
-  const { workspaceDir, diff, changedFiles, prTitle, prBody, config } = params;
+  const { workspaceDir, diff, changedFiles, prTitle, prBody, config, signal } = params;
   const piBinary = params.piBinary ?? process.env.MAGPIE_PI_BIN ?? "pi";
   const jobTimeoutSeconds = config.limits.jobTimeoutSeconds;
   const timeoutMs = jobTimeoutSeconds * 1000;
@@ -180,18 +192,40 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     let agentEndMessages: unknown[] | undefined;
 
     let timedOut = false;
+    let aborted = false;
     let killGraceTimer: NodeJS.Timeout | undefined;
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
+
+    /** SIGTERM now, SIGKILL after `KILL_GRACE_MS` if still alive — shared by the timeout and the abort-signal paths below. */
+    const startKillSequence = (): void => {
       child.kill("SIGTERM");
       killGraceTimer = setTimeout(() => {
         child.kill("SIGKILL");
       }, KILL_GRACE_MS);
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      startKillSequence();
     }, timeoutMs);
+
+    // Queue backstop: if the caller's AbortSignal fires (see this param's
+    // doc comment on `RunReviewParams.signal`), kill `pi` the same way a
+    // timeout would and resolve `{ ok: false, reason: "aborted" }` once the
+    // child actually exits (see the 'close' handler below) — never throws.
+    const onAbort = (): void => {
+      aborted = true;
+      startKillSequence();
+    };
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     const clearTimers = (): void => {
       clearTimeout(timeoutTimer);
       if (killGraceTimer) clearTimeout(killGraceTimer);
+      signal?.removeEventListener("abort", onAbort);
     };
 
     /** Feeds one raw NDJSON line into the running parse state. */
@@ -253,6 +287,11 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
       if (timedOut) {
         finish({ ok: false, reason: `timeout after ${jobTimeoutSeconds}s` });
+        return;
+      }
+
+      if (aborted) {
+        finish({ ok: false, reason: "aborted" });
         return;
       }
 

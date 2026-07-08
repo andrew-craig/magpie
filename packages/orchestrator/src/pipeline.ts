@@ -155,9 +155,13 @@ export function createReviewPipeline(
       );
     }
 
+    if (signal.aborted) return;
+
     logger.info({ event: "minting-token", ...jobLogFields(job) });
     const { token } = await mintToken(config, job.installationId);
     const octokit = makeOctokit(token);
+
+    if (signal.aborted) return;
 
     const workspace = await makeWorkspace({
       owner: job.owner,
@@ -230,8 +234,17 @@ export function createReviewPipeline(
           prBody: pr.body ?? "",
           config,
           piBinary: deps.piBinary,
+          signal,
         });
       }
+
+      // NO DOUBLE-HANDLING: if the queue's backstop timeout already fired
+      // (see queue.ts), it has already recorded this job as "timed-out" and
+      // may already be running/have run its own cleanup. Publishing a review
+      // comment here too would double-handle the same job. `runReview` above
+      // itself resolves promptly once `signal` aborts (never throws), so this
+      // check catches that case before we ever call `publishReview`.
+      if (signal.aborted) return;
 
       logger.info({
         event: "publishing-review",
