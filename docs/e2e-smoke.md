@@ -16,3 +16,5 @@ to the orchestrator and come back as a single review comment on the PR.
 If no comment appears, trace the delivery in GitHub App settings → Advanced →
 Recent Deliveries (a non-200 there points at ingress or HMAC), then the
 orchestrator logs (mint-token → clone → diff → review → publish).
+
+See also the README "Reproducing an end-to-end review" runbook.
