@@ -24,9 +24,34 @@ async function main(): Promise<void> {
   const { runJob, cleanupJob } = createReviewPipeline(config);
   const filter = createPullRequestFilter(config, (job) => {
     // `JobQueue.enqueue` resolves with a `JobOutcome` and never rejects (see
-    // queue.ts), but `EnqueueJob` only wants `void | Promise<void>` — discard
-    // the resolved outcome rather than propagate it.
-    void queue.enqueue(job, runJob, cleanupJob);
+    // queue.ts). We don't block the webhook handler on it, but we DO observe
+    // the settled outcome so a failed/timed-out job surfaces *why* — the queue
+    // logs only the terminal status, and the error it carries would otherwise
+    // be silently dropped here (the composition root is the only place that
+    // sees the `JobOutcome`). The reason is never a secret: pipeline stages
+    // that touch the token redact it from their own errors (see workspace.ts).
+    void queue.enqueue(job, runJob, cleanupJob).then((outcome) => {
+      if (outcome.outcome === "failed" || outcome.outcome === "timed-out") {
+        const error =
+          outcome.error instanceof Error
+            ? {
+                name: outcome.error.name,
+                message: outcome.error.message,
+                stack: outcome.error.stack,
+              }
+            : outcome.error;
+        console.error(
+          JSON.stringify({
+            level: "error",
+            event: "job-failed",
+            id: outcome.id,
+            outcome: outcome.outcome,
+            durationMs: outcome.durationMs,
+            error,
+          }),
+        );
+      }
+    });
   });
   const server = createWebhookServer(config, filter);
 

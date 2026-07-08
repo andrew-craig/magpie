@@ -2,14 +2,14 @@
 id: task_9b61
 title: End-to-end integration on a test repo
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-05T22:58:17Z
-updated_at: 2026-07-08T08:32:35Z
+updated_at: 2026-07-08T11:53:10Z
 ---
 Wire the pieces into one pipeline and prove the full loop against a real test repo — the milestone exit criterion.
 
@@ -73,14 +73,28 @@ is the test repo.
 ### Gates (tech-lead ran in worktree AND on the PR branch)
 - [x] `npm run build` (tsc) clean; `npm test` all green: **81 passed** (76 prior + 5 new).
 
-### Live acceptance (host, post-merge — NOT the subagent) — PENDING
-Ingress decision: **cloudflared** (production path), per CTO. NOT yet provisioned —
-only the config template + setup script from PR #11 exist; no `~/.cloudflared`, no
-rendered config.yml, service inactive. Provisioning needs a Cloudflare account + a
-domain on a CF-managed zone + `cloudflared tunnel login/create` + DNS route.
-- [ ] Provision the tunnel; point the GitHub App webhook at the tunnel hostname.
-- [ ] `npm run dev`, open a non-draft PR on andrew-craig/magpie, confirm exactly one
-  magpie comment posts and the workspace is cleaned up.
+### Live acceptance (host) — PASSED 2026-07-08
+Ingress: **cloudflared** (production path). CTO did `cloudflared tunnel login` + owns
+`seatrain.net` on a CF zone; I ran `./scripts/setup-cloudflared.sh magpie.seatrain.net`
+(created tunnel `magpie` 8494ac6c…, DNS CNAME, rendered /etc/cloudflared/config.yml →
+127.0.0.1:8787), installed+started `cloudflared.service` (User/Group=operator). Verified
+public path: `POST https://magpie.seatrain.net/webhook` → 400 (HMAC gate), `/healthz` → 200.
+CTO set the GitHub App webhook URL → that hostname + enabled pull_request events.
+- [x] Tunnel provisioned; GitHub App webhook points at magpie.seatrain.net/webhook.
+- [x] Pushed to test PR #19 (branch magpie-e2e-test off main) → synchronize delivery →
+  full pipeline ran: mint-token → diff → **live Pi review (turns=5, $0.0217, ~81s)** →
+  published ONE `magpie-reviewer[bot]` COMMENT (id 4914454133) with the `<!-- magpie-review -->`
+  marker + 🐦 header + usage footer; workspace cleaned up; outcome=success. Comment count=1
+  (no dupes). Reviewer even caught a real dangling-README-reference in the test doc.
+
+### Two host-config fixes found during the live run (not code bugs)
+1. **EACCES on `/var/lib/magpie`** — default `work_dir` wasn't provisioned for the
+   `operator` user. Fixed: `sudo mkdir -p /var/lib/magpie/work && chown operator`. (When
+   magpie later runs under its own systemd unit, `StateDirectory=magpie` handles this.)
+2. **Failed jobs logged no reason** — the queue logs only terminal status; index.ts did
+   `void queue.enqueue(...)`, dropping `JobOutcome.error`. Fixed in index.ts: observe the
+   settled outcome and `console.error` a `job-failed` line (redaction already handled
+   upstream in workspace.ts). This surfaced fix #1 immediately. Folded into PR #18.
 
 ## Review (tech-lead, 2026-07-08)
 
@@ -104,4 +118,6 @@ re-ran gates on the PR branch. Outcome:
   ...)` infers an empty-tuple `mock.calls[0]`, so `.calls[0][0]` fails a strict
   `tsc --noEmit` even though vitest's transpile-only run passes. See [[magpie-m1-process]].
 
-Gates: tsc clean, 81/81. Remaining work is the live cloudflared acceptance run (above).
+Gates: tsc clean, 81/81. **Live cloudflared acceptance run PASSED** (see above) — M1
+walking skeleton proven end-to-end on a real PR. Added `job-failed` error logging to
+index.ts during the live run (gates still 81/81). Closing task; M1 exit criterion met.
