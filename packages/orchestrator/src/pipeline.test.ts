@@ -319,4 +319,163 @@ describe("createReviewPipeline / runJob", () => {
     const body = createComment.mock.calls[0][0].body as string;
     expect(body).not.toContain(FAKE_TOKEN);
   });
+
+  // The happy-path test above only proves the token never leaks when the job
+  // *succeeds*. But the installation token is live in scope for every stage
+  // between mintToken and workspace cleanup (PR metadata fetch, diff fetch),
+  // and a failure in any of those stages propagates its error out through
+  // `runJob` and on into index.ts's job-failed logging (see index.ts's
+  // `logJobOutcome`, which serializes `{name, message, stack}` of whatever
+  // error the queue caught). These cases drive a FAILURE through each
+  // post-mint stage and assert the token never appears in the rejection
+  // (serialized the same way logJobOutcome would) or in anything logged
+  // during the run.
+  describe("token never leaks when a post-mint stage fails", () => {
+    /** Serializes an unknown rejection the same way index.ts's logJobOutcome does. */
+    function serializeLikeJobFailedHandler(err: unknown): string {
+      const error =
+        err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err;
+      return JSON.stringify({ event: "job-failed", outcome: "failed", error });
+    }
+
+    it("Case 1: PR-metadata fetch (pulls.get, no mediaType) rejects", async () => {
+      const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+      // A realistic failure shape (e.g. what @octokit/rest's RequestError
+      // looks like for a 404/401) — deliberately does NOT reference the
+      // token, since the invariant under test is that *pipeline.ts itself*
+      // never splices the token into an error or a log line while the
+      // token is in scope, not that a token we ourselves embedded survives.
+      const get = vi.fn(async () => {
+        throw new Error("Not Found");
+      });
+      const octokit = { paginate: vi.fn(), rest: { pulls: { get, listFiles: vi.fn() } }, issues: { createComment: vi.fn() } };
+      const { factory } = fakeWorkspaceFactory();
+
+      const logCalls: unknown[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+      const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+
+      let caught: unknown;
+      try {
+        const { runJob } = createReviewPipeline(testConfig(), {
+          mintToken,
+          makeOctokit: () => octokit as unknown as Octokit,
+          createWorkspace: factory,
+        });
+        try {
+          await runJob(testJob(), new AbortController().signal);
+          throw new Error("expected runJob to reject");
+        } catch (err) {
+          caught = err;
+        }
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      const serializedRejection = serializeLikeJobFailedHandler(caught);
+      expect(serializedRejection).not.toContain(FAKE_TOKEN);
+
+      const serializedLogs = JSON.stringify(logCalls);
+      expect(serializedLogs).not.toContain(FAKE_TOKEN);
+    });
+
+    it("Case 2: diff fetch (pulls.get with mediaType: diff) rejects", async () => {
+      const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+      // Same rationale as Case 1: a realistic diff-fetch failure, not one
+      // that echoes the token back.
+      const get = vi.fn(async (args: { mediaType?: { format: string } }) => {
+        if (args?.mediaType?.format === "diff") {
+          throw new Error("API rate limit exceeded");
+        }
+        return { data: { title: "Add feature", body: "Some PR body" } };
+      });
+      const paginate = vi.fn(async () => [{ filename: "src/a.ts", additions: 5, deletions: 1 }]);
+      const octokit = { paginate, rest: { pulls: { get, listFiles: vi.fn() } }, issues: { createComment: vi.fn() } };
+      const { factory, cleanupCalls } = fakeWorkspaceFactory();
+
+      const logCalls: unknown[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+      const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+
+      let caught: unknown;
+      try {
+        const { runJob } = createReviewPipeline(testConfig(), {
+          mintToken,
+          makeOctokit: () => octokit as unknown as Octokit,
+          createWorkspace: factory,
+        });
+        try {
+          await runJob(testJob(), new AbortController().signal);
+          throw new Error("expected runJob to reject");
+        } catch (err) {
+          caught = err;
+        }
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      const serializedRejection = serializeLikeJobFailedHandler(caught);
+      expect(serializedRejection).not.toContain(FAKE_TOKEN);
+
+      const serializedLogs = JSON.stringify(logCalls);
+      expect(serializedLogs).not.toContain(FAKE_TOKEN);
+
+      // workspace was created (post pulls.get metadata) so cleanup ran via
+      // the pipeline's try/finally even though the diff fetch failed.
+      expect(cleanupCalls).toHaveLength(1);
+    });
+
+    it("Case 3: mintToken itself rejects (documents the invariant trivially: no token was ever minted)", async () => {
+      const mintToken = vi.fn(async () => {
+        throw new Error("failed to mint installation token");
+      });
+      const { octokit } = fakeOctokit({ title: "x", body: "", files: [], diffText: "" });
+      const { factory } = fakeWorkspaceFactory();
+
+      const logCalls: unknown[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+      const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        logCalls.push(args);
+      });
+
+      let caught: unknown;
+      try {
+        const { runJob } = createReviewPipeline(testConfig(), {
+          mintToken,
+          makeOctokit: () => octokit as unknown as Octokit,
+          createWorkspace: factory,
+        });
+        try {
+          await runJob(testJob(), new AbortController().signal);
+          throw new Error("expected runJob to reject");
+        } catch (err) {
+          caught = err;
+        }
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      const serializedRejection = serializeLikeJobFailedHandler(caught);
+      expect(serializedRejection).not.toContain(FAKE_TOKEN);
+
+      const serializedLogs = JSON.stringify(logCalls);
+      expect(serializedLogs).not.toContain(FAKE_TOKEN);
+    });
+  });
 });
