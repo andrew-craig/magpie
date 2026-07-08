@@ -44,10 +44,31 @@ npm run dev     # run the orchestrator directly from TypeScript source (tsx)
 npm run start   # run the compiled output (after `npm run build`)
 ```
 
-Currently this only starts the placeholder orchestrator entrypoint
-(`packages/orchestrator/src/index.ts`) — the webhook server, job queue, and reviewer
-container described in PLAN.md are not implemented yet (see the chalk tasks under
-`epic_04f9`).
+Both scripts now boot the full Milestone 1 pipeline
+(`packages/orchestrator/src/index.ts`): a webhook server (`server.ts`) verifies and
+forwards `pull_request` deliveries through the repo-allowlist/event filter (`filter.ts`)
+into an in-process job queue (`queue.ts`), which runs each accepted PR through the review
+pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the PR head
+credential-free (`workspace.ts`), fetch the diff (`diff.ts`), run the Pi reviewer on the
+host (`reviewer.ts`), and publish exactly one summary comment back to the PR
+(`publisher.ts`). The process shuts down gracefully on `SIGINT`/`SIGTERM`. The container
+sandbox, `report_findings` inline comments, and the LiteLLM gateway described in PLAN.md
+are still later milestones (see the chalk tasks under `epic_04f9`).
+
+### Reproducing an end-to-end review
+
+1. Configure `.env` (`MAGPIE_WEBHOOK_SECRET`, `MAGPIE_LLM_API_KEY`) and `config.toml`
+   (add the test repo to `repo_allowlist`) as described above.
+2. Expose the webhook endpoint and point the GitHub App's webhook URL at it, using
+   whichever ingress you run: a `cloudflared` tunnel for the real/production path
+   (see [docs/cloudflared.md](docs/cloudflared.md)) or a smee.io channel for local dev
+   (set `MAGPIE_SMEE_URL` in `.env`; see [docs/smee.md](docs/smee.md)).
+3. Start the orchestrator with `npm run dev`. For the smee path, also run `npm run dev:smee`
+   in a second shell; the `cloudflared` tunnel needs no local relay process.
+4. Open a non-draft pull request on the allowlisted repo (or push a commit to an existing
+   one).
+5. Magpie mints an installation token, clones the PR head, runs the reviewer, and posts one
+   `## 🐦 Magpie review` comment on the PR.
 
 ## Webhook ingress (production)
 
