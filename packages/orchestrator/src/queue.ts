@@ -182,6 +182,17 @@ export class JobQueue {
   }
 
   /**
+   * Resolves once the queue is empty AND every currently-running job has
+   * settled (delegates to p-queue's own `onIdle()`). Used by shutdown.ts to
+   * drain in-flight jobs before the process exits, so each job's own cleanup
+   * (e.g. pipeline.ts's `finally { await workspace.cleanup() }`) gets a
+   * chance to run instead of being killed mid-`await`.
+   */
+  onIdle(): Promise<void> {
+    return this.#queue.onIdle();
+  }
+
+  /**
    * Enqueue a job for processing.
    *
    * If another job for the same `owner/repo/prNumber` is still queued (not
