@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ReviewResult, ReviewUsage } from "./reviewer.js";
 import {
+  fenceReason,
   MAGPIE_REVIEW_MARKER,
   publishReview,
   type MinimalIssuesClient,
@@ -124,6 +125,37 @@ describe("publishReview", () => {
     expect(failBody).not.toMatch(/ghs_/);
   });
 
+  it("renders a markdown-sensitive failure reason verbatim inside a code fence", async () => {
+    const { client, createComment } = fakeClient();
+    const reason = "pi exited: _foo_ **bar** <tag> at path/to/file_name.ts";
+    const result: ReviewResult = { ok: false, reason };
+
+    await publishReview({ ...BASE_PARAMS, octokit: client, result });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    // The raw text is preserved intact (underscores/asterisks/tags untouched).
+    expect(body).toContain(reason);
+    // ...and it sits inside a fenced code block that renders it verbatim.
+    expect(body).toContain(`\`\`\`\n${reason}\n\`\`\``);
+  });
+
+  it("widens the code fence so an embedded backtick run cannot break out", async () => {
+    const { client, createComment } = fakeClient();
+    // Reason contains a triple-backtick run — a naive ``` fence would be closed
+    // early by it, letting the tail escape into interpreted markdown.
+    const reason = "provider said: ```rm -rf``` then _crashed_";
+    const result: ReviewResult = { ok: false, reason };
+
+    await publishReview({ ...BASE_PARAMS, octokit: client, result });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    // Reason still appears verbatim, unbroken.
+    expect(body).toContain(reason);
+    // The chosen fence is at least 4 backticks (one longer than the run of 3),
+    // wrapping the reason on its own line.
+    expect(body).toContain(`\`\`\`\`\n${reason}\n\`\`\`\``);
+  });
+
   it("includes the marker constant identically on both the ok and failure paths", async () => {
     const { client: okClient } = fakeClient();
     const { client: failClient } = fakeClient();
@@ -145,5 +177,20 @@ describe("publishReview", () => {
       .body as string;
     expect(okBody).toContain(MAGPIE_REVIEW_MARKER);
     expect(failBody).toContain(MAGPIE_REVIEW_MARKER);
+  });
+});
+
+describe("fenceReason", () => {
+  it("uses a 3-backtick fence when the reason has no backticks", () => {
+    expect(fenceReason("plain error")).toBe("```\nplain error\n```");
+  });
+
+  it("uses a fence one backtick longer than the longest embedded run", () => {
+    // Longest run is 4 backticks -> fence must be 5.
+    const reason = "a ```` b `` c";
+    const fenced = fenceReason(reason);
+    expect(fenced).toBe("`````\n" + reason + "\n`````");
+    // The inner run can never match the wider fence, so nothing breaks out.
+    expect(fenced.startsWith("`````\n")).toBe(true);
   });
 });

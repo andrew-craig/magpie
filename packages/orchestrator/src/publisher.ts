@@ -120,14 +120,45 @@ function buildFailureBody(result: { ok: false; reason: string }): string {
   // but never the installation token or LLM key — reviewer.ts's own doc
   // comments guarantee those are never placed in `reason`, and this function
   // does not append anything else that could carry a secret.
+  //
+  // ASYMMETRY (deliberate): the reason is rendered VERBATIM inside a fenced
+  // code block, whereas the ok-path `summary` is rendered as raw markdown.
+  // The summary is the Pi agent's authored review (file:line citations,
+  // finding lists) meant to render as markdown; the reason is unknown-shape
+  // machine error text (stderr, provider JSON, file paths with underscores,
+  // `<tag>`-like fragments, asterisks) that would corrupt the rendered comment
+  // — and mislead a reader — if interpolated as markdown.
   return [
     MAGPIE_REVIEW_MARKER,
     COMMENT_HEADER,
     "",
     "Magpie could not complete a review of this PR.",
     "",
-    `Reason: ${result.reason.trim()}`,
+    "Reason:",
+    fenceReason(result.reason.trim()),
   ].join("\n");
+}
+
+/**
+ * Wrap `reason` in a fenced code block that renders it verbatim.
+ *
+ * WHY: `reason` is unknown-shape error text (see {@link buildFailureBody}) and
+ * may itself contain a run of backticks — a naive triple-backtick fence would
+ * let such a run close the fence early and let the rest of the reason "break
+ * out" into interpreted markdown (the very corruption this fence prevents). So
+ * the fence length is computed as one more than the longest backtick run in
+ * the reason (floored at the CommonMark minimum of 3), which guarantees the
+ * inner text cannot terminate the fence. The reason sits on its own line
+ * between the open/close fences so a leading/trailing backtick can't merge
+ * with the fence.
+ */
+export function fenceReason(reason: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(reason.matchAll(/`+/g), (m) => m[0].length),
+  );
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}\n${reason}\n${fence}`;
 }
 
 /**
