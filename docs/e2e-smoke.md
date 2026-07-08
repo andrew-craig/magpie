@@ -20,3 +20,5 @@ orchestrator logs (mint-token → clone → diff → review → publish).
 See also the README "Reproducing an end-to-end review" runbook.
 
 <!-- e2e retry -->
+
+<!-- e2e retry 2 -->
