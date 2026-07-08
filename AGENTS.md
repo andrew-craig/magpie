@@ -21,9 +21,10 @@ git ops, diff, host Pi runner, publisher (implemented, see below). `packages/rev
 
 **Status:** Milestone 1 (walking skeleton) is implemented and works end-to-end: webhook →
 GitHub App auth → credential-free clone → GitHub-API diff → Pi run as a host subprocess → one
-summary PR comment → workspace cleanup. PR #20 (`pipeline-race-hardening`) additionally closed
-two follow-on races (queue-vs-review timeout ordering, and a checkout/diff head-SHA mismatch
-window). See `PLAN.md` for the full 6-milestone roadmap and what M2–M6 add.
+summary PR comment → workspace cleanup. A follow-on hardening pass (branch
+`pipeline-race-hardening`) additionally closes two races: queue-vs-review timeout ordering,
+and a checkout/diff head-SHA mismatch window. See `PLAN.md` for the full 6-milestone roadmap
+and what M2–M6 add.
 
 ## Implemented so far (Milestone 1)
 

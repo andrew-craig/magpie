@@ -263,6 +263,30 @@ describe("runReview", () => {
     // Proves it did NOT wait anywhere near the (600s) configured timeout.
     expect(elapsedMs).toBeLessThan(1_000);
   });
+
+  it("resolves ok:false/aborted WITHOUT spawning pi when the signal is already aborted", async () => {
+    // Fast path (see runReview): a signal that is aborted before the call
+    // must never spawn `pi`. The fake pi here would emit a normal summary if
+    // it ran, so getting `reason:"aborted"` (not that summary) proves the
+    // spawn was skipped.
+    const piBinary = writeFakePi(
+      [
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        `const msg = ${JSON.stringify(assistantMessage("SHOULD NOT APPEAR"))};`,
+        `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
+        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
+      ].join("\n"),
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runReview(baseParams({ piBinary, signal: controller.signal }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("aborted");
+    }
+  });
 });
 
 describe("buildPromptPayload (untrusted-data fence)", () => {

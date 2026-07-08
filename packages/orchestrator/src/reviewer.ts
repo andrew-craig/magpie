@@ -118,6 +118,14 @@ export type ReviewResult =
  */
 export async function runReview(params: RunReviewParams): Promise<ReviewResult> {
   const { workspaceDir, diff, changedFiles, prTitle, prBody, config, signal } = params;
+  // Fast path: if the queue's backstop already aborted before we even start,
+  // don't spawn `pi`, wire up listeners, or write to stdin — just resolve
+  // `{ ok: false, reason: "aborted" }` (the same result the mid-run abort path
+  // below produces). The `signal?.aborted` guard inside the Promise still
+  // covers an abort that lands between here and the spawn.
+  if (signal?.aborted) {
+    return { ok: false, reason: "aborted" };
+  }
   const piBinary = params.piBinary ?? process.env.MAGPIE_PI_BIN ?? "pi";
   const jobTimeoutSeconds = config.limits.jobTimeoutSeconds;
   const timeoutMs = jobTimeoutSeconds * 1000;
@@ -197,6 +205,11 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
     /** SIGTERM now, SIGKILL after `KILL_GRACE_MS` if still alive — shared by the timeout and the abort-signal paths below. */
     const startKillSequence = (): void => {
+      // Idempotent: if a kill is already in flight (e.g. the timeout fires
+      // while an abort's SIGTERM->SIGKILL grace is still counting down, or
+      // vice versa), don't re-SIGTERM or overwrite `killGraceTimer` — that
+      // would leak the first timer and reset the grace period.
+      if (killGraceTimer) return;
       child.kill("SIGTERM");
       killGraceTimer = setTimeout(() => {
         child.kill("SIGKILL");

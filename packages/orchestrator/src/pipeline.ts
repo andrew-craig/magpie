@@ -207,6 +207,11 @@ export function createReviewPipeline(
         return;
       }
 
+      // An abort can land during the metadata fetch above; short-circuit here
+      // so we don't spawn `pi` (or synthesize a summary) for a job the queue
+      // has already terminated.
+      if (signal.aborted) return;
+
       let result: ReviewResult;
       if (prDiff.tooLarge) {
         logger.info({
