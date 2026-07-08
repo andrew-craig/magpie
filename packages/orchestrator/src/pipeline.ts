@@ -16,15 +16,29 @@
 //      (see github.ts): that helper re-derives its own token internally via
 //      `authStrategy`, which would mean two tokens minted per job instead of
 //      one.
-//   3. Fetch PR title/body (needed by the reviewer prompt; the queue's
-//      `JobDescriptor` deliberately doesn't carry them — see queue.ts).
-//   4. Create the credential-free host workspace (workspace.ts) for the PR
+//   3. Create the credential-free host workspace (workspace.ts) for the PR
 //      head checkout. From here on the rest of the job body runs inside a
 //      `try/finally` so the workspace is always cleaned up, on every exit
 //      path (success, a thrown error, or a "review failed" result — the last
 //      of those is not an error at all, see step 6).
-//   5. Compute the PR diff via the GitHub API (diff.ts), capped by
+//   4. Compute the PR diff via the GitHub API (diff.ts), capped by
 //      `config.limits.maxDiffLines`.
+//   5. Fetch PR title/body/head sha (needed by the reviewer prompt; the
+//      queue's `JobDescriptor` deliberately doesn't carry title/body — see
+//      queue.ts). This call is deliberately made AFTER the diff fetch and
+//      AFTER the workspace checkout (which itself pins to `job.headSha` and
+//      fails closed if a force-push landed before checkout — see
+//      workspace.ts) so its `head.sha` can be compared against `job.headSha`
+//      to detect a force-push that landed *after* checkout but before/during
+//      the diff fetch (see HEAD VERIFY below) — the one race window
+//      workspace.ts's own pre-checkout check can't cover.
+//   5a. HEAD VERIFY: if the just-fetched `pr.head.sha` no longer matches
+//      `job.headSha`, the workspace (pinned to the old head) and the diff
+//      (fetched against the new head) are now an incoherent pair — publishing
+//      a review built from them could describe the wrong commit. Log and
+//      return WITHOUT publishing; a fresh webhook delivery for the new head
+//      will re-trigger a review of the current state (same benign-loss
+//      rationale as a crash mid-job — see PLAN.md §3).
 //   6. Turn the diff into a `ReviewResult`: an oversized diff never reaches
 //      `runReview` at all (diff.ts never even fetches the body — see its
 //      module doc comment) and instead gets a synthesized "skipped" summary;
@@ -145,12 +159,6 @@ export function createReviewPipeline(
     const { token } = await mintToken(config, job.installationId);
     const octokit = makeOctokit(token);
 
-    const { data: pr } = await octokit.rest.pulls.get({
-      owner: job.owner,
-      repo: job.repo,
-      pull_number: job.prNumber,
-    });
-
     const workspace = await makeWorkspace({
       owner: job.owner,
       repo: job.repo,
@@ -173,6 +181,27 @@ export function createReviewPipeline(
       });
 
       if (signal.aborted) return;
+
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner: job.owner,
+        repo: job.repo,
+        pull_number: job.prNumber,
+      });
+
+      // HEAD VERIFY: see the module doc comment (step 5a) for why this check
+      // is placed here — after the diff fetch, before either the tooLarge or
+      // runReview branch — and why a mismatch returns without publishing
+      // rather than throwing.
+      const actualHeadSha: string | undefined = pr.head?.sha;
+      if (actualHeadSha !== job.headSha) {
+        logger.error({
+          event: "head-sha-mismatch",
+          ...jobLogFields(job),
+          expected: job.headSha,
+          actual: actualHeadSha,
+        });
+        return;
+      }
 
       let result: ReviewResult;
       if (prDiff.tooLarge) {

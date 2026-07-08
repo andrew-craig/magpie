@@ -100,20 +100,32 @@ interface FakeFile {
 
 /**
  * Builds a fake Octokit exposing exactly the surface the pipeline touches:
- * `rest.pulls.get` (called twice with different args — once for PR metadata,
- * once by diff.ts with `mediaType: { format: "diff" }`), `rest.pulls.listFiles`
- * + `paginate` (diff.ts's file listing), and `issues.createComment`
- * (publisher.ts). Mirrors diff.test.ts's / publisher.test.ts's fake-Octokit
- * pattern.
+ * `rest.pulls.get` (called twice with different args — once for PR metadata
+ * (now also carrying `head.sha`, used by the HEAD VERIFY race check — see
+ * pipeline.ts), once by diff.ts with `mediaType: { format: "diff" }`),
+ * `rest.pulls.listFiles` + `paginate` (diff.ts's file listing), and
+ * `issues.createComment` (publisher.ts). Mirrors diff.test.ts's /
+ * publisher.test.ts's fake-Octokit pattern.
+ *
+ * `head.sha` defaults to `"deadbeef"` — the same default `testJob()` uses for
+ * `headSha` — so every existing test gets a MATCHING head unless it opts into
+ * a mismatch via `opts.head`.
  */
-function fakeOctokit(opts: { title: string; body: string | null; files: FakeFile[]; diffText: string }) {
+function fakeOctokit(opts: {
+  title: string;
+  body: string | null;
+  files: FakeFile[];
+  diffText: string;
+  head?: { sha: string };
+}) {
   const listFiles = vi.fn();
   const paginate = vi.fn(async () => opts.files);
+  const head = opts.head ?? { sha: "deadbeef" };
   const get = vi.fn(async (args: { mediaType?: { format: string } }) => {
     if (args?.mediaType?.format === "diff") {
       return { data: opts.diffText };
     }
-    return { data: { title: opts.title, body: opts.body } };
+    return { data: { title: opts.title, body: opts.body, head } };
   });
   const createComment = vi.fn(async (_args: { owner: string; repo: string; issue_number: number; body: string }) => ({
     data: { id: 42, html_url: "https://github.com/acme/widgets/pull/7#issuecomment-42" },
@@ -280,6 +292,49 @@ describe("createReviewPipeline / runJob", () => {
     expect(cleanupCalls).toHaveLength(1);
   });
 
+  it("head-sha race: a force-push landing after checkout aborts the job without publishing", async () => {
+    // The metadata `get` call (fetched AFTER the diff, per pipeline.ts's HEAD
+    // VERIFY reorder) now reports a DIFFERENT head sha than the workspace was
+    // checked out at (`job.headSha` stays "deadbeef" — see `testJob()`) —
+    // simulating a force-push that landed after checkout but before/during
+    // the diff fetch. The pipeline must abort (no publish) rather than
+    // publish a review built from an incoherent workspace/diff pair.
+    const { octokit, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      head: { sha: "cafef00d" },
+    });
+    const { factory, cleanupCalls } = fakeWorkspaceFactory();
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+
+    const errCalls: unknown[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errCalls.push(args);
+    });
+
+    try {
+      const { runJob } = createReviewPipeline(testConfig(), {
+        mintToken,
+        makeOctokit: () => octokit as unknown as Octokit,
+        createWorkspace: factory,
+      });
+
+      await runJob(testJob(), new AbortController().signal);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(createComment).not.toHaveBeenCalled();
+    expect(cleanupCalls).toHaveLength(1);
+
+    const serializedErrLogs = JSON.stringify(errCalls);
+    expect(serializedErrLogs).toContain("head-sha-mismatch");
+    expect(serializedErrLogs).toContain("deadbeef");
+    expect(serializedErrLogs).toContain("cafef00d");
+  });
+
   it("never logs or publishes the installation token", async () => {
     const { octokit, createComment } = fakeOctokit({
       title: "Add feature",
@@ -345,10 +400,17 @@ describe("createReviewPipeline / runJob", () => {
       // token, since the invariant under test is that *pipeline.ts itself*
       // never splices the token into an error or a log line while the
       // token is in scope, not that a token we ourselves embedded survives.
-      const get = vi.fn(async () => {
+      // The diff fetch (computePrDiff, called BEFORE the metadata fetch — see
+      // pipeline.ts's HEAD VERIFY reorder) must succeed here so the metadata
+      // (non-diff) `get` call below is actually the one that fails.
+      const paginate = vi.fn(async () => []);
+      const get = vi.fn(async (args: { mediaType?: { format: string } }) => {
+        if (args?.mediaType?.format === "diff") {
+          return { data: "" };
+        }
         throw new Error("Not Found");
       });
-      const octokit = { paginate: vi.fn(), rest: { pulls: { get, listFiles: vi.fn() } }, issues: { createComment: vi.fn() } };
+      const octokit = { paginate, rest: { pulls: { get, listFiles: vi.fn() } }, issues: { createComment: vi.fn() } };
       const { factory } = fakeWorkspaceFactory();
 
       const logCalls: unknown[] = [];
