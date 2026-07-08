@@ -2,14 +2,14 @@
 id: task_d785
 title: Stagger queue-timeout vs runReview-timeout and propagate AbortSignal into runReview
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-08T13:00:25Z
-updated_at: 2026-07-08T13:00:25Z
+updated_at: 2026-07-08T22:11:23Z
 ---
 
 ## Problem (from PR #18 review — Magpie self-review + Gemini, both converge)
@@ -48,3 +48,19 @@ AbortSignal-propagation change.
 - Deferred from PR #18 (Valid-but-defer). Touches reviewer.ts's tested signature
   and is exactly the "future milestone" hardening Gemini flagged.
 - Group with task_a2db (head-SHA race) — both are pipeline/job race-hardening.
+
+## Review (tech-lead, 2026-07-09) — IMPLEMENTED, in PR #21, awaiting CTO merge
+
+All four parts done: (1) stagger — `queue.ts` exports `QUEUE_TIMEOUT_GRACE_MS
+= 30_000`, `jobQueueOptionsFromConfig.jobTimeoutMs = jobTimeoutSeconds*1000 +
+grace` (queue = backstop over runReview's own budget). (2) `reviewer.ts`
+`RunReviewParams.signal?`; shared `startKillSequence()` (SIGTERM→SIGKILL) used by
+timeout + abort; `aborted` flag checked BEFORE `code!==0` in `close` →
+`{ok:false,"aborted"}`, never throws; listener removed in `clearTimers`.
+(3) pipeline skips publish when `signal.aborted` (no double-handling).
+(4) `signal.aborted` guards before mintToken/createWorkspace. index.ts drain
+grace reuses the padded `jobTimeoutMs`. Tests: stagger assertion; reviewer abort
+(hanging fake pi, resolves <1s); pipeline pre-abort/mid-mint/mid-review → no
+publish. NOTE footgun: `close(code, signal)` param shadows the AbortSignal
+inside that handler — benign (abort uses the `aborted` flag). Tech-lead review =
+APPROVE; gates: tsc clean, 97/97. Commit fde161d. Close on PR #21 merge.

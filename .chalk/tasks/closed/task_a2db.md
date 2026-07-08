@@ -2,14 +2,14 @@
 id: task_a2db
 title: Close head-SHA race between workspace checkout and API-fetched diff
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-07T12:25:19Z
-updated_at: 2026-07-07T12:25:19Z
+updated_at: 2026-07-08T22:11:23Z
 ---
 
 ## Problem
@@ -51,3 +51,19 @@ lean that way unless implementation reveals a problem.
       `diff.test.ts`).
 - [ ] Mismatch outcome is observable in job logs (aborted/requeued, with both
       SHAs logged).
+
+## Review (tech-lead, 2026-07-09) — IMPLEMENTED, in PR #21, awaiting CTO merge
+
+Implemented Option 1 with a refinement: `createWorkspace` already fails closed
+for a force-push BEFORE checkout (verifies `HEAD == job.headSha`), so the only
+uncovered window is a force-push AFTER checkout but before/during the diff
+fetch. Fix (pipeline.ts): metadata `pulls.get` (title/body/head.sha) moved to
+AFTER `computePrDiff`; `if (pr.head?.sha !== job.headSha)` → `logger.error({
+event:"head-sha-mismatch", expected, actual })` + return (no publish, no throw);
+`finally` still cleans workspace; placed before the tooLarge branch. Test:
+head "cafef00d" vs job "deadbeef" → no publish, workspace cleaned, both SHAs
+logged. Token-leak Case 1 adjusted so the *metadata* fetch is the rejecting one.
+Tech-lead review = APPROVE; gates re-run independently: tsc clean, 97/97.
+Branch `pipeline-race-hardening`, commit 3d4a152. Close on PR #21 merge.
+(NB: originally shipped as PR #20; that was accidentally pushed to main then
+reverted — re-opened as PR #21.)
