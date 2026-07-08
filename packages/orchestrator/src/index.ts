@@ -111,10 +111,13 @@ async function main(): Promise<void> {
   //      would forcibly terminate an in-flight job and leak its checkout dir
   //      under `workDir`. Draining is bounded by a grace timeout (see
   //      shutdown.ts's `drainQueue`) so shutdown can never hang forever; we
-  //      reuse `jobTimeoutSeconds` as that bound since a job already past it
-  //      would have been timed out by the queue anyway.
+  //      reuse the queue's own per-job timeout (`jobQueueOptionsFromConfig`'s
+  //      `jobTimeoutMs`, i.e. `jobTimeoutSeconds` PLUS the queue's backstop
+  //      grace — see queue.ts) as that bound, so drain never cuts a job off
+  //      before the queue's own timeout/backstop would have — a job already
+  //      past that would have been timed out by the queue anyway.
   //   3. `process.exit(0)`.
-  const graceMs = config.limits.jobTimeoutSeconds * 1000;
+  const graceMs = jobQueueOptionsFromConfig(config).jobTimeoutMs;
   let shuttingDown = false;
   const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;

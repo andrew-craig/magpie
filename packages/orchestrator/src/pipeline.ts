@@ -16,15 +16,29 @@
 //      (see github.ts): that helper re-derives its own token internally via
 //      `authStrategy`, which would mean two tokens minted per job instead of
 //      one.
-//   3. Fetch PR title/body (needed by the reviewer prompt; the queue's
-//      `JobDescriptor` deliberately doesn't carry them — see queue.ts).
-//   4. Create the credential-free host workspace (workspace.ts) for the PR
+//   3. Create the credential-free host workspace (workspace.ts) for the PR
 //      head checkout. From here on the rest of the job body runs inside a
 //      `try/finally` so the workspace is always cleaned up, on every exit
 //      path (success, a thrown error, or a "review failed" result — the last
 //      of those is not an error at all, see step 6).
-//   5. Compute the PR diff via the GitHub API (diff.ts), capped by
+//   4. Compute the PR diff via the GitHub API (diff.ts), capped by
 //      `config.limits.maxDiffLines`.
+//   5. Fetch PR title/body/head sha (needed by the reviewer prompt; the
+//      queue's `JobDescriptor` deliberately doesn't carry title/body — see
+//      queue.ts). This call is deliberately made AFTER the diff fetch and
+//      AFTER the workspace checkout (which itself pins to `job.headSha` and
+//      fails closed if a force-push landed before checkout — see
+//      workspace.ts) so its `head.sha` can be compared against `job.headSha`
+//      to detect a force-push that landed *after* checkout but before/during
+//      the diff fetch (see HEAD VERIFY below) — the one race window
+//      workspace.ts's own pre-checkout check can't cover.
+//   5a. HEAD VERIFY: if the just-fetched `pr.head.sha` no longer matches
+//      `job.headSha`, the workspace (pinned to the old head) and the diff
+//      (fetched against the new head) are now an incoherent pair — publishing
+//      a review built from them could describe the wrong commit. Log and
+//      return WITHOUT publishing; a fresh webhook delivery for the new head
+//      will re-trigger a review of the current state (same benign-loss
+//      rationale as a crash mid-job — see PLAN.md §3).
 //   6. Turn the diff into a `ReviewResult`: an oversized diff never reaches
 //      `runReview` at all (diff.ts never even fetches the body — see its
 //      module doc comment) and instead gets a synthesized "skipped" summary;
@@ -141,15 +155,13 @@ export function createReviewPipeline(
       );
     }
 
+    if (signal.aborted) return;
+
     logger.info({ event: "minting-token", ...jobLogFields(job) });
     const { token } = await mintToken(config, job.installationId);
     const octokit = makeOctokit(token);
 
-    const { data: pr } = await octokit.rest.pulls.get({
-      owner: job.owner,
-      repo: job.repo,
-      pull_number: job.prNumber,
-    });
+    if (signal.aborted) return;
 
     const workspace = await makeWorkspace({
       owner: job.owner,
@@ -172,6 +184,37 @@ export function createReviewPipeline(
         maxDiffLines: config.limits.maxDiffLines,
       });
 
+      if (signal.aborted) return;
+
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner: job.owner,
+        repo: job.repo,
+        pull_number: job.prNumber,
+      });
+
+      // HEAD VERIFY: see the module doc comment (step 5a) for why this check
+      // is placed here — after the diff fetch, before either the tooLarge or
+      // runReview branch — and why a mismatch returns without publishing
+      // rather than throwing.
+      const actualHeadSha: string | undefined = pr.head?.sha;
+      if (actualHeadSha !== job.headSha) {
+        // Logged at INFO, not ERROR: a mid-job force-push is a benign, expected
+        // race that the system self-heals (a fresh webhook for the new head
+        // re-triggers the review), exactly like the `diff-too-large` skip above
+        // — surfacing it at error level would trip error-based alerting for a
+        // non-error. Both SHAs are included so the skip is still traceable.
+        logger.info({
+          event: "head-sha-mismatch",
+          ...jobLogFields(job),
+          expected: job.headSha,
+          actual: actualHeadSha,
+        });
+        return;
+      }
+
+      // An abort can land during the metadata fetch above; short-circuit here
+      // so we don't spawn `pi` (or synthesize a summary) for a job the queue
+      // has already terminated.
       if (signal.aborted) return;
 
       let result: ReviewResult;
@@ -201,8 +244,17 @@ export function createReviewPipeline(
           prBody: pr.body ?? "",
           config,
           piBinary: deps.piBinary,
+          signal,
         });
       }
+
+      // NO DOUBLE-HANDLING: if the queue's backstop timeout already fired
+      // (see queue.ts), it has already recorded this job as "timed-out" and
+      // may already be running/have run its own cleanup. Publishing a review
+      // comment here too would double-handle the same job. `runReview` above
+      // itself resolves promptly once `signal` aborts (never throws), so this
+      // check catches that case before we ever call `publishReview`.
+      if (signal.aborted) return;
 
       logger.info({
         event: "publishing-review",

@@ -8,18 +8,42 @@
 // lost on a crash or restart, which is acceptable for this milestone (see
 // PLAN.md Milestone 1).
 //
+// BACKSTOP, not the primary deadline: reviewer.ts's `runReview` already
+// enforces `config.limits.jobTimeoutSeconds` as its own hard wall-clock
+// timeout (SIGTERM then SIGKILL), and its timer starts later (once the
+// subprocess actually spawns) than this queue's timer (which starts at
+// dequeue, before minting a token, cloning, and computing the diff). If both
+// timers used the same duration, the queue's earlier-starting timer would
+// fire FIRST — `rm -rf`ing the workspace out from under a still-running `pi`
+// and racing the pipeline's own failure-comment publish against the queue's
+// timeout handling. `jobQueueOptionsFromConfig` below pads the queue's timer
+// by `QUEUE_TIMEOUT_GRACE_MS` so it only ever fires if `runReview` failed to
+// honour its own budget — at which point this queue's `AbortController`
+// signal (passed through to `runReview` — see pipeline.ts/reviewer.ts) is the
+// last-resort way to actually kill `pi` and unblock cleanup.
+//
 // `JobQueue` is deliberately decoupled from the typed `Config` (see
 // config.ts) so it can be constructed and unit tested with plain numbers.
 // Callers that have a `Config` should derive the options themselves (e.g.
 // `concurrency: config.limits.concurrency`,
-// `jobTimeoutMs: config.limits.jobTimeoutSeconds * 1000`) or use the
-// `jobQueueOptionsFromConfig` helper below. Wiring this into the webhook
-// server / real clone-diff-review-publish pipeline is a later task; this
-// module only provides the generic scheduling machinery, with the actual
-// work injected as a callback per job.
+// `jobTimeoutMs: config.limits.jobTimeoutSeconds * 1000 + QUEUE_TIMEOUT_GRACE_MS`)
+// or use the `jobQueueOptionsFromConfig` helper below. Wiring this into the
+// webhook server / real clone-diff-review-publish pipeline is a later task;
+// this module only provides the generic scheduling machinery, with the
+// actual work injected as a callback per job.
 
 import PQueue from "p-queue";
 import type { Config } from "./config.js";
+
+/**
+ * Grace period added on top of `config.limits.jobTimeoutSeconds` for the
+ * queue's own per-job backstop timeout (see `jobQueueOptionsFromConfig` and
+ * the module doc comment). Comfortably larger than reviewer.ts's own
+ * SIGTERM->SIGKILL grace period (`KILL_GRACE_MS`, 5s) plus overhead for the
+ * mint/clone/diff/publish work that also has to happen within the queue's
+ * timer, so the queue's timer only ever fires as a true last resort.
+ */
+export const QUEUE_TIMEOUT_GRACE_MS = 30_000;
 
 /** Identifies a single review job as it moves through the queue. */
 export interface JobDescriptor {
@@ -112,14 +136,23 @@ export interface JobQueueOptions {
   logger?: Logger;
 }
 
-/** Derives {@link JobQueueOptions} from the app's typed `Config`. */
+/**
+ * Derives {@link JobQueueOptions} from the app's typed `Config`.
+ *
+ * `jobTimeoutMs` is `config.limits.jobTimeoutSeconds * 1000` PLUS
+ * {@link QUEUE_TIMEOUT_GRACE_MS} — the queue timer is a true BACKSTOP over
+ * reviewer.ts's own `runReview` timeout (which uses the bare
+ * `jobTimeoutSeconds` budget, unchanged), not the primary deadline. See the
+ * module doc comment for why the two timers must be staggered rather than
+ * equal.
+ */
 export function jobQueueOptionsFromConfig(
   config: Pick<Config, "limits">,
   logger?: Logger,
 ): JobQueueOptions {
   return {
     concurrency: config.limits.concurrency,
-    jobTimeoutMs: config.limits.jobTimeoutSeconds * 1000,
+    jobTimeoutMs: config.limits.jobTimeoutSeconds * 1000 + QUEUE_TIMEOUT_GRACE_MS,
     logger,
   };
 }

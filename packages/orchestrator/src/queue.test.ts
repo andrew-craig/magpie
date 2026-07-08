@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Config } from "./config.js";
 import type { JobDescriptor, Logger } from "./queue.js";
-import { JobQueue } from "./queue.js";
+import { JobQueue, QUEUE_TIMEOUT_GRACE_MS, jobQueueOptionsFromConfig } from "./queue.js";
 
 function makeJob(overrides: Partial<JobDescriptor> = {}): JobDescriptor {
   return {
@@ -30,6 +31,20 @@ function makeRecordingLogger(): Logger & { calls: Record<string, unknown>[] } {
     },
   };
 }
+
+describe("jobQueueOptionsFromConfig", () => {
+  it("staggers jobTimeoutMs to be a true backstop over the reviewer's own timeout", () => {
+    const config: Pick<Config, "limits"> = {
+      limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
+    };
+
+    const options = jobQueueOptionsFromConfig(config);
+
+    expect(options.jobTimeoutMs).toBe(
+      config.limits.jobTimeoutSeconds * 1000 + QUEUE_TIMEOUT_GRACE_MS,
+    );
+  });
+});
 
 describe("JobQueue", () => {
   afterEach(() => {
