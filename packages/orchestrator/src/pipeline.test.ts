@@ -309,9 +309,11 @@ describe("createReviewPipeline / runJob", () => {
     const { factory, cleanupCalls } = fakeWorkspaceFactory();
     const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
 
-    const errCalls: unknown[] = [];
-    const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-      errCalls.push(args);
+    // head-sha-mismatch is logged at INFO (a benign self-healing race — see
+    // pipeline.ts), so spy on console.log rather than console.error.
+    const logCalls: unknown[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logCalls.push(args);
     });
 
     try {
@@ -323,16 +325,16 @@ describe("createReviewPipeline / runJob", () => {
 
       await runJob(testJob(), new AbortController().signal);
     } finally {
-      errSpy.mockRestore();
+      logSpy.mockRestore();
     }
 
     expect(createComment).not.toHaveBeenCalled();
     expect(cleanupCalls).toHaveLength(1);
 
-    const serializedErrLogs = JSON.stringify(errCalls);
-    expect(serializedErrLogs).toContain("head-sha-mismatch");
-    expect(serializedErrLogs).toContain("deadbeef");
-    expect(serializedErrLogs).toContain("cafef00d");
+    const serializedLogCalls = JSON.stringify(logCalls);
+    expect(serializedLogCalls).toContain("head-sha-mismatch");
+    expect(serializedLogCalls).toContain("deadbeef");
+    expect(serializedLogCalls).toContain("cafef00d");
   });
 
   it("never logs or publishes the installation token", async () => {

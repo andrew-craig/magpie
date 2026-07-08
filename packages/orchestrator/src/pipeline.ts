@@ -198,7 +198,12 @@ export function createReviewPipeline(
       // rather than throwing.
       const actualHeadSha: string | undefined = pr.head?.sha;
       if (actualHeadSha !== job.headSha) {
-        logger.error({
+        // Logged at INFO, not ERROR: a mid-job force-push is a benign, expected
+        // race that the system self-heals (a fresh webhook for the new head
+        // re-triggers the review), exactly like the `diff-too-large` skip above
+        // — surfacing it at error level would trip error-based alerting for a
+        // non-error. Both SHAs are included so the skip is still traceable.
+        logger.info({
           event: "head-sha-mismatch",
           ...jobLogFields(job),
           expected: job.headSha,
