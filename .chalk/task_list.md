@@ -3,13 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_0daf** · P1 · in_progress · PR diff generation  (parent: epic_04f9)
 - **decision_7e12** · P1 · open · M1 execution decisions (tech-lead session)  (parent: epic_04f9)
 - **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
-- **task_292c** · P1 · open · Post single summary comment to the PR  (parent: epic_04f9)
-- **task_9b61** · P1 · open · End-to-end integration on a test repo  (parent: epic_04f9)
-- **task_c53d** · P1 · open · Pi host runner — run Pi against the diff  (parent: epic_04f9)
-- **task_2941** · P2 · in_progress · Address PR#10 review: eliminate token from git CLI args and .git/config
 - **task_e066** · P2 · in_progress · Wave 2 dispatch log (tech-lead session)  (parent: epic_04f9)
-- **task_a2db** · P2 · open · Close head-SHA race between workspace checkout and API-fetched diff  (parent: epic_04f9)
-- **task_d4a8** · P2 · open · smee.io dev relay setup  (parent: epic_04f9)
