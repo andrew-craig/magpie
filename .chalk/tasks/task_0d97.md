@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_6fa4,task_7d6c]
+blocked_by: []
 parent: epic_e6e6
 remote_task_url: null
 created_at: 2026-07-09T06:34:40Z
-updated_at: 2026-07-09T06:34:40Z
+updated_at: 2026-07-09T22:45:41Z
 ---
 Integrate the structured-findings flow end-to-end through pipeline.ts and live-verify against a real PR, mirroring the M1 e2e acceptance.
 

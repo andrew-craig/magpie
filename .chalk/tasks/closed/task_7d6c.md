@@ -2,14 +2,14 @@
 id: task_7d6c
 title: M2-D: reviewer.ts + prompt wiring for report_findings
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_e6e6
 remote_task_url: null
 created_at: 2026-07-09T06:34:22Z
-updated_at: 2026-07-09T21:14:59Z
+updated_at: 2026-07-09T22:45:41Z
 ---
 Wire reviewer.ts to load the report_findings extension, collect its findings file, and return structured findings; update reviewer-prompt.md. HOST-SUBPROCESS model.
 
@@ -36,3 +36,12 @@ DECISIONS:
 - Tests use the existing writeFakePi seam (reviewer.test.ts) — the fake script writes JSON to process.env.MAGPIE_FINDINGS_PATH to simulate the extension.
 
 GATE before reporting done: `npm test` green in orchestrator workspace + `tsc -p packages/orchestrator/tsconfig.json` clean. Report test output as evidence. Do NOT push or open a PR — tech lead integrates both wave-2 branches into one PR.
+
+---
+## REVIEW (tech lead, 2026-07-10) — DONE
+
+Implemented by sonnet subagent. Reviewed + integrated into `m2-wave2`.
+- reviewer.ts: `report_findings` in allowlist; `--extension <src/index.ts> --no-extensions` (verified against real pi 0.80.3 help: `-ne` keeps explicit `-e` working); `MAGPIE_FINDINGS_PATH` set AFTER the MAGPIE_* strip; tmp file unlinked in the single `finish()` choke point on every path; `parseFindings` trust boundary; ok-branch now `{summary, findings, verdict, usage?}`. Also fixed a latent `signal` shadowing bug in the close handler (→`procSignal`).
+- One review fix applied: restored provider-error observability in the missing-findings-file path (a failed model call exits 0 with no file → surfaces `errorMessage`/`stopReason` as `pi review failed: <detail>` instead of the generic reason). Matters for wave-3 live OpenRouter debugging.
+- pipeline.ts: minimal `findings:[], verdict:"comment"` on tooLarge synthetic (compile-fix). pipeline.test.ts fake-pi helper updated to write a findings file (necessary consequence of the required contract; wave-3 builds on it).
+- Gate: orchestrator 133/133 + extension 11/11 tests green, tsc clean both workspaces (after `npm install` synced a pre-existing missing `typebox` dep — NOT a wave-2 defect).

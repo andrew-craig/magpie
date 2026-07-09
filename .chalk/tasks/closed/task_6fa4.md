@@ -2,14 +2,14 @@
 id: task_6fa4
 title: M2-C: publisher — single COMMENT review with inline comments
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_e6e6
 remote_task_url: null
 created_at: 2026-07-09T06:34:22Z
-updated_at: 2026-07-09T21:14:59Z
+updated_at: 2026-07-09T22:45:41Z
 ---
 Upgrade publisher.ts to post structured findings as ONE pull-request review with inline comments, replacing M1's single summary issue-comment on the success-with-findings path.
 
@@ -41,3 +41,12 @@ DECISIONS:
 - KEEP publishReview + buildFailureBody + fenceReason UNCHANGED for {ok:false} and the no-findings (findings.length===0) success case (back-compat). publishReviewWithFindings is NEW/additive; it will be unused (dead) until wave 3 wires it — that's expected, tsc must still pass and tests exercise it directly.
 
 GATE before reporting done: `npm test` green in orchestrator workspace + `tsc -p packages/orchestrator/tsconfig.json` clean. Report test output as evidence. Do NOT push or open a PR — tech lead integrates both wave-2 branches into one PR.
+
+---
+## REVIEW (tech lead, 2026-07-10) — DONE
+
+Implemented by sonnet subagent. Reviewed + integrated into `m2-wave2`.
+- publisher.ts: new `publishReviewWithFindings` (decoupled from ReviewResult — takes anchored `inline`/`other`+summary). One `pulls.createReview({event:"COMMENT"})`; `verdict` accepted-but-ignored. Fallback chain: createReview(comments) → any-throw → retry `comments:[]` with inline folded into "Other observations" → any-throw → `issues.createComment`. Never throws/silent. Shared `renderOtherObservations` renderer for both other[] and folded inline. M1 paths untouched.
+- `MinimalIssuesClient` extended with required `pulls.createReview` seam.
+- Deliberate deviation accepted: catches ANY createReview rejection (not just status===422) as retry trigger — strictly more defensive, keeps never-throw trivially true.
+- Gate: orchestrator 133/133 tests green (incl. comments[] shape, ranges, event=COMMENT under verdict:approve, 422→retry, double-failure→createComment fallback, secret-leak), tsc clean.
