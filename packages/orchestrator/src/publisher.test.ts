@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ReviewResult, ReviewUsage } from "./reviewer.js";
+import type { Finding, InlineComment } from "./anchor.js";
 import {
   fenceReason,
   MAGPIE_REVIEW_MARKER,
   publishReview,
+  publishReviewWithFindings,
   type MinimalIssuesClient,
 } from "./publisher.js";
 
@@ -14,12 +16,28 @@ import {
 
 const FAKE_TOKEN = "ghs_super-secret-installation-token-should-never-appear";
 
-/** Builds a fake client whose createComment resolves with a canned id/url. */
-function fakeClient(): { client: MinimalIssuesClient; createComment: ReturnType<typeof vi.fn> } {
+/**
+ * Builds a fake client whose createComment/createReview resolve with canned
+ * id/urls. `createReview` defaults to succeeding; individual tests override
+ * `client.pulls.createReview` (via `createReview.mockImplementationOnce` /
+ * `.mockRejectedValueOnce`) to exercise the 422-retry / double-failure paths.
+ */
+function fakeClient(): {
+  client: MinimalIssuesClient;
+  createComment: ReturnType<typeof vi.fn>;
+  createReview: ReturnType<typeof vi.fn>;
+} {
   const createComment = vi.fn(async () => ({
     data: { id: 42, html_url: "https://github.com/acme/widgets/pull/7#issuecomment-42" },
   }));
-  return { client: { issues: { createComment } }, createComment };
+  const createReview = vi.fn(async () => ({
+    data: { id: 99, html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-99" },
+  }));
+  return {
+    client: { issues: { createComment }, pulls: { createReview } },
+    createComment,
+    createReview,
+  };
 }
 
 const BASE_PARAMS = { owner: "acme", repo: "widgets", prNumber: 7 };
@@ -177,6 +195,210 @@ describe("publishReview", () => {
       .body as string;
     expect(okBody).toContain(MAGPIE_REVIEW_MARKER);
     expect(failBody).toContain(MAGPIE_REVIEW_MARKER);
+  });
+});
+
+const WITH_FINDINGS_PARAMS = { owner: "acme", repo: "widgets", prNumber: 7 };
+
+const SINGLE_LINE_COMMENT: InlineComment = {
+  path: "src/foo.ts",
+  line: 10,
+  side: "RIGHT",
+  message: "**Blocking** (correctness)\n\nThis is broken.",
+};
+
+const RANGE_COMMENT: InlineComment = {
+  path: "src/bar.ts",
+  line: 25,
+  side: "RIGHT",
+  start_line: 20,
+  start_side: "RIGHT",
+  message: "**Nit** (style)\n\nTidy this up.",
+};
+
+const CODE_BLOCK_COMMENT: InlineComment = {
+  path: "src/qux.ts",
+  line: 42,
+  side: "RIGHT",
+  message: "**Blocking** (correctness)\n\nBug here.\n\n**Suggestion:**\n```\nfix()\n```",
+};
+
+const OTHER_FINDING: Finding = {
+  path: "src/baz.ts",
+  line: 5,
+  severity: "important",
+  category: "security",
+  message: "Unvalidated input reaches a sink.",
+};
+
+describe("publishReviewWithFindings", () => {
+  it("builds comments[] from inline findings: path/line/side, start_line/start_side only for ranges, body == message", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [SINGLE_LINE_COMMENT, RANGE_COMMENT],
+      other: [],
+    });
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    const call = createReview.mock.calls[0][0];
+    expect(call).toMatchObject({ owner: "acme", repo: "widgets", pull_number: 7 });
+    expect(call.comments).toHaveLength(2);
+
+    const [single, range] = call.comments;
+    expect(single).toEqual({
+      path: "src/foo.ts",
+      line: 10,
+      side: "RIGHT",
+      body: SINGLE_LINE_COMMENT.message,
+    });
+    expect(single.start_line).toBeUndefined();
+    expect(single.start_side).toBeUndefined();
+
+    expect(range).toEqual({
+      path: "src/bar.ts",
+      line: 25,
+      side: "RIGHT",
+      start_line: 20,
+      start_side: "RIGHT",
+      body: RANGE_COMMENT.message,
+    });
+  });
+
+  it("renders other[] findings in the body under 'Other observations' with path:line and finding text", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [],
+      other: [OTHER_FINDING],
+    });
+
+    const body = createReview.mock.calls[0][0].body as string;
+    expect(body).toContain("Other observations");
+    expect(body).toContain("src/baz.ts:5");
+    expect(body).toContain("Unvalidated input reaches a sink.");
+  });
+
+  it("always uses event: COMMENT, even when verdict: 'approve' is passed", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Ship it.",
+      inline: [],
+      other: [],
+      verdict: "approve",
+    });
+
+    expect(createReview.mock.calls[0][0].event).toBe("COMMENT");
+  });
+
+  it("on a 422 from createReview, retries once with comments:[] and inline findings folded into the body", async () => {
+    const { client, createReview, createComment } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    createReview.mockRejectedValueOnce(conflictError);
+
+    const published = await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [OTHER_FINDING],
+    });
+
+    expect(createReview).toHaveBeenCalledTimes(2);
+    const retryCall = createReview.mock.calls[1][0];
+    expect(retryCall).toMatchObject({ owner: "acme", repo: "widgets", pull_number: 7, event: "COMMENT" });
+    expect(retryCall.comments).toEqual([]);
+    // The would-be inline finding is preserved as text, not dropped.
+    expect(retryCall.body).toContain("Other observations");
+    expect(retryCall.body).toContain("src/foo.ts:10");
+    expect(retryCall.body).toContain("This is broken.");
+    // The original other[] finding is still present too.
+    expect(retryCall.body).toContain("src/baz.ts:5");
+
+    expect(createComment).not.toHaveBeenCalled();
+    expect(published).toEqual({
+      id: 99,
+      url: "https://github.com/acme/widgets/pull/7#pullrequestreview-99",
+    });
+  });
+
+  it("on a 422, folds a multi-line inline finding (with a fenced code block) into the body without flattening it", async () => {
+    const { client, createReview } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    createReview.mockRejectedValueOnce(conflictError);
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [CODE_BLOCK_COMMENT],
+      other: [],
+    });
+
+    const retryCall = createReview.mock.calls[1][0];
+    const body = retryCall.body as string;
+    expect(body).toContain("src/qux.ts:42");
+    // The fenced code block survives, indented under the bullet, rather than
+    // being collapsed onto one line with the rest of the message.
+    expect(body).toContain("  ```\n  fix()\n  ```");
+    // Sanity check the finding's rendered block isn't a single flattened line.
+    const findingBlock = body.slice(body.indexOf("src/qux.ts:42"));
+    expect(findingBlock).toContain("\n");
+  });
+
+  it("falls back to issues.createComment once when both createReview attempts fail, and never throws", async () => {
+    const { client, createReview, createComment } = fakeClient();
+    createReview.mockRejectedValueOnce(new Error("first failure"));
+    createReview.mockRejectedValueOnce(new Error("second failure"));
+
+    const published = await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [OTHER_FINDING],
+    });
+
+    expect(createReview).toHaveBeenCalledTimes(2);
+    expect(createComment).toHaveBeenCalledTimes(1);
+    const fallbackCall = createComment.mock.calls[0][0];
+    expect(fallbackCall).toMatchObject({ owner: "acme", repo: "widgets", issue_number: 7 });
+    expect(fallbackCall.body).toContain("Other observations");
+    expect(fallbackCall.body).toContain("src/foo.ts:10");
+    expect(fallbackCall.body).toContain("src/baz.ts:5");
+    expect(published).toEqual({
+      id: 42,
+      url: "https://github.com/acme/widgets/pull/7#issuecomment-42",
+    });
+  });
+
+  it("never includes a secret/token-shaped string in the review body", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Reviewed the diff.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [OTHER_FINDING],
+    });
+
+    const call = createReview.mock.calls[0][0];
+    expect(call.body).not.toContain(FAKE_TOKEN);
+    expect(call.body).not.toMatch(/ghs_/);
+    for (const comment of call.comments) {
+      expect(comment.body).not.toContain(FAKE_TOKEN);
+      expect(comment.body).not.toMatch(/ghs_/);
+    }
   });
 });
 

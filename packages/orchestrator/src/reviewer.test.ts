@@ -1,8 +1,9 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Config } from "./config.js";
+import type { Finding } from "./findings.js";
 import { buildPromptPayload, runReview } from "./reviewer.js";
 
 // NOTE: everything here runs fully offline — no real Pi binary, no network,
@@ -12,7 +13,10 @@ import { buildPromptPayload, runReview } from "./reviewer.js";
 // `#!/usr/bin/env node` shebang, and points `piBinary` at it directly (spawned
 // with no shell, exactly like the real `pi` invocation) so the fake script
 // receives the same argv/cwd/env contract the real binary would and emits
-// canned NDJSON on stdout instead of calling an LLM.
+// canned NDJSON on stdout instead of calling an LLM. Fake scripts that want to
+// simulate the `report_findings` tool write JSON directly to
+// `process.env.MAGPIE_FINDINGS_PATH` — the same channel the real Pi extension
+// (packages/review-extension) uses.
 
 let root: string;
 
@@ -70,23 +74,91 @@ function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
   };
 }
 
+/** Name of the marker file a fake pi script records `MAGPIE_FINDINGS_PATH`/env visibility to. */
+const MARKER_FILE = "findings-path-marker.json";
+
+/**
+ * What a fake pi script should do with `MAGPIE_FINDINGS_PATH` (i.e. simulate
+ * the `report_findings` tool's behavior — see review-extension/src/index.ts):
+ *   - `{ kind: "valid", value }` — writes `JSON.stringify(value)` to the path.
+ *   - `{ kind: "raw", value }` — writes `value` verbatim (for malformed-JSON cases).
+ *   - `{ kind: "omit" }` — never touches the path at all (simulates Pi never
+ *     calling `report_findings`).
+ */
+type FakeFindingsSpec = { kind: "valid"; value: unknown } | { kind: "raw"; value: string } | { kind: "omit" };
+
+/**
+ * Writes a fake pi script that: (1) always records the
+ * `MAGPIE_FINDINGS_PATH` it sees, plus whether a `MAGPIE_FOO` secret leaked
+ * into its env, to `<root>/findings-path-marker.json` — so tests can assert
+ * on both without inspecting the child's env directly (mirrors how the real
+ * extension's only channel back is a file at a host-chosen path); (2) emits
+ * NDJSON `message_end`/`agent_end` events for each of `messages` in order;
+ * and (3) per `findingsSpec`, does — or doesn't — write to
+ * `MAGPIE_FINDINGS_PATH`, simulating whether/how `report_findings` was called.
+ */
+function writeFakePiWithFindings(
+  messages: Array<ReturnType<typeof assistantMessage>>,
+  findingsSpec: FakeFindingsSpec,
+): string {
+  const markerPath = join(root, MARKER_FILE);
+  const lines: string[] = [
+    `const fs = require("fs");`,
+    `const findingsPath = process.env.MAGPIE_FINDINGS_PATH || "";`,
+    `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ findingsPath, magpieFooVisible: process.env.MAGPIE_FOO !== undefined }));`,
+  ];
+  if (findingsSpec.kind === "valid") {
+    lines.push(`fs.writeFileSync(findingsPath, ${JSON.stringify(JSON.stringify(findingsSpec.value))});`);
+  } else if (findingsSpec.kind === "raw") {
+    lines.push(`fs.writeFileSync(findingsPath, ${JSON.stringify(findingsSpec.value)});`);
+  }
+  lines.push(
+    `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+  );
+  messages.forEach((m, i) => {
+    lines.push(`const m${i} = ${JSON.stringify(m)};`);
+    lines.push(`process.stdout.write(JSON.stringify({type:"message_end",message:m${i}}) + "\\n");`);
+  });
+  lines.push(
+    `process.stdout.write(JSON.stringify({type:"agent_end",messages:[${messages
+      .map((_, i) => `m${i}`)
+      .join(",")}]}) + "\\n");`,
+  );
+  return writeFakePi(lines.join("\n"));
+}
+
+/** Reads back the marker file written by {@link writeFakePiWithFindings}. */
+function readMarker(): { findingsPath: string; magpieFooVisible: boolean } {
+  return JSON.parse(readFileSync(join(root, MARKER_FILE), "utf-8")) as {
+    findingsPath: string;
+    magpieFooVisible: boolean;
+  };
+}
+
+const sampleFindings: Finding[] = [
+  {
+    path: "src/x.ts",
+    line: 3,
+    severity: "important",
+    category: "correctness",
+    message: "Off-by-one in the loop bound.",
+  },
+];
+
 describe("runReview", () => {
-  it("returns ok:true with the final assistant text on a normal run", async () => {
-    const text = "No correctness, security, or clarity issues found.";
-    const piBinary = writeFakePi(
-      [
-        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
-        `const msg = ${JSON.stringify(assistantMessage(text))};`,
-        `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
-      ].join("\n"),
-    );
+  it("returns ok:true with the parsed findings, summary, and verdict when pi calls report_findings", async () => {
+    const piBinary = writeFakePiWithFindings([assistantMessage("unused final turn text")], {
+      kind: "valid",
+      value: { findings: sampleFindings, summary: "One correctness issue found.", verdict: "comment" },
+    });
 
     const result = await runReview(baseParams({ piBinary }));
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.summary).toBe(text);
+      expect(result.summary).toBe("One correctness issue found.");
+      expect(result.findings).toEqual(sampleFindings);
+      expect(result.verdict).toBe("comment");
       expect(result.usage).toEqual({
         turns: 1,
         inputTokens: 111,
@@ -98,26 +170,19 @@ describe("runReview", () => {
   });
 
   it("accumulates usage across multiple assistant turns via agent_end", async () => {
-    const text = "Found one issue: foo.ts:12 off-by-one.";
-    const turn1 = assistantMessage("intermediate turn");
-    const turn2 = assistantMessage(text);
-    const piBinary = writeFakePi(
-      [
-        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
-        `const t1 = ${JSON.stringify(turn1)};`,
-        `const t2 = ${JSON.stringify(turn2)};`,
-        `process.stdout.write(JSON.stringify({type:"message_end",message:t1}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"message_end",message:t2}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[t1,t2]}) + "\\n");`,
-      ].join("\n"),
+    const piBinary = writeFakePiWithFindings(
+      [assistantMessage("intermediate turn"), assistantMessage("final turn (unused; summary comes from the file)")],
+      {
+        kind: "valid",
+        value: { findings: [], summary: "Aggregated summary.", verdict: "comment" },
+      },
     );
 
     const result = await runReview(baseParams({ piBinary }));
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      // Summary is the *last* assistant message's text, not a concatenation.
-      expect(result.summary).toBe(text);
+      expect(result.summary).toBe("Aggregated summary.");
       expect(result.usage).toEqual({
         turns: 2,
         inputTokens: 222,
@@ -128,27 +193,61 @@ describe("runReview", () => {
     }
   });
 
-  it("returns ok:false when pi produces no assistant text", async () => {
-    const piBinary = writeFakePi(
-      [
-        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[]}) + "\\n");`,
-      ].join("\n"),
-    );
+  it("falls back to the final assistant text when the findings file's summary is empty", async () => {
+    const text = "Fallback summary text from the assistant turn.";
+    const piBinary = writeFakePiWithFindings([assistantMessage(text)], {
+      kind: "valid",
+      value: { findings: [], summary: "", verdict: "approve" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.summary).toBe(text);
+      expect(result.findings).toEqual([]);
+      expect(result.verdict).toBe("approve");
+    }
+  });
+
+  it("defaults to a fixed placeholder when both the findings file's summary and the assistant text are empty", async () => {
+    // No assistant messages at all, so extractSummaryText(messages) also
+    // returns "" — the fallback of the fallback must kick in rather than
+    // publishing an empty summary.
+    const piBinary = writeFakePiWithFindings([], {
+      kind: "valid",
+      value: { findings: [], summary: "", verdict: "approve" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.summary).toBe("No summary provided.");
+      expect(result.findings).toEqual([]);
+      expect(result.verdict).toBe("approve");
+    }
+  });
+
+  it("returns ok:false when pi exits 0 without ever calling report_findings", async () => {
+    const piBinary = writeFakePiWithFindings([assistantMessage("some text but no tool call")], { kind: "omit" });
 
     const result = await runReview(baseParams({ piBinary }));
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/no assistant text/);
+      expect(result.reason).toBe("pi did not call report_findings");
     }
   });
 
-  it("surfaces the provider error when pi exits 0 but the model call failed", async () => {
-    // A failed model call exits Pi with code 0 and emits an assistant
-    // message_end with empty content, stopReason:"error", and a
-    // human-readable errorMessage (e.g. a provider 402). The runner must
-    // report that cause rather than the opaque "no assistant text".
+  it("surfaces the provider error when pi's model call failed and wrote no findings file", async () => {
+    // A failed model call still exits Pi with code 0 and emits a final
+    // assistant message_end with empty content, stopReason:"error", and a
+    // human-readable errorMessage (e.g. a provider 402) instead of ever
+    // reaching the report_findings tool call — so it lands in the missing-file
+    // path. The runner must report that concrete cause (important for
+    // debugging live OpenRouter runs) rather than the opaque generic
+    // "did not call report_findings".
     const errored = {
       role: "assistant" as const,
       content: [],
@@ -156,14 +255,7 @@ describe("runReview", () => {
       errorMessage: '402: {"message":"Insufficient credits...","code":402}',
       usage: { input: 5, output: 0, totalTokens: 5, cost: { total: 0 } },
     };
-    const piBinary = writeFakePi(
-      [
-        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
-        `const msg = ${JSON.stringify(errored)};`,
-        `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
-      ].join("\n"),
-    );
+    const piBinary = writeFakePiWithFindings([errored], { kind: "omit" });
 
     const result = await runReview(baseParams({ piBinary }));
 
@@ -171,8 +263,70 @@ describe("runReview", () => {
     if (!result.ok) {
       expect(result.reason).toMatch(/review failed/);
       expect(result.reason).toMatch(/Insufficient credits/);
-      expect(result.reason).not.toMatch(/no assistant text/);
+      expect(result.reason).not.toMatch(/did not call report_findings/);
     }
+  });
+
+  it("returns ok:false when the findings file isn't valid JSON", async () => {
+    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+      kind: "raw",
+      value: "{not valid json",
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/invalid findings file/);
+    }
+  });
+
+  it("returns ok:false when the findings file doesn't match the expected shape", async () => {
+    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      // Missing the required `verdict` field.
+      value: { findings: [], summary: "ok" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/invalid findings file/);
+    }
+  });
+
+  it("sets MAGPIE_FINDINGS_PATH on the child (surviving the MAGPIE_* strip) while still stripping other MAGPIE_* secrets", async () => {
+    process.env.MAGPIE_FOO = "leaked-secret";
+    try {
+      const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+        kind: "valid",
+        value: { findings: [], summary: "ok", verdict: "comment" },
+      });
+
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(true);
+
+      const marker = readMarker();
+      expect(marker.findingsPath.length).toBeGreaterThan(0);
+      expect(marker.findingsPath).toMatch(/magpie-findings-.*\.json$/);
+      expect(marker.magpieFooVisible).toBe(false);
+    } finally {
+      delete process.env.MAGPIE_FOO;
+    }
+  });
+
+  it("deletes the tmp findings file after the run completes", async () => {
+    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+    expect(result.ok).toBe(true);
+
+    const marker = readMarker();
+    expect(existsSync(marker.findingsPath)).toBe(false);
   });
 
   it("returns ok:false with exit code/stderr detail on a non-zero exit", async () => {
@@ -266,17 +420,13 @@ describe("runReview", () => {
 
   it("resolves ok:false/aborted WITHOUT spawning pi when the signal is already aborted", async () => {
     // Fast path (see runReview): a signal that is aborted before the call
-    // must never spawn `pi`. The fake pi here would emit a normal summary if
-    // it ran, so getting `reason:"aborted"` (not that summary) proves the
-    // spawn was skipped.
-    const piBinary = writeFakePi(
-      [
-        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
-        `const msg = ${JSON.stringify(assistantMessage("SHOULD NOT APPEAR"))};`,
-        `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
-        `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
-      ].join("\n"),
-    );
+    // must never spawn `pi`. The fake pi here would emit a normal findings
+    // file if it ran, so getting `reason:"aborted"` (not that result) proves
+    // the spawn was skipped.
+    const piBinary = writeFakePiWithFindings([assistantMessage("SHOULD NOT APPEAR")], {
+      kind: "valid",
+      value: { findings: [], summary: "SHOULD NOT APPEAR", verdict: "comment" },
+    });
     const controller = new AbortController();
     controller.abort();
 
@@ -338,5 +488,17 @@ describe("buildPromptPayload (untrusted-data fence)", () => {
     );
     // The matching open delimiter also carries the same nonce.
     expect(payload).toContain(`<UNTRUSTED_PR_DATA nonce="${nonce}">`);
+  });
+
+  it("instructs the model to call report_findings, not reply as plain text", () => {
+    const payload = buildPromptPayload({
+      prTitle: "t",
+      prBody: "b",
+      changedFiles: ["x"],
+      diff: "diff",
+    });
+
+    expect(payload).toMatch(/report_findings/);
+    expect(payload).not.toMatch(/reply with your\s+findings as plain text/);
   });
 });

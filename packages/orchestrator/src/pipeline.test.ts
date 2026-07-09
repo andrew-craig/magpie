@@ -40,14 +40,25 @@ function writeFakePi(body: string): string {
   return path;
 }
 
-/** NDJSON script body for a fake `pi` that emits one assistant review turn. */
+/**
+ * NDJSON script body for a fake `pi` that emits one assistant review turn AND
+ * "calls" the report_findings tool by writing a findings file to
+ * `MAGPIE_FINDINGS_PATH` (see reviewer.ts's M2 findings-file contract and
+ * reviewer.test.ts's `writeFakePiWithFindings`, which this mirrors) — the
+ * child never actually receives the real Pi extension since these are all
+ * fake `pi` binaries, so simulating the file write is the only way an ok:true
+ * `ReviewResult` (now requiring `findings`/`verdict`) is reachable here.
+ */
 function fakePiScriptEmitting(text: string): string {
   const msg = {
     role: "assistant",
     content: [{ type: "text", text }],
     usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.001 } },
   };
+  const findings = { findings: [], summary: text, verdict: "comment" };
   return [
+    `const fs = require("fs");`,
+    `fs.writeFileSync(process.env.MAGPIE_FINDINGS_PATH, ${JSON.stringify(JSON.stringify(findings))});`,
     `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
     `const msg = ${JSON.stringify(msg)};`,
     `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,

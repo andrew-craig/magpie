@@ -1,12 +1,13 @@
-// Pi host runner (M1): spawns the Pi coding agent as a plain host subprocess
-// over a checked-out PR worktree + its diff, and returns a single plain-text
-// review summary.
+// Pi host runner (M1/M2): spawns the Pi coding agent as a plain host
+// subprocess over a checked-out PR worktree + its diff, and returns
+// STRUCTURED findings collected via the `report_findings` Pi extension
+// (packages/review-extension) rather than a plain-text summary.
 //
-// NO container, NO LiteLLM gateway, NO `report_findings` extension here — those
-// are later milestones (see PLAN.md M2-M4). For M1 the provider key lives in
-// this host process's environment and is handed to Pi via `OPENROUTER_API_KEY`;
-// the only isolation this milestone provides is Pi's own read-only tool
-// allowlist (`read,grep,find,ls` — no `bash`/`write`/`edit`).
+// NO container, NO LiteLLM gateway here — those are later milestones (see
+// PLAN.md M3-M4). For M1/M2 the provider key lives in this host process's
+// environment and is handed to Pi via `OPENROUTER_API_KEY`; the only
+// isolation this milestone provides is Pi's own read-only tool allowlist
+// (`read,grep,find,ls,report_findings` — no `bash`/`write`/`edit`).
 //
 // SECURITY: the diff/PR title/body are untrusted, possibly-adversarial text
 // (see reviewer-prompt.md and PLAN.md's threat model) — this module never
@@ -14,13 +15,20 @@
 // The LLM API key is never logged, never written to disk, and never placed on
 // the command line — it is set only on the child process's environment (see
 // workspace.ts for the same "secrets only via env, never argv" pattern used
-// for the GitHub installation token).
+// for the GitHub installation token). The findings FILE that
+// `report_findings` writes is itself untrusted (LLM tool-call output reasoning
+// over adversarial PR content) and is re-validated at the trust boundary via
+// `parseFindings` (see findings.ts) before this module ever returns it to a
+// caller.
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.js";
+import { parseFindings, type Finding } from "./findings.js";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -37,8 +45,33 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
  */
 const REVIEWER_PROMPT_PATH = join(MODULE_DIR, "..", "..", "..", "reviewer-prompt.md");
 
-/** Read-only tool allowlist — no `bash`, no `write`/`edit` (see module doc comment). */
-const READ_ONLY_TOOLS = "read,grep,find,ls";
+/**
+ * Absolute path to the `report_findings` Pi extension's SOURCE file, loaded
+ * via `--extension/-e <path>` (Pi runs TypeScript extension sources directly,
+ * no build step needed). Resolved the same cwd-independent way as
+ * `REVIEWER_PROMPT_PATH` above: this module lives three directories below
+ * the repo root, and the extension package lives at
+ * `packages/review-extension/src/index.ts` alongside it.
+ */
+const REVIEW_EXTENSION_PATH = join(
+  MODULE_DIR,
+  "..",
+  "..",
+  "..",
+  "packages",
+  "review-extension",
+  "src",
+  "index.ts",
+);
+
+/**
+ * Read-only tool allowlist, plus the one write-shaped exception:
+ * `report_findings` (see REVIEW_EXTENSION_PATH above) is a Magpie-authored
+ * tool that only ever writes to a single host-chosen path
+ * (`MAGPIE_FINDINGS_PATH`, set below) — not a general filesystem write. No
+ * `bash`, no generic `write`/`edit` (see module doc comment).
+ */
+const READ_ONLY_TOOLS = "read,grep,find,ls,report_findings";
 
 /** Grace period between SIGTERM and SIGKILL when a job times out. */
 const KILL_GRACE_MS = 5_000;
@@ -89,32 +122,48 @@ export interface ReviewUsage {
   costUsd: number;
 }
 
-/** Result of {@link runReview}. Never throws — every failure mode is `{ ok: false, reason }`. */
+/**
+ * Result of {@link runReview}. Never throws — every failure mode is
+ * `{ ok: false, reason }`. `findings`/`verdict` are REQUIRED on the ok branch
+ * (not optional): a successful review is, by construction, one where Pi
+ * called `report_findings` and this module parsed the resulting file via
+ * `parseFindings` (see findings.ts) — there is no ok:true path that skips
+ * structured findings.
+ */
 export type ReviewResult =
-  | { ok: true; summary: string; usage?: ReviewUsage }
+  | { ok: true; summary: string; findings: Finding[]; verdict: "approve" | "comment"; usage?: ReviewUsage }
   | { ok: false; reason: string };
 
 /**
- * Run Pi headless against a PR checkout + diff and return a single plain-text
- * review summary.
+ * Run Pi headless against a PR checkout + diff and return STRUCTURED review
+ * findings collected via the `report_findings` tool call.
  *
  * Flow:
- *   1. Spawn `pi -p --mode json --no-session --tools read,grep,find,ls
- *      --provider openrouter --model <config.llm.model> --append-system-prompt
- *      <reviewer-prompt.md>` with `cwd: workspaceDir`, args passed as an array
- *      (never a shell string) and `OPENROUTER_API_KEY` set on a copy of
+ *   1. Spawn `pi -p --mode json --no-session --tools
+ *      read,grep,find,ls,report_findings --extension <review-extension>
+ *      --no-extensions --provider openrouter --model <config.llm.model>
+ *      --append-system-prompt <reviewer-prompt.md>` with `cwd: workspaceDir`,
+ *      args passed as an array (never a shell string) and
+ *      `OPENROUTER_API_KEY`/`MAGPIE_FINDINGS_PATH` set on a copy of
  *      `process.env`.
  *   2. Pipe the PR title/body/changed-file list/diff to Pi's stdin, clearly
  *      fenced as untrusted data (see `buildPromptPayload`).
  *   3. Parse Pi's NDJSON stdout stream line-by-line (tolerating partial lines
  *      across chunks and ignoring any line that isn't valid JSON) to extract
- *      the final assistant text and basic usage/cost telemetry.
+ *      the final assistant text (used only as a summary fallback, see below)
+ *      and basic usage/cost telemetry.
  *   4. Enforce `config.limits.jobTimeoutSeconds` as a hard wall-clock timeout:
  *      SIGTERM, then SIGKILL after a short grace period if still alive.
+ *   5. On a clean (code 0) exit, read+validate the findings file the
+ *      `report_findings` tool should have written to `MAGPIE_FINDINGS_PATH`
+ *      via `parseFindings` (the trust boundary — see findings.ts). This file
+ *      is always deleted afterward, on every path.
  *
- * Every failure path — spawn error, non-zero exit, zero assistant text, or
- * timeout — resolves to `{ ok: false, reason }` rather than throwing, so
- * callers can always post a "review failed" note instead of going silent.
+ * Every failure path — spawn error, non-zero exit, timeout, Pi exiting 0
+ * without ever calling `report_findings`, or a findings file that fails
+ * `parseFindings` — resolves to `{ ok: false, reason }` rather than throwing,
+ * so callers can always post a "review failed" note instead of going silent
+ * (PLAN.md §6).
  */
 export async function runReview(params: RunReviewParams): Promise<ReviewResult> {
   const { workspaceDir, diff, changedFiles, prTitle, prBody, config, signal } = params;
@@ -137,6 +186,17 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     "--no-session",
     "--tools",
     READ_ONLY_TOOLS,
+    // Load ONLY our own report_findings extension (see REVIEW_EXTENSION_PATH
+    // above): `-e <path>` loads it explicitly, and `--no-extensions` disables
+    // Pi's normal auto-discovery of extensions installed under the host's
+    // `~/.pi` config — without it, this host subprocess could pick up
+    // whatever extensions happen to be installed on the machine it runs on,
+    // which is neither reproducible nor something we've reviewed for safety
+    // against an untrusted-diff-driven agent. `--no-extensions` explicitly
+    // does not block explicit `-e` paths (see `pi --help`).
+    "--extension",
+    REVIEW_EXTENSION_PATH,
+    "--no-extensions",
     "--provider",
     "openrouter",
     "--model",
@@ -162,14 +222,33 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   }
   env.OPENROUTER_API_KEY = config.secrets.llmApiKey;
 
+  // Per-run tmp path the `report_findings` extension (packages/review-extension)
+  // writes its output to (see that package's `resolveFindingsPath`). This is
+  // NOT a `MAGPIE_*` secret — it's a filesystem path with no sensitive
+  // content of its own — but it MUST be set AFTER the strip loop above:
+  // setting it before would just have the loop delete it again, since it
+  // shares the `MAGPIE_` prefix used for the actual secrets. The nonce keeps
+  // concurrent jobs (and repeated runs sharing `os.tmpdir()`) from colliding
+  // on the same path.
+  const findingsPath = join(tmpdir(), `magpie-findings-${randomBytes(16).toString("hex")}.json`);
+  env.MAGPIE_FINDINGS_PATH = findingsPath;
+
   const payload = buildPromptPayload({ prTitle, prBody, changedFiles, diff });
 
   return new Promise<ReviewResult>((resolvePromise) => {
     let settled = false;
+    // The single settle point for every path (spawn failure, timeout, abort,
+    // non-zero exit, and the code===0 findings-file outcomes below). Always
+    // deletes the per-run findings tmp file (see `findingsPath` above) before
+    // resolving, so it's cleaned up on every path, not just the happy one —
+    // `unlink` failing (e.g. the file was never created because Pi never
+    // called `report_findings`) is expected and silently ignored.
     const finish = (result: ReviewResult): void => {
       if (settled) return;
       settled = true;
-      resolvePromise(result);
+      unlink(findingsPath)
+        .catch(() => {})
+        .finally(() => resolvePromise(result));
     };
 
     // `spawn` can throw synchronously (e.g. on invalid options), which would
@@ -288,7 +367,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       finish({ ok: false, reason: `failed to spawn pi (${piBinary}): ${errorMessage(err)}` });
     });
 
-    child.on("close", (code, signal) => {
+    child.on("close", (code, procSignal) => {
       clearTimers();
 
       // Flush a final unterminated NDJSON line, if the process ended without
@@ -309,7 +388,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       }
 
       if (code !== 0) {
-        const signalNote = signal ? ` (signal ${signal})` : "";
+        const signalNote = procSignal ? ` (signal ${procSignal})` : "";
         const stderrNote = stderrTail.trim() || "(no stderr output)";
         finish({
           ok: false,
@@ -323,24 +402,6 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         : assistantMessages;
       const messages = finalAssistantMessages.length > 0 ? finalAssistantMessages : assistantMessages;
 
-      const summary = extractSummaryText(messages);
-      if (!summary) {
-        // A failed model call exits 0 but emits a final assistant message with
-        // empty content, `stopReason: "error"`, and (usually) a human-readable
-        // `errorMessage` (e.g. a provider 402). Surface that cause instead of
-        // the opaque "no assistant text" when there IS error info to report.
-        // A successful run with real summary text never reaches here, so an
-        // earlier errored turn can't mask a good final answer.
-        const last = messages[messages.length - 1];
-        if (last && (last.stopReason === "error" || last.errorMessage)) {
-          const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
-          finish({ ok: false, reason: `pi review failed: ${detail}` });
-          return;
-        }
-        finish({ ok: false, reason: "pi produced no assistant text" });
-        return;
-      }
-
       const usage = summarizeUsage(messages);
       if (usage) {
         console.log(
@@ -350,7 +411,79 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         );
       }
 
-      finish({ ok: true, summary, usage });
+      // Pi exited 0. That alone only means it didn't crash — the run is only
+      // actually usable if it called `report_findings` (see
+      // reviewer-prompt.md and packages/review-extension) as its final
+      // action, writing `findingsPath`. Read + validate that file now, at
+      // THIS module's trust boundary (`parseFindings` — see findings.ts's
+      // module doc comment): never assume its shape just because Pi exited
+      // cleanly, since the file's content traces back to an LLM reasoning
+      // over an untrusted, possibly-adversarial PR diff.
+      // Outer try/catch: by this point `clearTimers()` above has already
+      // cleared the timeout AND removed the abort listener, so this IIFE is
+      // the ONLY thing left that can settle `runReview`'s promise. If
+      // anything in here threw uncaught, `finish()` would never be called
+      // and the promise — and the whole pipeline awaiting it — would hang
+      // forever instead of resolving `{ ok: false, ... }` per this module's
+      // documented never-throws/always-settles contract. The nested
+      // `readFile` try/catch below handles the expected "no findings file"
+      // case; this outer one is a last-resort guard against anything else
+      // (e.g. a future `parseFindings`/`finish` change growing an
+      // unexpected throw).
+      void (async () => {
+        try {
+          let findingsRaw: string;
+          try {
+            findingsRaw = await readFile(findingsPath, "utf-8");
+          } catch {
+            // No findings file. WHY this is also where provider errors surface:
+            // a failed model call (a 402/rate-limit/context-length error, etc.)
+            // still exits Pi with code 0 and emits a final assistant message
+            // with empty content, `stopReason: "error"`, and a human-readable
+            // `errorMessage`, but never reaches the `report_findings` tool call
+            // — so it lands here, in the missing-file path, not the parse path.
+            // Prefer that concrete cause over the opaque generic reason when the
+            // last assistant turn carries error info (important for debugging
+            // wave-3's live OpenRouter runs); otherwise it's a genuine "model
+            // never called the tool" (refusal, ran out of turns) or an I/O
+            // surprise reading the file. Either way we must not go silent
+            // (PLAN.md §6).
+            const last = messages[messages.length - 1];
+            if (last && (last.stopReason === "error" || last.errorMessage)) {
+              const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
+              finish({ ok: false, reason: `pi review failed: ${detail}` });
+              return;
+            }
+            finish({ ok: false, reason: "pi did not call report_findings" });
+            return;
+          }
+
+          const parsed = parseFindings(findingsRaw);
+          if (!parsed.ok) {
+            finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}` });
+            return;
+          }
+
+          // The findings file's `summary` is the primary source; Pi's final
+          // plain-text assistant turn (if any) is only a fallback for the rare
+          // case the model left `summary` empty despite calling the tool. If
+          // that fallback is ALSO empty, fall back further to a fixed default
+          // so a successful review never publishes an empty summary.
+          const fileSummary = parsed.value.summary.trim();
+          const summary =
+            fileSummary.length > 0 ? parsed.value.summary : (extractSummaryText(messages) || "No summary provided.");
+
+          finish({
+            ok: true,
+            summary,
+            findings: parsed.value.findings,
+            verdict: parsed.value.verdict,
+            usage,
+          });
+        } catch (err) {
+          finish({ ok: false, reason: `failed to process findings: ${errorMessage(err)}` });
+        }
+      })();
     });
 
     child.stdin.end(payload);
@@ -419,8 +552,13 @@ export function buildPromptPayload(params: PromptPayloadParams): string {
     "</DIFF>",
     close,
     "",
-    "Review the diff above per your system instructions and reply with your",
-    "findings as plain text.",
+    "Review the diff above per your system instructions. When you are done,",
+    "call the report_findings tool EXACTLY ONCE, as your final action, with",
+    "your complete list of findings and overall summary/verdict — do not reply",
+    "with a plain-text final message instead. Every finding's line (and",
+    "end_line, if present) must be a line number in the NEW file — the",
+    "right-hand side of the diff above — matching where that line actually",
+    "appears in the diff.",
     "",
   ].join("\n");
 }
@@ -447,12 +585,14 @@ interface AssistantMessageLike {
     totalTokens?: number;
     cost?: { total?: number };
   };
-  // A failed model call still exits Pi with code 0 and emits an assistant
-  // `message_end` with empty `content`, `stopReason: "error"`, and a
-  // human-readable `errorMessage` (e.g. a provider 402 "Insufficient
-  // credits"). Surfacing these turns the otherwise-opaque "no assistant text"
-  // failure into the actual cause (see the code===0 branch in the close
-  // handler).
+  // A failed model call still exits Pi with code 0 and emits a final
+  // assistant `message_end` with empty `content`, `stopReason: "error"`, and
+  // (usually) a human-readable `errorMessage` (e.g. a provider 402
+  // "Insufficient credits", a rate-limit, or a context-length error) — and
+  // never reaches the `report_findings` tool call, so no findings file is
+  // written. Surfacing these turns the otherwise-opaque "did not call
+  // report_findings" outcome into the actual cause (see the readFile catch
+  // block in the close handler).
   stopReason?: string;
   errorMessage?: string;
 }
