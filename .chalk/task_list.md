@@ -5,4 +5,3 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 
 - **decision_7e12** · P1 · open · M1 execution decisions (tech-lead session)  (parent: epic_04f9)
 - **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
-- **task_e066** · P2 · in_progress · Wave 2 dispatch log (tech-lead session)  (parent: epic_04f9)
