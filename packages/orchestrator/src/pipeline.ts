@@ -230,6 +230,12 @@ export function createReviewPipeline(
           summary:
             `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
             `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
+          // No findings possible for a skipped review (task_0d97/wave 3 owns
+          // the real anchor+inline wiring); this is a minimal type-fix so this
+          // synthetic result still satisfies reviewer.ts's now-required
+          // ReviewResult.findings/verdict fields.
+          findings: [],
+          verdict: "comment",
         };
       } else {
         logger.info({ event: "running-review", ...jobLogFields(job) });
