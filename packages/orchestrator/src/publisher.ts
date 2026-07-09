@@ -19,7 +19,9 @@
 // enforced invariant.
 
 import type { ReviewResult, ReviewUsage } from "./reviewer.js";
+import type { Finding, InlineComment } from "./anchor.js";
 export type { ReviewResult, ReviewUsage };
+export type { Finding, InlineComment };
 
 /**
  * Machine-greppable marker embedded (as an HTML comment, so invisible in
@@ -50,6 +52,31 @@ export interface MinimalIssuesClient {
       repo: string;
       issue_number: number;
       body: string;
+    }): Promise<{ data: { id: number; html_url: string } }>;
+  };
+  /**
+   * Used only by the M2 structured-findings publish path
+   * ({@link publishReviewWithFindings}) — `publishReview` never touches it.
+   * Included on this same minimal-client interface (rather than a second,
+   * parallel interface) so production code hands both publish functions the
+   * one real Octokit client from `createInstallationOctokit`, and tests
+   * build one fake client shape for both.
+   */
+  pulls: {
+    createReview(args: {
+      owner: string;
+      repo: string;
+      pull_number: number;
+      event: "COMMENT";
+      body: string;
+      comments: Array<{
+        path: string;
+        line: number;
+        side: "RIGHT";
+        start_line?: number;
+        start_side?: "RIGHT";
+        body: string;
+      }>;
     }): Promise<{ data: { id: number; html_url: string } }>;
   };
 }
@@ -168,4 +195,219 @@ export function fenceReason(reason: string): string {
 function formatUsageFooter(usage: ReviewUsage | undefined): string | undefined {
   if (!usage) return undefined;
   return `_turns=${usage.turns} tokens=${usage.totalTokens} cost=$${usage.costUsd.toFixed(4)}_`;
+}
+
+// ---------------------------------------------------------------------------
+// M2: structured findings -> one PR review with inline comments.
+//
+// `publishReviewWithFindings` is DECOUPLED from reviewer.ts's `ReviewResult`:
+// it takes already-anchored data (an `anchor.ts` `AnchorResult`'s `inline` /
+// `other`, plus the review `summary`), not a `ReviewResult`. The pipeline
+// (wave 3) is the one that calls `anchorFindings()` and passes its output in
+// here; this module stays ignorant of diff-anchoring entirely. It is
+// additive — `publishReview`, `buildFailureBody`, `fenceReason`,
+// `buildSuccessBody`, `formatUsageFooter`, the `{ok:false}` failure path, and
+// the no-findings success path above are all unchanged and still used by
+// the M1 pipeline until wave 3 rewires it.
+// ---------------------------------------------------------------------------
+
+/** Parameters for {@link publishReviewWithFindings}. */
+export interface PublishReviewWithFindingsParams {
+  /** Authenticated GitHub client — see {@link MinimalIssuesClient} for the test seam. */
+  octokit: MinimalIssuesClient;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  /** The review's overall markdown summary (as authored by the Pi reviewer). */
+  summary: string;
+  /** Findings that anchored to a commentable diff line — see `anchor.ts`'s `anchorFindings`. */
+  inline: InlineComment[];
+  /** Findings that could not be anchored at all — rendered into the body instead of dropped. */
+  other: Finding[];
+  usage?: ReviewUsage;
+  /**
+   * Advisory only. ACCEPTED BUT IGNORED: Magpie never approves or requests
+   * changes (see PLAN.md §7 / CLAUDE.md's core security principle — a human
+   * always decides), so every review this function posts uses
+   * `event: "COMMENT"` regardless of what's passed here. The parameter
+   * exists purely so callers holding a `verdict` from the findings payload
+   * don't need to strip it before calling this function.
+   */
+  verdict?: "approve" | "comment";
+}
+
+/**
+ * Publish exactly one GitHub PR review (`pulls.createReview`) carrying
+ * inline comments for every diff-anchored finding, with a summary body that
+ * also surfaces every un-anchored finding under "Other observations" so
+ * nothing is silently dropped (PLAN.md §7's diff-anchoring constraint).
+ *
+ * `event` is always `"COMMENT"` — see {@link PublishReviewWithFindingsParams.verdict}.
+ *
+ * FALLBACK CHAIN (never throws, never goes silent — mirrors `publishReview`'s
+ * M1 contract):
+ *  1. `pulls.createReview` with the full `comments[]` built from `inline`.
+ *  2. If that rejects (GitHub 422s when any comment anchors to a line it
+ *     doesn't consider part of the diff — see `anchor.ts`'s module doc
+ *     comment), retry ONCE with `comments: []` and the `inline` findings
+ *     folded into the body's "Other observations" section alongside `other`,
+ *     so they're preserved as text instead of lost.
+ *  3. If the retry ALSO rejects, fall back to a single `issues.createComment`
+ *     (the M1-style plain summary comment) carrying that same folded body.
+ */
+export async function publishReviewWithFindings(
+  params: PublishReviewWithFindingsParams,
+): Promise<PublishedComment> {
+  const { octokit, owner, repo, prNumber, summary, inline, other, usage } = params;
+
+  const body = buildFindingsBody({ summary, other, usage });
+  const comments = inline.map(toReviewComment);
+
+  try {
+    const response = await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      event: "COMMENT",
+      body,
+      comments,
+    });
+    return { id: response.data.id, url: response.data.html_url };
+  } catch {
+    // First failure (typically a 422 from an inline comment anchored to a
+    // line GitHub rejects — see module doc comment above). Retry once with
+    // no inline comments at all, folding what would have been inline
+    // findings into the body as text instead of losing them.
+    const fallbackBody = buildFindingsBody({ summary, other, usage, foldedInline: inline });
+    try {
+      const response = await octokit.pulls.createReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        event: "COMMENT",
+        body: fallbackBody,
+        comments: [],
+      });
+      return { id: response.data.id, url: response.data.html_url };
+    } catch {
+      // Second failure: give up on posting a review object at all and fall
+      // back to the M1-style single issue comment, so a run never goes
+      // silent even if `pulls.createReview` is unusable for this PR.
+      const response = await octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: prNumber,
+        body: fallbackBody,
+      });
+      return { id: response.data.id, url: response.data.html_url };
+    }
+  }
+}
+
+/** Map an anchored `InlineComment` to a `pulls.createReview` `comments[]` entry. */
+function toReviewComment(comment: InlineComment): {
+  path: string;
+  line: number;
+  side: "RIGHT";
+  start_line?: number;
+  start_side?: "RIGHT";
+  body: string;
+} {
+  const entry: {
+    path: string;
+    line: number;
+    side: "RIGHT";
+    start_line?: number;
+    start_side?: "RIGHT";
+    body: string;
+  } = {
+    path: comment.path,
+    line: comment.line,
+    side: comment.side,
+    body: comment.message,
+  };
+  // Only set start_line/start_side for an actual multi-line range — anchor.ts
+  // never sets one without the other, but this keeps that pairing explicit
+  // here too rather than relying on the caller.
+  if (comment.start_line !== undefined) {
+    entry.start_line = comment.start_line;
+    entry.start_side = comment.start_side;
+  }
+  return entry;
+}
+
+/**
+ * Build the review body for {@link publishReviewWithFindings}: marker +
+ * header + summary, an "Other observations" section (when there's anything
+ * to show), and the usage footer.
+ *
+ * `foldedInline`, when provided, is the 422-fallback path folding what would
+ * have been `comments[]` entries into the same "Other observations" section
+ * as `other` — see `renderOtherObservations`'s doc comment for why they can
+ * share one section/renderer instead of needing two.
+ */
+function buildFindingsBody(params: {
+  summary: string;
+  other: Finding[];
+  usage?: ReviewUsage;
+  foldedInline?: InlineComment[];
+}): string {
+  const { summary, other, usage, foldedInline } = params;
+  const parts = [MAGPIE_REVIEW_MARKER, COMMENT_HEADER, "", summary.trim()];
+
+  const observations = renderOtherObservations(other, foldedInline ?? []);
+  if (observations) parts.push("", observations);
+
+  const footer = formatUsageFooter(usage);
+  if (footer) parts.push("", footer);
+
+  return parts.join("\n");
+}
+
+/**
+ * Render an "Other observations" markdown section listing every un-anchored
+ * `Finding` and (on the 422-fallback path only) every `InlineComment` that
+ * couldn't be posted inline, each as a `path:line` (or `path:start-end` for
+ * a range) list item followed by its text. Returns `undefined` when there's
+ * nothing to render, so callers can omit the section entirely rather than
+ * emitting an empty heading.
+ *
+ * Both `Finding` (unformatted: separate severity/category/message/
+ * suggestion) and `InlineComment` (pre-formatted via anchor.ts's
+ * `formatMessage` into `.message`) are accepted so the SAME renderer backs
+ * both the normal "other[] findings" section and the 422-fallback's folded
+ * inline findings, instead of two near-duplicate implementations drifting
+ * apart.
+ */
+function renderOtherObservations(other: Finding[], foldedInline: InlineComment[]): string | undefined {
+  const items = [...other.map(findingToListItem), ...foldedInline.map(inlineCommentToListItem)];
+  if (items.length === 0) return undefined;
+  return ["### Other observations", "", ...items].join("\n");
+}
+
+/** One `Finding` -> one "Other observations" markdown list item. */
+function findingToListItem(finding: Finding): string {
+  const location =
+    finding.end_line !== undefined && finding.end_line !== finding.line
+      ? `${finding.path}:${finding.line}-${finding.end_line}`
+      : `${finding.path}:${finding.line}`;
+  const severityLabel = { blocking: "Blocking", important: "Important", nit: "Nit" }[
+    finding.severity
+  ];
+  const textParts = [`**${severityLabel}** (${finding.category}) ${finding.message}`];
+  if (finding.suggestion) textParts.push(`Suggestion: ${finding.suggestion}`);
+  return `- \`${location}\`: ${textParts.join(" ")}`;
+}
+
+/** One (un-postable) `InlineComment` -> one "Other observations" markdown list item. */
+function inlineCommentToListItem(comment: InlineComment): string {
+  const location =
+    comment.start_line !== undefined
+      ? `${comment.path}:${comment.start_line}-${comment.line}`
+      : `${comment.path}:${comment.line}`;
+  // comment.message already has severity/category/suggestion folded in by
+  // anchor.ts's formatMessage and may span multiple lines; flatten it to a
+  // single line so it renders as one list item rather than breaking the list.
+  const text = comment.message.replace(/\s*\n+\s*/g, " ").trim();
+  return `- \`${location}\`: ${text}`;
 }
