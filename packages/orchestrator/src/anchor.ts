@@ -102,8 +102,9 @@ export function parseUnifiedDiff(diff: string): CommentableLines {
   // leaves one spurious empty trailing element that must not be read as a
   // (blank) context line for whatever hunk happened to be open. A
   // genuine blank context line inside a hunk is `" "` (one space), not
-  // `""`, so trimming only the trailing artifact never drops real content.
-  if (lines.length > 0 && lines[lines.length - 1] === "") {
+  // `""`, so trimming only trailing artifacts never drops real content. Loop
+  // rather than a single pop() so any run of trailing blank lines is cleared.
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }
 

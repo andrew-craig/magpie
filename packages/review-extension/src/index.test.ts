@@ -145,4 +145,34 @@ describe("report_findings parameter schema", () => {
     const { verdict, ...withoutVerdict } = SAMPLE_PARAMS;
     expect(Value.Check(reportFindingsTool.parameters, withoutVerdict)).toBe(false);
   });
+
+  // The following lock in schema-consistency with the orchestrator's `.strict()`
+  // zod (findings.ts): an empty string or an extra property must be rejected
+  // HERE, so Pi retries, rather than passing and being rejected downstream.
+  it("rejects an empty-string required field (minLength)", () => {
+    const bad = {
+      ...SAMPLE_PARAMS,
+      findings: [{ ...SAMPLE_PARAMS.findings[0], message: "" }],
+    };
+    expect(Value.Check(reportFindingsTool.parameters, bad)).toBe(false);
+  });
+
+  it("rejects a line number below 1 (minimum)", () => {
+    const bad = {
+      ...SAMPLE_PARAMS,
+      findings: [{ ...SAMPLE_PARAMS.findings[0], line: 0 }],
+    };
+    expect(Value.Check(reportFindingsTool.parameters, bad)).toBe(false);
+  });
+
+  it("rejects an unknown extra property (additionalProperties: false)", () => {
+    const badFinding = {
+      ...SAMPLE_PARAMS,
+      findings: [{ ...SAMPLE_PARAMS.findings[0], bogus: "nope" }],
+    };
+    expect(Value.Check(reportFindingsTool.parameters, badFinding)).toBe(false);
+
+    const badTopLevel = { ...SAMPLE_PARAMS, bogus: "nope" };
+    expect(Value.Check(reportFindingsTool.parameters, badTopLevel)).toBe(false);
+  });
 });
