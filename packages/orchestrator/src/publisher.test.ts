@@ -216,6 +216,13 @@ const RANGE_COMMENT: InlineComment = {
   message: "**Nit** (style)\n\nTidy this up.",
 };
 
+const CODE_BLOCK_COMMENT: InlineComment = {
+  path: "src/qux.ts",
+  line: 42,
+  side: "RIGHT",
+  message: "**Blocking** (correctness)\n\nBug here.\n\n**Suggestion:**\n```\nfix()\n```",
+};
+
 const OTHER_FINDING: Finding = {
   path: "src/baz.ts",
   line: 5,
@@ -322,6 +329,30 @@ describe("publishReviewWithFindings", () => {
       id: 99,
       url: "https://github.com/acme/widgets/pull/7#pullrequestreview-99",
     });
+  });
+
+  it("on a 422, folds a multi-line inline finding (with a fenced code block) into the body without flattening it", async () => {
+    const { client, createReview } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    createReview.mockRejectedValueOnce(conflictError);
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [CODE_BLOCK_COMMENT],
+      other: [],
+    });
+
+    const retryCall = createReview.mock.calls[1][0];
+    const body = retryCall.body as string;
+    expect(body).toContain("src/qux.ts:42");
+    // The fenced code block survives, indented under the bullet, rather than
+    // being collapsed onto one line with the rest of the message.
+    expect(body).toContain("  ```\n  fix()\n  ```");
+    // Sanity check the finding's rendered block isn't a single flattened line.
+    const findingBlock = body.slice(body.indexOf("src/qux.ts:42"));
+    expect(findingBlock).toContain("\n");
   });
 
   it("falls back to issues.createComment once when both createReview attempts fail, and never throws", async () => {

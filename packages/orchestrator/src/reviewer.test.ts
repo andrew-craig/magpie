@@ -210,6 +210,25 @@ describe("runReview", () => {
     }
   });
 
+  it("defaults to a fixed placeholder when both the findings file's summary and the assistant text are empty", async () => {
+    // No assistant messages at all, so extractSummaryText(messages) also
+    // returns "" — the fallback of the fallback must kick in rather than
+    // publishing an empty summary.
+    const piBinary = writeFakePiWithFindings([], {
+      kind: "valid",
+      value: { findings: [], summary: "", verdict: "approve" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.summary).toBe("No summary provided.");
+      expect(result.findings).toEqual([]);
+      expect(result.verdict).toBe("approve");
+    }
+  });
+
   it("returns ok:false when pi exits 0 without ever calling report_findings", async () => {
     const piBinary = writeFakePiWithFindings([assistantMessage("some text but no tool call")], { kind: "omit" });
 

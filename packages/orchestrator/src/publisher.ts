@@ -405,9 +405,13 @@ function inlineCommentToListItem(comment: InlineComment): string {
     comment.start_line !== undefined
       ? `${comment.path}:${comment.start_line}-${comment.line}`
       : `${comment.path}:${comment.line}`;
-  // comment.message already has severity/category/suggestion folded in by
-  // anchor.ts's formatMessage and may span multiple lines; flatten it to a
-  // single line so it renders as one list item rather than breaking the list.
-  const text = comment.message.replace(/\s*\n+\s*/g, " ").trim();
-  return `- \`${location}\`: ${text}`;
+  // Preserve markdown (code blocks, lists) within the list item by indenting
+  // every line after the first by 2 spaces so it stays associated with the
+  // bullet, rather than flattening newlines away.
+  const message = comment.message
+    .trim()
+    .split("\n")
+    .map((line, i) => (i === 0 || line.length === 0 ? line : `  ${line}`))
+    .join("\n");
+  return `- \`${location}\`: ${message}`;
 }

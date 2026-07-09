@@ -419,52 +419,70 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       // module doc comment): never assume its shape just because Pi exited
       // cleanly, since the file's content traces back to an LLM reasoning
       // over an untrusted, possibly-adversarial PR diff.
+      // Outer try/catch: by this point `clearTimers()` above has already
+      // cleared the timeout AND removed the abort listener, so this IIFE is
+      // the ONLY thing left that can settle `runReview`'s promise. If
+      // anything in here threw uncaught, `finish()` would never be called
+      // and the promise — and the whole pipeline awaiting it — would hang
+      // forever instead of resolving `{ ok: false, ... }` per this module's
+      // documented never-throws/always-settles contract. The nested
+      // `readFile` try/catch below handles the expected "no findings file"
+      // case; this outer one is a last-resort guard against anything else
+      // (e.g. a future `parseFindings`/`finish` change growing an
+      // unexpected throw).
       void (async () => {
-        let findingsRaw: string;
         try {
-          findingsRaw = await readFile(findingsPath, "utf-8");
-        } catch {
-          // No findings file. WHY this is also where provider errors surface:
-          // a failed model call (a 402/rate-limit/context-length error, etc.)
-          // still exits Pi with code 0 and emits a final assistant message
-          // with empty content, `stopReason: "error"`, and a human-readable
-          // `errorMessage`, but never reaches the `report_findings` tool call
-          // — so it lands here, in the missing-file path, not the parse path.
-          // Prefer that concrete cause over the opaque generic reason when the
-          // last assistant turn carries error info (important for debugging
-          // wave-3's live OpenRouter runs); otherwise it's a genuine "model
-          // never called the tool" (refusal, ran out of turns) or an I/O
-          // surprise reading the file. Either way we must not go silent
-          // (PLAN.md §6).
-          const last = messages[messages.length - 1];
-          if (last && (last.stopReason === "error" || last.errorMessage)) {
-            const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
-            finish({ ok: false, reason: `pi review failed: ${detail}` });
+          let findingsRaw: string;
+          try {
+            findingsRaw = await readFile(findingsPath, "utf-8");
+          } catch {
+            // No findings file. WHY this is also where provider errors surface:
+            // a failed model call (a 402/rate-limit/context-length error, etc.)
+            // still exits Pi with code 0 and emits a final assistant message
+            // with empty content, `stopReason: "error"`, and a human-readable
+            // `errorMessage`, but never reaches the `report_findings` tool call
+            // — so it lands here, in the missing-file path, not the parse path.
+            // Prefer that concrete cause over the opaque generic reason when the
+            // last assistant turn carries error info (important for debugging
+            // wave-3's live OpenRouter runs); otherwise it's a genuine "model
+            // never called the tool" (refusal, ran out of turns) or an I/O
+            // surprise reading the file. Either way we must not go silent
+            // (PLAN.md §6).
+            const last = messages[messages.length - 1];
+            if (last && (last.stopReason === "error" || last.errorMessage)) {
+              const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
+              finish({ ok: false, reason: `pi review failed: ${detail}` });
+              return;
+            }
+            finish({ ok: false, reason: "pi did not call report_findings" });
             return;
           }
-          finish({ ok: false, reason: "pi did not call report_findings" });
-          return;
+
+          const parsed = parseFindings(findingsRaw);
+          if (!parsed.ok) {
+            finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}` });
+            return;
+          }
+
+          // The findings file's `summary` is the primary source; Pi's final
+          // plain-text assistant turn (if any) is only a fallback for the rare
+          // case the model left `summary` empty despite calling the tool. If
+          // that fallback is ALSO empty, fall back further to a fixed default
+          // so a successful review never publishes an empty summary.
+          const fileSummary = parsed.value.summary.trim();
+          const summary =
+            fileSummary.length > 0 ? parsed.value.summary : (extractSummaryText(messages) || "No summary provided.");
+
+          finish({
+            ok: true,
+            summary,
+            findings: parsed.value.findings,
+            verdict: parsed.value.verdict,
+            usage,
+          });
+        } catch (err) {
+          finish({ ok: false, reason: `failed to process findings: ${errorMessage(err)}` });
         }
-
-        const parsed = parseFindings(findingsRaw);
-        if (!parsed.ok) {
-          finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}` });
-          return;
-        }
-
-        // The findings file's `summary` is the primary source; Pi's final
-        // plain-text assistant turn (if any) is only a fallback for the rare
-        // case the model left `summary` empty despite calling the tool.
-        const fileSummary = parsed.value.summary.trim();
-        const summary = fileSummary.length > 0 ? parsed.value.summary : extractSummaryText(messages);
-
-        finish({
-          ok: true,
-          summary,
-          findings: parsed.value.findings,
-          verdict: parsed.value.verdict,
-          usage,
-        });
       })();
     });
 
