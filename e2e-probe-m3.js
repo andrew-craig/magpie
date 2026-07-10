@@ -31,3 +31,4 @@ module.exports = { clamp, isEven };
 // evidence capture (docker ps during the run).
 const NOOP_MARKER = "m3-synchronize-probe";
 module.exports.NOOP_MARKER = NOOP_MARKER;
+// second synchronize trigger for docker ps capture (attempt 2)
