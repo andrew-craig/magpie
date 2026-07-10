@@ -3,5 +3,19 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **decision_7e12** · P1 · open · M1 execution decisions (tech-lead session)  (parent: epic_04f9)
-- **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
+- **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
+- **task_1ffd** · P1 · open · M4-E: fail-closed startup assertions in the container entry script  (parent: epic_6730)
+- **task_8667** · P1 · open · M4-B: per-job virtual keys — mint before run, spend budget, revoke on cleanup  (parent: epic_6730)
+- **task_bbdd** · P1 · open · M4-D: magpie-net + host iptables — container egress default-deny, gateway only  (parent: epic_6730)
+- **task_eaf9** · P1 · open · M4-C: point Pi at the gateway — base-URL override, only the virtual key in the container env  (parent: epic_6730)
+- **task_eb22** · P1 · open · M4-A: LiteLLM gateway service — own user, real provider key, OpenAI-compatible endpoint  (parent: epic_6730)
+- **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
+- **task_4a75** · P2 · open · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
+- **task_56ad** · P2 · open · M5-A: systemd units + install script — magpie, gateway, firewall oneshot  (parent: epic_d6c1)
+- **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
+- **task_a193** · P2 · open · M5-B: incremental re-review on synchronize — review only the before...after range  (parent: epic_d6c1)
+- **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
+- **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
+- **task_624d** · P3 · open · M6-C: gVisor (runsc) runtime for the reviewer container  (parent: epic_3c41)
+- **task_9c9d** · P3 · open · M6-D: multi-provider support beyond OpenRouter  (parent: epic_3c41)
+- **task_ad15** · P3 · open · M6-A: @magpie review — on-demand re-review via PR comment command  (parent: epic_3c41)

@@ -2,14 +2,14 @@
 id: decision_7e12
 title: M1 execution decisions (tech-lead session)
 type: decision
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_04f9
 remote_task_url: null
 created_at: 2026-07-06T04:29:18Z
-updated_at: 2026-07-06T04:29:18Z
+updated_at: 2026-07-10T21:58:38Z
 ---
 Governing decisions for the M1 build session (tech lead + sonnet subagents).
 
