@@ -2,14 +2,14 @@
 id: epic_a580
 title: Milestone 3 — Containerize the reviewer runtime
 type: epic
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-10T06:47:15Z
-updated_at: 2026-07-10T07:48:29Z
+updated_at: 2026-07-10T21:18:52Z
 ---
 Run Pi inside an ephemeral, hardened Docker container instead of the M1/M2 host
 subprocess. This is PLAN.md milestone 3 ("Containerize") and PLAN.md §4 (Review container).

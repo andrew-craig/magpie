@@ -3,7 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **epic_a580** · P1 · in_progress · Milestone 3 — Containerize the reviewer runtime
-- **task_d8aa** · P1 · in_progress · M3-D: pipeline integration + config wiring + live e2e verification  (parent: epic_a580)
 - **decision_7e12** · P1 · open · M1 execution decisions (tech-lead session)  (parent: epic_04f9)
 - **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
