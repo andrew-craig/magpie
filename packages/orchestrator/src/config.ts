@@ -8,7 +8,7 @@
 // chosen" for the surrounding design.
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, TomlError } from "smol-toml";
 import { z } from "zod";
@@ -50,7 +50,30 @@ const rawConfigSchema = z
     ),
     workspace: z
       .object({
-        work_dir: z.string().min(1).default("/var/lib/magpie/work"),
+        // Must be absolute: container-mounts.ts's prepareReviewMount() does a
+        // recursive force-remove of `<work_dir>/.../.git`, and a relative
+        // work_dir would let that resolve against process.cwd() instead of
+        // the intended workspace tree (see prepareReviewMount's own runtime
+        // guard for the same invariant, belt-and-suspenders here).
+        work_dir: z
+          .string()
+          .min(1)
+          .default("/var/lib/magpie/work")
+          .refine(isAbsolute, { message: "workspace.work_dir must be an absolute path" }),
+      })
+      .strict()
+      .prefault({}),
+    container: z
+      .object({
+        // MUST match the tag the M3-A image build produces (see PLAN.md M3
+        // and docker/). Not just a convention: task_4ed4 (M3-C)'s `docker
+        // run` invocation uses this value directly as the image to run.
+        image: z.string().min(1).default("magpie-reviewer:0.1.0"),
+        memory: z.string().min(1).default("4g"),
+        cpus: z.string().min(1).default("2"),
+        pids_limit: z.number().int().positive().default(256),
+        docker_bin: z.string().min(1).default("docker"),
+        network: z.string().min(1).default("bridge"),
       })
       .strict()
       .prefault({}),
@@ -80,6 +103,20 @@ export interface Config {
   repoAllowlist: string[];
   workspace: {
     workDir: string;
+  };
+  container: {
+    /** Docker image tag the review container runs. See PLAN.md M3/M3-C. */
+    image: string;
+    /** `docker run --memory` limit, e.g. "4g". */
+    memory: string;
+    /** `docker run --cpus` limit, e.g. "2". */
+    cpus: string;
+    /** `docker run --pids-limit`. */
+    pidsLimit: number;
+    /** Path to the docker (or docker-compatible, e.g. podman) CLI binary. */
+    dockerBin: string;
+    /** `docker run --network`. "bridge" until M4 introduces `magpie-net`. */
+    network: string;
   };
   /** Secrets resolved from the environment (never sourced from the TOML file). */
   secrets: {
@@ -315,6 +352,14 @@ export function loadConfig(configPath?: string): Config {
     repoAllowlist: data.repo_allowlist,
     workspace: {
       workDir: data.workspace.work_dir,
+    },
+    container: {
+      image: data.container.image,
+      memory: data.container.memory,
+      cpus: data.container.cpus,
+      pidsLimit: data.container.pids_limit,
+      dockerBin: data.container.docker_bin,
+      network: data.container.network,
     },
     secrets: {
       webhookSecret: webhookSecret!,

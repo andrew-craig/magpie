@@ -1,5 +1,5 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
@@ -41,13 +41,17 @@ function writeFakePi(body: string): string {
 }
 
 /**
- * NDJSON script body for a fake `pi` that emits one assistant review turn AND
- * "calls" the report_findings tool by writing a findings file to
- * `MAGPIE_FINDINGS_PATH` (see reviewer.ts's M2 findings-file contract and
- * reviewer.test.ts's `writeFakePiWithFindings`, which this mirrors) — the
- * child never actually receives the real Pi extension since these are all
- * fake `pi` binaries, so simulating the file write is the only way an ok:true
- * `ReviewResult` (now requiring `findings`/`verdict`) is reachable here.
+ * NDJSON script body for a fake "docker" that emits one assistant review turn
+ * AND "calls" the report_findings tool by writing a findings file into the
+ * mounted `/out` dir — parsed from its own `-v <hostOut>:/out` argv, the same
+ * channel M3's real container writes through (see reviewer.ts's M3 docker
+ * invocation and reviewer.test.ts's `writeFakeDockerWithFindings`, which this
+ * mirrors). The child never receives the real Pi extension since these are all
+ * fake binaries, so simulating the file write is the only way an ok:true
+ * `ReviewResult` (requiring `findings`/`verdict`) is reachable here. NOTE: in
+ * M3 the pipeline's `piBinary` seam is spawned as `<dockerBin> run ...`, so
+ * these scripts see the docker argv (not the old `MAGPIE_FINDINGS_PATH` env,
+ * which reviewer.ts no longer sets — that path is baked into the image now).
  */
 function fakePiScriptEmitting(text: string): string {
   return fakePiScriptEmittingFindings(text, []);
@@ -68,12 +72,34 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
   const findings = { findings: findingsList, summary: text, verdict: "comment" };
   return [
     `const fs = require("fs");`,
-    `fs.writeFileSync(process.env.MAGPIE_FINDINGS_PATH, ${JSON.stringify(JSON.stringify(findings))});`,
+    `const nodepath = require("path");`,
+    `const argv = process.argv.slice(2);`,
+    // Record the full "docker run" argv this fake was invoked with so tests
+    // can assert on it afterwards (e.g. that pipeline.ts threaded job.id
+    // through to reviewer.ts's `--name magpie-<jobId>` — see the
+    // "threads the job id into the container name" test below), mirroring
+    // reviewer.test.ts's `invocation.json` pattern.
+    `fs.writeFileSync(${JSON.stringify(join(root, INVOCATION_FILE))}, JSON.stringify(argv));`,
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
+    `}`,
+    `fs.writeFileSync(nodepath.join(outHost, "findings.json"), ${JSON.stringify(JSON.stringify(findings))});`,
     `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
     `const msg = ${JSON.stringify(msg)};`,
     `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
     `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
   ].join("\n");
+}
+
+/** Name of the file the fake docker script (see `fakePiScriptEmittingFindings`) records its argv to, under `root`. */
+const INVOCATION_FILE = "invocation.json";
+
+/** Reads back the `docker run` argv the fake docker script recorded, or `undefined` if it never ran. */
+function readRecordedArgv(): string[] | undefined {
+  const path = join(root, INVOCATION_FILE);
+  if (!existsSync(path)) return undefined;
+  return JSON.parse(readFileSync(path, "utf-8")) as string[];
 }
 
 /** Fake `pi` script that exits non-zero, simulating a failed review run. */
@@ -92,6 +118,14 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 100, ...overrides },
     repoAllowlist: [],
     workspace: { workDir: join(root, "work") },
+    container: {
+      image: "magpie-reviewer:0.1.0",
+      memory: "4g",
+      cpus: "2",
+      pidsLimit: 256,
+      dockerBin: "docker",
+      network: "bridge",
+    },
     secrets: {
       webhookSecret: "test-webhook-secret",
       llmApiKey: "test-llm-api-key",
@@ -236,6 +270,42 @@ describe("createReviewPipeline / runJob", () => {
     });
     expect(cleanupCalls).toHaveLength(1);
     expect(existsSync(cleanupCalls[0])).toBe(false);
+  });
+
+  it("threads the queue's job id into the reviewer's container name (--name magpie-<jobId>)", async () => {
+    // M3-D: pipeline.ts must pass `jobId: job.id` through to runReview so
+    // reviewer.ts's `buildContainerName` derives `magpie-<jobId>` (see
+    // reviewer.ts) rather than a fresh random id per run — otherwise the
+    // queue's `AbortController` -> reviewer.ts's `docker kill` path (already
+    // proven at the reviewer.ts unit level in reviewer.test.ts) couldn't be
+    // told which container name to target from outside runReview. Asserted
+    // here via the fake docker's recorded argv (see `readRecordedArgv`)
+    // rather than re-testing the kill mechanics themselves, which belong to
+    // reviewer.test.ts.
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good, no issues found."));
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ id: "job-e2e-42" }), new AbortController().signal);
+
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    const nameIdx = argv!.indexOf("--name");
+    expect(nameIdx).toBeGreaterThanOrEqual(0);
+    expect(argv![nameIdx + 1]).toBe("magpie-job-e2e-42");
   });
 
   it("anchors a findable finding to an inline comment and folds an unanchorable one into Other observations", async () => {
@@ -560,6 +630,10 @@ describe("createReviewPipeline / runJob", () => {
       // skip publishing entirely.
       const piBinary = writeFakePi(
         [
+          // In M3 this seam is spawned as `<dockerBin> run ...`, and on abort
+          // reviewer.ts additionally spawns `<dockerBin> kill <name>` — handle
+          // that subcommand by exiting immediately so no fake process lingers.
+          `if (process.argv[2] === "kill") process.exit(0);`,
           `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
           `setTimeout(() => {}, 60000);`,
         ].join("\n"),

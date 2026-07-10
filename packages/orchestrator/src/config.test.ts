@@ -74,6 +74,12 @@ describe("loadConfig", () => {
     expect(config.limits.maxDiffLines).toBe(4000);
     expect(config.repoAllowlist).toEqual(["my-org/my-repo"]);
     expect(config.workspace.workDir).toBe("/var/lib/magpie/work");
+    expect(config.container.image).toBe("magpie-reviewer:0.1.0");
+    expect(config.container.memory).toBe("4g");
+    expect(config.container.cpus).toBe("2");
+    expect(config.container.pidsLimit).toBe(256);
+    expect(config.container.dockerBin).toBe("docker");
+    expect(config.container.network).toBe("bridge");
     expect(config.secrets.webhookSecret).toBe("test-webhook-secret");
     expect(config.secrets.llmApiKey).toBe("test-llm-api-key");
     expect(config.secrets.githubPrivateKey).toContain("BEGIN PRIVATE KEY");
@@ -102,7 +108,15 @@ concurrency = 5
 max_diff_lines = 100
 
 [workspace]
-work_dir = "./.magpie-work"
+work_dir = "/srv/magpie-work"
+
+[container]
+image = "magpie-reviewer:9.9.9"
+memory = "8g"
+cpus = "4"
+pids_limit = 512
+docker_bin = "/usr/local/bin/podman"
+network = "magpie-net"
 `);
     Object.assign(process.env, REQUIRED_ENV);
 
@@ -116,7 +130,46 @@ work_dir = "./.magpie-work"
     expect(config.limits.concurrency).toBe(5);
     expect(config.limits.maxDiffLines).toBe(100);
     expect(config.repoAllowlist).toEqual([]);
-    expect(config.workspace.workDir).toBe("./.magpie-work");
+    expect(config.workspace.workDir).toBe("/srv/magpie-work");
+    expect(config.container.image).toBe("magpie-reviewer:9.9.9");
+    expect(config.container.memory).toBe("8g");
+    expect(config.container.cpus).toBe("4");
+    expect(config.container.pidsLimit).toBe(512);
+    expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
+    expect(config.container.network).toBe("magpie-net");
+  });
+
+  it("reports a malformed [container] field by name", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(
+      MINIMAL_TOML(pemPath) +
+        `\n[container]\npids_limit = "not-a-number"\n`,
+    );
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/container\.pids_limit/);
+    }
+  });
+
+  it("rejects a relative workspace.work_dir with a clear error", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(
+      MINIMAL_TOML(pemPath) + `\n[workspace]\nwork_dir = "./.magpie-work"\n`,
+    );
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/workspace\.work_dir must be an absolute path/);
+    }
   });
 
   it("reports a missing required field by name", () => {

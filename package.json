@@ -10,7 +10,8 @@
     "dev": "npm run dev --workspace=@magpie/orchestrator",
     "start": "npm run start --workspace=@magpie/orchestrator",
     "test": "npm run test --workspaces --if-present",
-    "dev:smee": "node --env-file-if-exists=.env scripts/dev-smee.mjs"
+    "dev:smee": "node --env-file-if-exists=.env scripts/dev-smee.mjs",
+    "build:reviewer-image": "bash scripts/build-reviewer-image.sh"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

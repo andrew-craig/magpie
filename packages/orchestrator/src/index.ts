@@ -13,7 +13,9 @@
 
 import { pathToFileURL } from "node:url";
 import { loadConfig, ConfigError } from "./config.js";
+import { assertDockerAvailable, DockerUnavailableError } from "./docker.js";
 import { createPullRequestFilter } from "./filter.js";
+import { cleanupOrphanContainers } from "./orphan-cleanup.js";
 import { createReviewPipeline } from "./pipeline.js";
 import type { JobOutcome } from "./queue.js";
 import { JobQueue, jobQueueOptionsFromConfig } from "./queue.js";
@@ -74,6 +76,20 @@ export function logJobOutcome(outcome: JobOutcome, logger: JobOutcomeLogger = co
 
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // Fail fast if docker isn't usable: M3 containerizes every review job (see
+  // PLAN.md Milestone 3, docker.ts), so a broken/missing docker install
+  // would otherwise only surface once the first webhook triggers a job,
+  // failing every subsequent job the same way. Refusing to start at all is
+  // strictly better for a self-hosted, unattended service.
+  await assertDockerAvailable(config);
+
+  // Defence-in-depth (M3-D, see orphan-cleanup.ts): remove any `magpie-*`
+  // review containers left running by a previous crash of this process
+  // (normal exits, including the graceful-shutdown path below, never leave
+  // one behind — see reviewer.ts's `--rm` + kill-on-timeout/abort handling).
+  // Best-effort and non-fatal: never blocks startup on a docker error.
+  await cleanupOrphanContainers(config);
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
   const { runJob, cleanupJob } = createReviewPipeline(config);
@@ -150,7 +166,7 @@ const isEntrypoint =
 
 if (isEntrypoint) {
   main().catch((err: unknown) => {
-    if (err instanceof ConfigError) {
+    if (err instanceof ConfigError || err instanceof DockerUnavailableError) {
       console.error(`[magpie] ${err.message}`);
     } else {
       const message = err instanceof Error ? err.message : String(err);

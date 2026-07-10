@@ -262,6 +262,13 @@ export function createReviewPipeline(
           prBody: pr.body ?? "",
           config,
           piBinary: deps.piBinary,
+          // The queue's own per-job id (see queue.ts's `JobDescriptor.id`,
+          // already used for every log line via `jobLogFields` above) doubles
+          // as the review container's name (`magpie-<sanitized id>` — see
+          // reviewer.ts's `buildContainerName`), so the timeout/abort
+          // `docker kill` path targets the right container. No parallel id
+          // is minted here.
+          jobId: job.id,
           signal,
         });
       }
