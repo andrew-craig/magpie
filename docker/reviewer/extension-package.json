@@ -1,0 +1,10 @@
+{
+  "name": "magpie-reviewer-extension-deps",
+  "private": true,
+  "description": "Pinned runtime deps for the baked-in report_findings extension (packages/review-extension) and the `pi` CLI itself, installed together so the CLI and the extension's `import`s resolve against the EXACT SAME installed copies. Versions must match packages/review-extension/package.json's resolved versions on the host (see package-lock.json) -- keep this file in lockstep with that package.json; a mismatch here is a version-skew bug, not a style nit.",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "@earendil-works/pi-tui": "0.80.3",
+    "typebox": "1.1.38"
+  }
+}
