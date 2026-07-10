@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createOutputDir, prepareReviewMount } from "./container-mounts.js";
 
@@ -61,6 +61,29 @@ describe("prepareReviewMount", () => {
 
     await expect(prepareReviewMount(dir)).resolves.toBe(dir);
     expect(await readFile(join(dir, "file.txt"), "utf-8")).toBe("content\n");
+  });
+
+  it("rejects a relative workspace path and performs no filesystem removal", async () => {
+    // Build a real workspace whose .git a bug in the guard could actually
+    // delete (if the relative path happened to resolve, via process.cwd(),
+    // back to this same directory) — a plain hard-coded string like
+    // "relative/path" wouldn't prove anything was (or wasn't) removed.
+    const dir = await makeFakeWorkspace();
+    const relativeDir = relative(process.cwd(), dir);
+    // Sanity-check the fixture: this only exercises the guard we care about
+    // if the path handed to prepareReviewMount is actually relative.
+    expect(relativeDir.startsWith("/")).toBe(false);
+
+    await expect(prepareReviewMount(relativeDir)).rejects.toThrow(
+      /prepareReviewMount requires an absolute workspace path/,
+    );
+    expect(existsSync(join(dir, ".git"))).toBe(true);
+  });
+
+  it("rejects an empty workspace path", async () => {
+    await expect(prepareReviewMount("")).rejects.toThrow(
+      /prepareReviewMount requires an absolute workspace path/,
+    );
   });
 });
 

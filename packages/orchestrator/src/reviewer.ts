@@ -219,6 +219,21 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     return { ok: false, reason: "aborted" };
   }
 
+  // `process.getuid`/`getgid` are only defined on POSIX platforms; a bare
+  // `!` non-null assertion here would surface as an opaque TypeError instead
+  // of a clear failure. Magpie's container runtime (`docker run --user
+  // uid:gid`) is a POSIX/Linux-only host requirement anyway, so this can
+  // only fire in practice on an unsupported host — but runReview's contract
+  // is to never throw, so fail through the same `{ ok: false }` path as
+  // every other early-exit above rather than let it escape as an exception.
+  if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+    await output.cleanup().catch(() => {});
+    return {
+      ok: false,
+      reason: "review container requires a POSIX host (process.getuid/getgid unavailable)",
+    };
+  }
+
   // Start from a copy of process.env only so the docker CLIENT process still
   // has the ambient PATH/HOME/etc. it needs to run; the CONTAINER itself
   // inherits none of this — only what's explicitly passed via `-e` below
@@ -251,7 +266,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     "--name",
     containerName,
     "--user",
-    `${process.getuid!()}:${process.getgid!()}`,
+    `${process.getuid()}:${process.getgid()}`,
     "--read-only",
     "--tmpfs",
     "/tmp",

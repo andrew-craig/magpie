@@ -108,7 +108,7 @@ concurrency = 5
 max_diff_lines = 100
 
 [workspace]
-work_dir = "./.magpie-work"
+work_dir = "/srv/magpie-work"
 
 [container]
 image = "magpie-reviewer:9.9.9"
@@ -130,7 +130,7 @@ network = "magpie-net"
     expect(config.limits.concurrency).toBe(5);
     expect(config.limits.maxDiffLines).toBe(100);
     expect(config.repoAllowlist).toEqual([]);
-    expect(config.workspace.workDir).toBe("./.magpie-work");
+    expect(config.workspace.workDir).toBe("/srv/magpie-work");
     expect(config.container.image).toBe("magpie-reviewer:9.9.9");
     expect(config.container.memory).toBe("8g");
     expect(config.container.cpus).toBe("4");
@@ -153,6 +153,22 @@ network = "magpie-net"
     } catch (err) {
       expect(err).toBeInstanceOf(ConfigError);
       expect((err as ConfigError).message).toMatch(/container\.pids_limit/);
+    }
+  });
+
+  it("rejects a relative workspace.work_dir with a clear error", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(
+      MINIMAL_TOML(pemPath) + `\n[workspace]\nwork_dir = "./.magpie-work"\n`,
+    );
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/workspace\.work_dir must be an absolute path/);
     }
   });
 

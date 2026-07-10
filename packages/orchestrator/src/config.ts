@@ -8,7 +8,7 @@
 // chosen" for the surrounding design.
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, TomlError } from "smol-toml";
 import { z } from "zod";
@@ -50,7 +50,16 @@ const rawConfigSchema = z
     ),
     workspace: z
       .object({
-        work_dir: z.string().min(1).default("/var/lib/magpie/work"),
+        // Must be absolute: container-mounts.ts's prepareReviewMount() does a
+        // recursive force-remove of `<work_dir>/.../.git`, and a relative
+        // work_dir would let that resolve against process.cwd() instead of
+        // the intended workspace tree (see prepareReviewMount's own runtime
+        // guard for the same invariant, belt-and-suspenders here).
+        work_dir: z
+          .string()
+          .min(1)
+          .default("/var/lib/magpie/work")
+          .refine(isAbsolute, { message: "workspace.work_dir must be an absolute path" }),
       })
       .strict()
       .prefault({}),

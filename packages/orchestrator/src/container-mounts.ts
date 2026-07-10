@@ -8,7 +8,7 @@
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 /**
  * Strips `.git` from a checked-out workspace so the directory is safe to
@@ -42,6 +42,18 @@ import { join } from "node:path";
  * a missing path.
  */
 export async function prepareReviewMount(workspaceDir: string): Promise<string> {
+  // Guard the recursive force-remove below: `workspaceDir` is always
+  // produced by this codebase as an absolute path (join(config.workspace.
+  // workDir, ...), and work_dir is itself asserted absolute at config load —
+  // see config.ts), but since a bug or bad caller passing "" or a relative
+  // path here would make `rm(..., { recursive: true, force: true })` resolve
+  // against `process.cwd()` instead, fail loudly before it ever runs rather
+  // than risk deleting the wrong directory tree.
+  if (!isAbsolute(workspaceDir)) {
+    throw new Error(
+      `prepareReviewMount requires an absolute workspace path, got: "${workspaceDir}"`,
+    );
+  }
   await rm(join(workspaceDir, ".git"), { recursive: true, force: true });
   return workspaceDir;
 }
