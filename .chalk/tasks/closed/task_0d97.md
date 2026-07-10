@@ -2,14 +2,14 @@
 id: task_0d97
 title: M2-E: pipeline integration + live e2e verification
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_e6e6
 remote_task_url: null
 created_at: 2026-07-09T06:34:40Z
-updated_at: 2026-07-10T02:02:19Z
+updated_at: 2026-07-10T02:55:35Z
 ---
 Integrate the structured-findings flow end-to-end through pipeline.ts and live-verify against a real PR, mirroring the M1 e2e acceptance.
 

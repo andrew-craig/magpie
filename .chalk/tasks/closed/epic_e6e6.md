@@ -2,14 +2,14 @@
 id: epic_e6e6
 title: Milestone 2 — Structured findings + inline PR comments
 type: epic
-status: open
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-09T06:32:53Z
-updated_at: 2026-07-09T06:32:53Z
+updated_at: 2026-07-10T02:55:35Z
 ---
 Replace M1's single plain-text summary comment with structured, diff-anchored inline review comments, keeping the M1 host-subprocess model (containerization is M3, NOT in scope here).
 
