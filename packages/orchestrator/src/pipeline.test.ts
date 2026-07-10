@@ -50,12 +50,22 @@ function writeFakePi(body: string): string {
  * `ReviewResult` (now requiring `findings`/`verdict`) is reachable here.
  */
 function fakePiScriptEmitting(text: string): string {
+  return fakePiScriptEmittingFindings(text, []);
+}
+
+/**
+ * Like {@link fakePiScriptEmitting} but lets the caller supply the
+ * `findings[]` array written to the findings file, so tests can drive the
+ * pipeline's inline-anchoring path (anchor.ts's `anchorFindings`, wired in
+ * pipeline.ts) instead of always taking the "no findings" happy path.
+ */
+function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): string {
   const msg = {
     role: "assistant",
     content: [{ type: "text", text }],
     usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.001 } },
   };
-  const findings = { findings: [], summary: text, verdict: "comment" };
+  const findings = { findings: findingsList, summary: text, verdict: "comment" };
   return [
     `const fs = require("fs");`,
     `fs.writeFileSync(process.env.MAGPIE_FINDINGS_PATH, ${JSON.stringify(JSON.stringify(findings))});`,
@@ -141,14 +151,18 @@ function fakeOctokit(opts: {
   const createComment = vi.fn(async (_args: { owner: string; repo: string; issue_number: number; body: string }) => ({
     data: { id: 42, html_url: "https://github.com/acme/widgets/pull/7#issuecomment-42" },
   }));
+  const createReview = vi.fn(async (_args: unknown) => ({
+    data: { id: 43, html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-43" },
+  }));
 
   const octokit = {
     paginate,
     rest: { pulls: { get, listFiles } },
     issues: { createComment },
+    pulls: { createReview },
   };
 
-  return { octokit, get, listFiles, paginate, createComment };
+  return { octokit, get, listFiles, paginate, createComment, createReview };
 }
 
 /** Fake `createWorkspace`: a real throwaway temp dir, no git involved. */
@@ -175,8 +189,8 @@ function fakeWorkspaceFactory() {
 }
 
 describe("createReviewPipeline / runJob", () => {
-  it("happy path: reviews a small diff and posts exactly one comment; workspace is cleaned up", async () => {
-    const { octokit, get, createComment } = fakeOctokit({
+  it("happy path: reviews a small diff and posts exactly one PR review (no findings); workspace is cleaned up", async () => {
+    const { octokit, get, createComment, createReview } = fakeOctokit({
       title: "Add feature",
       body: "Some PR body",
       files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
@@ -202,10 +216,15 @@ describe("createReviewPipeline / runJob", () => {
     // PR metadata fetched once (no mediaType) plus once for the diff body.
     expect(get).toHaveBeenCalledTimes(2);
 
-    expect(createComment).toHaveBeenCalledTimes(1);
-    const body = createComment.mock.calls[0][0].body as string;
-    expect(body).toContain(MAGPIE_REVIEW_MARKER);
-    expect(body).toContain("Looks good, no issues found.");
+    // No findings at all -> anchorFindings produces an empty inline[] and
+    // other[], so publishReviewWithFindings still goes through
+    // pulls.createReview (never issues.createComment) with comments: [].
+    expect(createReview).toHaveBeenCalledTimes(1);
+    const reviewArgs = createReview.mock.calls[0][0] as { body: string; comments: unknown[] };
+    expect(reviewArgs.body).toContain(MAGPIE_REVIEW_MARKER);
+    expect(reviewArgs.body).toContain("Looks good, no issues found.");
+    expect(reviewArgs.comments).toEqual([]);
+    expect(createComment).not.toHaveBeenCalled();
 
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]).toMatchObject({
@@ -217,6 +236,84 @@ describe("createReviewPipeline / runJob", () => {
     });
     expect(cleanupCalls).toHaveLength(1);
     expect(existsSync(cleanupCalls[0])).toBe(false);
+  });
+
+  it("anchors a findable finding to an inline comment and folds an unanchorable one into Other observations", async () => {
+    // One finding lands on `src/a.ts` line 1 — a genuine '+' (added) line in
+    // the diff below, so anchorFindings (anchor.ts) anchors it and the
+    // pipeline must publish it as a `comments[]` entry via
+    // publishReviewWithFindings. The other finding is on a path the diff
+    // never touches at all, so it can't anchor and must instead show up as
+    // text under the review body's "Other observations" section instead of
+    // being silently dropped (PLAN.md's diff-anchoring constraint).
+    const diffText =
+      "diff --git a/src/a.ts b/src/a.ts\n" +
+      "--- a/src/a.ts\n" +
+      "+++ b/src/a.ts\n" +
+      "@@ -1,0 +1,2 @@\n" +
+      "+const x = 1;\n" +
+      "+const y = 2;\n";
+
+    const { octokit, createComment, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 2, deletions: 0 }],
+      diffText,
+    });
+    const { factory, cleanupCalls } = fakeWorkspaceFactory();
+
+    const anchoredFinding = {
+      path: "src/a.ts",
+      line: 1,
+      severity: "important",
+      category: "style",
+      message: "Prefer a named constant here.",
+    };
+    const unanchoredFinding = {
+      path: "src/does-not-exist.ts",
+      line: 99,
+      severity: "nit",
+      category: "clarity",
+      message: "This file is not part of the diff at all.",
+    };
+
+    const piBinary = writeFakePi(
+      fakePiScriptEmittingFindings("Overall looks fine.", [anchoredFinding, unanchoredFinding]),
+    );
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(createComment).not.toHaveBeenCalled();
+
+    const reviewArgs = createReview.mock.calls[0][0] as {
+      body: string;
+      comments: Array<{ path: string; line: number; side: string; body: string }>;
+    };
+
+    expect(reviewArgs.comments).toHaveLength(1);
+    expect(reviewArgs.comments[0]).toMatchObject({
+      path: "src/a.ts",
+      line: 1,
+      side: "RIGHT",
+    });
+    expect(reviewArgs.comments[0].body).toContain("Prefer a named constant here.");
+
+    expect(reviewArgs.body).toContain(MAGPIE_REVIEW_MARKER);
+    expect(reviewArgs.body).toContain("Overall looks fine.");
+    expect(reviewArgs.body).toContain("Other observations");
+    expect(reviewArgs.body).toContain("This file is not part of the diff at all.");
+    expect(reviewArgs.body).not.toContain("Prefer a named constant here.");
+
+    expect(cleanupCalls).toHaveLength(1);
   });
 
   it("tooLarge diff: skips runReview entirely and posts a size-capped summary comment", async () => {
@@ -349,7 +446,7 @@ describe("createReviewPipeline / runJob", () => {
   });
 
   it("never logs or publishes the installation token", async () => {
-    const { octokit, createComment } = fakeOctokit({
+    const { octokit, createReview } = fakeOctokit({
       title: "Add feature",
       body: "Some PR body",
       files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
@@ -384,7 +481,8 @@ describe("createReviewPipeline / runJob", () => {
     const serializedLogs = JSON.stringify(logCalls);
     expect(serializedLogs).not.toContain(FAKE_TOKEN);
 
-    const body = createComment.mock.calls[0][0].body as string;
+    expect(createReview).toHaveBeenCalledTimes(1);
+    const body = createReview.mock.calls[0][0].body as string;
     expect(body).not.toContain(FAKE_TOKEN);
   });
 

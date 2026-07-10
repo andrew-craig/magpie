@@ -45,7 +45,18 @@
 //      everything else is handed to reviewer.ts's `runReview`, which never
 //      throws — a failed review is a normal `{ ok: false, reason }` value,
 //      not an exception, and is published just like a successful one.
-//   7. Publish exactly one summary comment (publisher.ts).
+//   7. Publish exactly one review/comment (publisher.ts), branching on the
+//      shape of `result`:
+//        - `{ ok: false }` (review failed) -> `publishReview` (M1's single
+//          `issues.createComment` failure-note path, unchanged).
+//        - `{ ok: true }` but `prDiff.tooLarge` (the synthesized skipped-review
+//          summary from step 6) -> `publishReview` too (M1's single summary
+//          comment, unchanged) — there are no real findings to anchor.
+//        - `{ ok: true }` from a real `runReview` call -> anchor its findings
+//          against the diff (anchor.ts's `anchorFindings`) and publish the
+//          result as ONE PR review with inline comments plus a summary body
+//          (`publishReviewWithFindings`), so diff-anchored findings surface as
+//          inline comments instead of being flattened into plain text.
 //
 // SECURITY: the installation token minted in step 2 is a live GitHub
 // credential. It is only ever passed to `new Octokit({ auth: token })` and to
@@ -60,10 +71,11 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Octokit } from "@octokit/rest";
+import { anchorFindings } from "./anchor.js";
 import type { Config } from "./config.js";
 import { computePrDiff } from "./diff.js";
 import { mintInstallationTokenFromConfig } from "./github.js";
-import { publishReview } from "./publisher.js";
+import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
 import type { ReviewResult } from "./reviewer.js";
 import { runReview } from "./reviewer.js";
@@ -267,13 +279,40 @@ export function createReviewPipeline(
         ...jobLogFields(job),
         resultOk: result.ok,
       });
-      const published = await publishReview({
-        octokit,
-        owner: job.owner,
-        repo: job.repo,
-        prNumber: job.prNumber,
-        result,
-      });
+
+      // See the module doc comment (step 7) for the three-way branch: a
+      // failed review and a tooLarge-skipped review both keep using
+      // publishReview's M1 single-summary-comment path unchanged (there are
+      // no real findings to anchor in either case); only a genuine
+      // `{ ok: true }` result from `runReview` has findings worth anchoring
+      // against the diff and publishing as inline PR review comments.
+      let published: { id: number; url: string };
+      if (!result.ok || prDiff.tooLarge) {
+        published = await publishReview({
+          octokit,
+          owner: job.owner,
+          repo: job.repo,
+          prNumber: job.prNumber,
+          result,
+        });
+      } else {
+        const { inline, other } = anchorFindings(prDiff.diff as string, {
+          findings: result.findings,
+          summary: result.summary,
+          verdict: result.verdict,
+        });
+        published = await publishReviewWithFindings({
+          octokit,
+          owner: job.owner,
+          repo: job.repo,
+          prNumber: job.prNumber,
+          summary: result.summary,
+          inline,
+          other,
+          usage: result.usage,
+          verdict: result.verdict,
+        });
+      }
 
       logger.info({
         event: "published-review",
