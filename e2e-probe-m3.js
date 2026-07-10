@@ -26,3 +26,8 @@ function isEven(n) {
 }
 
 module.exports = { clamp, isEven };
+
+// Trivial no-op addition to trigger a synchronize webhook for M3 container
+// evidence capture (docker ps during the run).
+const NOOP_MARKER = "m3-synchronize-probe";
+module.exports.NOOP_MARKER = NOOP_MARKER;
