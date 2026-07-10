@@ -6,17 +6,25 @@ import type { Config } from "./config.js";
 import type { Finding } from "./findings.js";
 import { buildPromptPayload, runReview } from "./reviewer.js";
 
-// NOTE: everything here runs fully offline — no real Pi binary, no network,
-// no live LLM call. `runReview`'s `piBinary` param (see reviewer.ts's
-// `RunReviewParams` doc comment) is the test seam: each test writes a tiny
-// throwaway Node script to a temp dir, marks it executable with a
-// `#!/usr/bin/env node` shebang, and points `piBinary` at it directly (spawned
-// with no shell, exactly like the real `pi` invocation) so the fake script
-// receives the same argv/cwd/env contract the real binary would and emits
-// canned NDJSON on stdout instead of calling an LLM. Fake scripts that want to
-// simulate the `report_findings` tool write JSON directly to
-// `process.env.MAGPIE_FINDINGS_PATH` — the same channel the real Pi extension
-// (packages/review-extension) uses.
+// NOTE: everything here runs fully offline — no real Docker daemon, no
+// `magpie-reviewer` image, no network, no live LLM call. In M3 `runReview`
+// spawns `<config.container.dockerBin> run ... <image> --provider openrouter
+// --model <model>` instead of the M1/M2 host `pi` subprocess, so the test
+// seam (`RunReviewParams.piBinary` — see reviewer.ts's doc comment) now points
+// at a throwaway fake "docker" Node script rather than a fake `pi`. Each fake
+// script is spawned with no shell (exactly like the real docker invocation),
+// so it receives the same argv/env contract the real docker client would. On
+// spawn it: (1) records the full argv + a couple of env-visibility flags to
+// `<root>/invocation.json` so tests can assert on the constructed docker
+// argv (hardening flags, image, trailing provider/model) and on the
+// secrets-only-via-env invariant WITHOUT inspecting the child's env directly;
+// (2) if invoked as `docker kill <name>` (the timeout/abort container-kill
+// path), appends the container name to `<root>/kill-marker.txt` and exits —
+// this is how the kill-on-timeout/abort tests observe that the container was
+// killed; (3) otherwise parses its own argv for the `-v <hostOut>:/out` bind
+// mount and writes a findings.json into that host dir (the same channel the
+// real report_findings extension uses via the mounted /out), then emits canned
+// NDJSON on stdout instead of calling an LLM.
 
 let root: string;
 
@@ -28,10 +36,52 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** Writes `body` as an executable Node script and returns its absolute path. */
-function writeFakePi(body: string): string {
-  const path = join(root, "fake-pi.js");
-  writeFileSync(path, `#!/usr/bin/env node\n${body}\n`);
+const INVOCATION_FILE = "invocation.json";
+const KILL_MARKER_FILE = "kill-marker.txt";
+
+/** What the fake docker records about the `docker run` invocation it saw. */
+interface Invocation {
+  argv: string[];
+  /** Host dir bound to `/out` (parsed from `-v <hostOut>:/out`), where findings.json is written. */
+  outHost: string;
+  /** Value of `OPENROUTER_API_KEY` as seen in the child env (proves the secret arrives via env, not argv). */
+  openRouterKey: string | null;
+  /** Whether a non-findings `MAGPIE_*` secret leaked into the child env (must stay false). */
+  magpieFooVisible: boolean;
+}
+
+/**
+ * Writes an executable fake "docker" Node script whose `run`-subcommand body
+ * is `runBody`, and returns its absolute path. A shared prelude (baked with
+ * this test's `root`) handles the `docker kill <name>` subcommand and records
+ * the invocation before `runBody` executes; `runBody` may reference the
+ * `outHost` variable (the host dir bound to `/out`) set up by the prelude.
+ */
+function writeFakeDocker(runBody: string): string {
+  const path = join(root, "fake-docker.js");
+  const prelude = [
+    `const fs = require("fs");`,
+    `const nodepath = require("path");`,
+    `const ROOT = ${JSON.stringify(root)};`,
+    `const argv = process.argv.slice(2);`,
+    // `docker kill <name>` path: record the killed container name and exit.
+    `if (argv[0] === "kill") {`,
+    `  fs.appendFileSync(nodepath.join(ROOT, ${JSON.stringify(KILL_MARKER_FILE)}), (argv[1] || "") + "\\n");`,
+    `  process.exit(0);`,
+    `}`,
+    // `docker run ...`: find the `-v <hostOut>:/out` mount.
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
+    `}`,
+    `fs.writeFileSync(nodepath.join(ROOT, ${JSON.stringify(INVOCATION_FILE)}), JSON.stringify({`,
+    `  argv,`,
+    `  outHost,`,
+    `  openRouterKey: process.env.OPENROUTER_API_KEY === undefined ? null : process.env.OPENROUTER_API_KEY,`,
+    `  magpieFooVisible: process.env.MAGPIE_FOO !== undefined,`,
+    `}));`,
+  ].join("\n");
+  writeFileSync(path, `#!/usr/bin/env node\n${prelude}\n${runBody}\n`);
   chmodSync(path, 0o755);
   return path;
 }
@@ -82,39 +132,29 @@ function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
   };
 }
 
-/** Name of the marker file a fake pi script records `MAGPIE_FINDINGS_PATH`/env visibility to. */
-const MARKER_FILE = "findings-path-marker.json";
-
 /**
- * What a fake pi script should do with `MAGPIE_FINDINGS_PATH` (i.e. simulate
- * the `report_findings` tool's behavior — see review-extension/src/index.ts):
- *   - `{ kind: "valid", value }` — writes `JSON.stringify(value)` to the path.
+ * What a fake docker's review body should do with the mounted `/out` dir
+ * (i.e. simulate the `report_findings` tool's file write into
+ * `/out/findings.json` — see review-extension/src/index.ts):
+ *   - `{ kind: "valid", value }` — writes `JSON.stringify(value)` to the file.
  *   - `{ kind: "raw", value }` — writes `value` verbatim (for malformed-JSON cases).
- *   - `{ kind: "omit" }` — never touches the path at all (simulates Pi never
+ *   - `{ kind: "omit" }` — never touches the file at all (simulates Pi never
  *     calling `report_findings`).
  */
 type FakeFindingsSpec = { kind: "valid"; value: unknown } | { kind: "raw"; value: string } | { kind: "omit" };
 
 /**
- * Writes a fake pi script that: (1) always records the
- * `MAGPIE_FINDINGS_PATH` it sees, plus whether a `MAGPIE_FOO` secret leaked
- * into its env, to `<root>/findings-path-marker.json` — so tests can assert
- * on both without inspecting the child's env directly (mirrors how the real
- * extension's only channel back is a file at a host-chosen path); (2) emits
- * NDJSON `message_end`/`agent_end` events for each of `messages` in order;
- * and (3) per `findingsSpec`, does — or doesn't — write to
- * `MAGPIE_FINDINGS_PATH`, simulating whether/how `report_findings` was called.
+ * Writes a fake docker script that: (1) via the shared prelude, records the
+ * invocation (argv/env) and resolves the `/out` mount; (2) per `findingsSpec`,
+ * does — or doesn't — write `<outHost>/findings.json`, simulating whether/how
+ * `report_findings` was called; and (3) emits NDJSON `message_end`/`agent_end`
+ * events for each of `messages` in order, then exits 0.
  */
-function writeFakePiWithFindings(
+function writeFakeDockerWithFindings(
   messages: Array<ReturnType<typeof assistantMessage>>,
   findingsSpec: FakeFindingsSpec,
 ): string {
-  const markerPath = join(root, MARKER_FILE);
-  const lines: string[] = [
-    `const fs = require("fs");`,
-    `const findingsPath = process.env.MAGPIE_FINDINGS_PATH || "";`,
-    `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ findingsPath, magpieFooVisible: process.env.MAGPIE_FOO !== undefined }));`,
-  ];
+  const lines: string[] = [`const findingsPath = nodepath.join(outHost, "findings.json");`];
   if (findingsSpec.kind === "valid") {
     lines.push(`fs.writeFileSync(findingsPath, ${JSON.stringify(JSON.stringify(findingsSpec.value))});`);
   } else if (findingsSpec.kind === "raw") {
@@ -132,15 +172,22 @@ function writeFakePiWithFindings(
       .map((_, i) => `m${i}`)
       .join(",")}]}) + "\\n");`,
   );
-  return writeFakePi(lines.join("\n"));
+  return writeFakeDocker(lines.join("\n"));
 }
 
-/** Reads back the marker file written by {@link writeFakePiWithFindings}. */
-function readMarker(): { findingsPath: string; magpieFooVisible: boolean } {
-  return JSON.parse(readFileSync(join(root, MARKER_FILE), "utf-8")) as {
-    findingsPath: string;
-    magpieFooVisible: boolean;
-  };
+/** Reads back the invocation record written by the fake docker's prelude. */
+function readInvocation(): Invocation {
+  return JSON.parse(readFileSync(join(root, INVOCATION_FILE), "utf-8")) as Invocation;
+}
+
+/** Reads the container names the fake `docker kill` recorded, or `[]` if it was never invoked. */
+function readKilledContainers(): string[] {
+  const markerPath = join(root, KILL_MARKER_FILE);
+  if (!existsSync(markerPath)) return [];
+  return readFileSync(markerPath, "utf-8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 }
 
 const sampleFindings: Finding[] = [
@@ -154,8 +201,8 @@ const sampleFindings: Finding[] = [
 ];
 
 describe("runReview", () => {
-  it("returns ok:true with the parsed findings, summary, and verdict when pi calls report_findings", async () => {
-    const piBinary = writeFakePiWithFindings([assistantMessage("unused final turn text")], {
+  it("returns ok:true with the parsed findings, summary, and verdict when the container reports findings", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("unused final turn text")], {
       kind: "valid",
       value: { findings: sampleFindings, summary: "One correctness issue found.", verdict: "comment" },
     });
@@ -177,8 +224,98 @@ describe("runReview", () => {
     }
   });
 
+  it("assembles a hardened docker run argv with the image and trailing provider/model", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+    expect(result.ok).toBe(true);
+
+    const { argv } = readInvocation();
+
+    // Hardening flags (mirror PLAN.md §4 / reviewer.ts's dockerArgs).
+    expect(argv[0]).toBe("run");
+    expect(argv).toContain("--rm");
+    expect(argv).toContain("--read-only");
+    expect(argv).toContain("--tmpfs");
+    expect(argv).toContain("--cap-drop=ALL");
+    expect(argv).toContain("--security-opt=no-new-privileges");
+    expect(argv).toContain("--memory=4g");
+    expect(argv).toContain("--cpus=2");
+    expect(argv).toContain("--pids-limit=256");
+    expect(argv).toContain("-i");
+
+    // --user <uid>:<gid>.
+    const userIdx = argv.indexOf("--user");
+    expect(userIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[userIdx + 1]).toMatch(/^\d+:\d+$/);
+
+    // --network <net>.
+    const netIdx = argv.indexOf("--network");
+    expect(netIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[netIdx + 1]).toBe("bridge");
+
+    // Both bind mounts, with the read-only /work flag.
+    expect(argv.some((a) => a.endsWith(":/work:ro"))).toBe(true);
+    expect(argv.some((a) => a.endsWith(":/out"))).toBe(true);
+
+    // --name magpie-<id>.
+    const nameIdx = argv.indexOf("--name");
+    expect(nameIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[nameIdx + 1]).toMatch(/^magpie-[a-zA-Z0-9_.-]+$/);
+
+    // Image, then trailing provider/model as the last four tokens.
+    expect(argv).toContain("magpie-reviewer:0.1.0");
+    expect(argv.slice(-4)).toEqual(["--provider", "openrouter", "--model", "some/model"]);
+  });
+
+  it("passes the provider key via env (bare -e OPENROUTER_API_KEY) and never as an argv token", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary }));
+    expect(result.ok).toBe(true);
+
+    const { argv, openRouterKey } = readInvocation();
+
+    // The secret reaches the child via env...
+    expect(openRouterKey).toBe("test-llm-api-key");
+
+    // ...and NEVER as an argv token — neither as a bare value nor as an
+    // `-e NAME=value` pair (regression guard for the secrets-on-argv invariant).
+    expect(argv).not.toContain("test-llm-api-key");
+    expect(argv.some((a) => a.includes("test-llm-api-key"))).toBe(false);
+
+    // The key is referenced by NAME only: `-e OPENROUTER_API_KEY` (no `=value`).
+    const eIdx = argv.indexOf("-e");
+    expect(eIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[eIdx + 1]).toBe("OPENROUTER_API_KEY");
+    expect(argv.some((a) => a.startsWith("OPENROUTER_API_KEY="))).toBe(false);
+  });
+
+  it("strips other MAGPIE_* secrets from the docker client env", async () => {
+    process.env.MAGPIE_FOO = "leaked-secret";
+    try {
+      const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
+        kind: "valid",
+        value: { findings: [], summary: "ok", verdict: "comment" },
+      });
+
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(true);
+
+      expect(readInvocation().magpieFooVisible).toBe(false);
+    } finally {
+      delete process.env.MAGPIE_FOO;
+    }
+  });
+
   it("accumulates usage across multiple assistant turns via agent_end", async () => {
-    const piBinary = writeFakePiWithFindings(
+    const piBinary = writeFakeDockerWithFindings(
       [assistantMessage("intermediate turn"), assistantMessage("final turn (unused; summary comes from the file)")],
       {
         kind: "valid",
@@ -203,7 +340,7 @@ describe("runReview", () => {
 
   it("falls back to the final assistant text when the findings file's summary is empty", async () => {
     const text = "Fallback summary text from the assistant turn.";
-    const piBinary = writeFakePiWithFindings([assistantMessage(text)], {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage(text)], {
       kind: "valid",
       value: { findings: [], summary: "", verdict: "approve" },
     });
@@ -222,7 +359,7 @@ describe("runReview", () => {
     // No assistant messages at all, so extractSummaryText(messages) also
     // returns "" — the fallback of the fallback must kick in rather than
     // publishing an empty summary.
-    const piBinary = writeFakePiWithFindings([], {
+    const piBinary = writeFakeDockerWithFindings([], {
       kind: "valid",
       value: { findings: [], summary: "", verdict: "approve" },
     });
@@ -237,8 +374,8 @@ describe("runReview", () => {
     }
   });
 
-  it("returns ok:false when pi exits 0 without ever calling report_findings", async () => {
-    const piBinary = writeFakePiWithFindings([assistantMessage("some text but no tool call")], { kind: "omit" });
+  it("returns ok:false when the container exits 0 without ever calling report_findings", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("some text but no tool call")], { kind: "omit" });
 
     const result = await runReview(baseParams({ piBinary }));
 
@@ -263,7 +400,7 @@ describe("runReview", () => {
       errorMessage: '402: {"message":"Insufficient credits...","code":402}',
       usage: { input: 5, output: 0, totalTokens: 5, cost: { total: 0 } },
     };
-    const piBinary = writeFakePiWithFindings([errored], { kind: "omit" });
+    const piBinary = writeFakeDockerWithFindings([errored], { kind: "omit" });
 
     const result = await runReview(baseParams({ piBinary }));
 
@@ -276,7 +413,7 @@ describe("runReview", () => {
   });
 
   it("returns ok:false when the findings file isn't valid JSON", async () => {
-    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
       kind: "raw",
       value: "{not valid json",
     });
@@ -290,7 +427,7 @@ describe("runReview", () => {
   });
 
   it("returns ok:false when the findings file doesn't match the expected shape", async () => {
-    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
       kind: "valid",
       // Missing the required `verdict` field.
       value: { findings: [], summary: "ok" },
@@ -304,45 +441,26 @@ describe("runReview", () => {
     }
   });
 
-  it("sets MAGPIE_FINDINGS_PATH on the child (surviving the MAGPIE_* strip) while still stripping other MAGPIE_* secrets", async () => {
-    process.env.MAGPIE_FOO = "leaked-secret";
-    try {
-      const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
-        kind: "valid",
-        value: { findings: [], summary: "ok", verdict: "comment" },
-      });
-
-      const result = await runReview(baseParams({ piBinary }));
-      expect(result.ok).toBe(true);
-
-      const marker = readMarker();
-      expect(marker.findingsPath.length).toBeGreaterThan(0);
-      expect(marker.findingsPath).toMatch(/magpie-findings-.*\.json$/);
-      expect(marker.magpieFooVisible).toBe(false);
-    } finally {
-      delete process.env.MAGPIE_FOO;
-    }
-  });
-
-  it("deletes the tmp findings file after the run completes", async () => {
-    const piBinary = writeFakePiWithFindings([assistantMessage("text")], {
+  it("reads findings back from the mounted /out dir and cleans it up after a successful run", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
       kind: "valid",
-      value: { findings: [], summary: "ok", verdict: "comment" },
+      value: { findings: sampleFindings, summary: "ok", verdict: "comment" },
     });
 
     const result = await runReview(baseParams({ piBinary }));
     expect(result.ok).toBe(true);
+    if (result.ok) expect(result.findings).toEqual(sampleFindings);
 
-    const marker = readMarker();
-    expect(existsSync(marker.findingsPath)).toBe(false);
+    // The out dir the container wrote findings.json into is removed on the
+    // success path (no temp-dir leak).
+    const { outHost } = readInvocation();
+    expect(outHost.length).toBeGreaterThan(0);
+    expect(existsSync(outHost)).toBe(false);
   });
 
-  it("returns ok:false with exit code/stderr detail on a non-zero exit", async () => {
-    const piBinary = writeFakePi(
-      [
-        `process.stderr.write("boom: something went wrong\\n");`,
-        `process.exit(1);`,
-      ].join("\n"),
+  it("cleans up the mounted /out dir on a failure (non-zero exit) path", async () => {
+    const piBinary = writeFakeDocker(
+      [`process.stderr.write("boom: something went wrong\\n");`, `process.exit(1);`].join("\n"),
     );
 
     const result = await runReview(baseParams({ piBinary }));
@@ -352,21 +470,25 @@ describe("runReview", () => {
       expect(result.reason).toMatch(/exited with code 1/);
       expect(result.reason).toMatch(/boom: something went wrong/);
     }
+
+    // The prelude recorded the out dir before the body exited non-zero; it
+    // must still be removed on the failure settle path.
+    const { outHost } = readInvocation();
+    expect(outHost.length).toBeGreaterThan(0);
+    expect(existsSync(outHost)).toBe(false);
   });
 
-  it("returns ok:false when the pi binary cannot be spawned", async () => {
-    const result = await runReview(
-      baseParams({ piBinary: join(root, "does-not-exist-binary") }),
-    );
+  it("returns ok:false when the docker binary cannot be spawned", async () => {
+    const result = await runReview(baseParams({ piBinary: join(root, "does-not-exist-binary") }));
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/failed to spawn pi/);
+      expect(result.reason).toMatch(/failed to spawn review container/);
     }
   });
 
-  it("kills a hung pi and returns ok:false after the configured timeout", async () => {
-    const piBinary = writeFakePi(
+  it("kills the container and returns ok:false after the configured timeout", async () => {
+    const piBinary = writeFakeDocker(
       [
         `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
         // Never emits assistant output and never exits on its own — only the
@@ -376,9 +498,7 @@ describe("runReview", () => {
     );
 
     const start = Date.now();
-    const result = await runReview(
-      baseParams({ piBinary, config: testConfig({ jobTimeoutSeconds: 0.2 }) }),
-    );
+    const result = await runReview(baseParams({ piBinary, config: testConfig({ jobTimeoutSeconds: 0.2 }) }));
     const elapsedMs = Date.now() - start;
 
     expect(result.ok).toBe(false);
@@ -388,15 +508,27 @@ describe("runReview", () => {
     // Well under the 5s SIGTERM->SIGKILL grace period, proving the fake
     // process died from SIGTERM rather than needing a SIGKILL escalation.
     expect(elapsedMs).toBeLessThan(4_000);
+
+    // The timeout path must ALSO `docker kill` the container itself (killing
+    // only the client process wouldn't reliably stop it). Give the
+    // fire-and-forget kill process a moment to record itself.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const killed = readKilledContainers();
+    expect(killed.length).toBeGreaterThanOrEqual(1);
+    expect(killed[0]).toMatch(/^magpie-/);
+
+    // Out dir cleaned up even on the timeout path.
+    const { outHost } = readInvocation();
+    expect(existsSync(outHost)).toBe(false);
   }, 10_000);
 
-  it("kills pi and resolves ok:false/aborted promptly when the caller's AbortSignal fires", async () => {
+  it("kills the container and resolves ok:false/aborted promptly when the caller's AbortSignal fires", async () => {
     // Simulates queue.ts's backstop timeout firing (see queue.ts's
     // QUEUE_TIMEOUT_GRACE_MS): the AbortSignal fires well before this
     // module's own `jobTimeoutSeconds` timeout would, so runReview must kill
-    // `pi` and settle on its own rather than waiting out the (here, much
-    // longer) configured timeout.
-    const piBinary = writeFakePi(
+    // the container and settle on its own rather than waiting out the (here,
+    // much longer) configured timeout.
+    const piBinary = writeFakeDocker(
       [
         `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
         // Never emits assistant output and never exits on its own — only
@@ -424,14 +556,24 @@ describe("runReview", () => {
     }
     // Proves it did NOT wait anywhere near the (600s) configured timeout.
     expect(elapsedMs).toBeLessThan(1_000);
+
+    // The abort path must ALSO `docker kill` the container.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const killed = readKilledContainers();
+    expect(killed.length).toBeGreaterThanOrEqual(1);
+    expect(killed[0]).toMatch(/^magpie-/);
+
+    // Out dir cleaned up on the abort path too.
+    const { outHost } = readInvocation();
+    expect(existsSync(outHost)).toBe(false);
   });
 
-  it("resolves ok:false/aborted WITHOUT spawning pi when the signal is already aborted", async () => {
+  it("resolves ok:false/aborted WITHOUT spawning docker when the signal is already aborted", async () => {
     // Fast path (see runReview): a signal that is aborted before the call
-    // must never spawn `pi`. The fake pi here would emit a normal findings
-    // file if it ran, so getting `reason:"aborted"` (not that result) proves
-    // the spawn was skipped.
-    const piBinary = writeFakePiWithFindings([assistantMessage("SHOULD NOT APPEAR")], {
+    // must never spawn docker. The fake here would emit a normal findings
+    // file if it ran, so getting `reason:"aborted"` (not that result), and no
+    // recorded invocation, proves the spawn was skipped.
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("SHOULD NOT APPEAR")], {
       kind: "valid",
       value: { findings: [], summary: "SHOULD NOT APPEAR", verdict: "comment" },
     });
@@ -444,6 +586,7 @@ describe("runReview", () => {
     if (!result.ok) {
       expect(result.reason).toBe("aborted");
     }
+    expect(existsSync(join(root, INVOCATION_FILE))).toBe(false);
   });
 });
 

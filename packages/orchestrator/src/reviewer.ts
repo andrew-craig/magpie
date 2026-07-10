@@ -1,77 +1,49 @@
-// Pi host runner (M1/M2): spawns the Pi coding agent as a plain host
-// subprocess over a checked-out PR worktree + its diff, and returns
-// STRUCTURED findings collected via the `report_findings` Pi extension
-// (packages/review-extension) rather than a plain-text summary.
+// Pi container runner (M3): runs the Pi coding agent inside a hardened
+// `docker run` of the `magpie-reviewer` image (see docker/reviewer/) over a
+// mounted, `.git`-free, READ-ONLY copy of the checked-out PR worktree, and
+// returns STRUCTURED findings collected via the `report_findings` Pi
+// extension (packages/review-extension) rather than a plain-text summary.
 //
-// NO container, NO LiteLLM gateway here — those are later milestones (see
-// PLAN.md M3-M4). For M1/M2 the provider key lives in this host process's
-// environment and is handed to Pi via `OPENROUTER_API_KEY`; the only
-// isolation this milestone provides is Pi's own read-only tool allowlist
-// (`read,grep,find,ls,report_findings` — no `bash`/`write`/`edit`).
+// M1/M2 ran Pi as a plain host subprocess with a denylist-scrubbed copy of
+// this process's own env; M3 replaces that with a container that inherits
+// NOTHING from the launching process. The container's env is instead an
+// explicit ALLOWLIST built one `-e NAME` at a time (currently just
+// `OPENROUTER_API_KEY`), the `/work` mount is read-only, and `/tmp` inside
+// the container is a throwaway tmpfs (the container's own root filesystem is
+// `--read-only`). `--cap-drop=ALL --security-opt=no-new-privileges` plus
+// `--memory`/`--cpus`/`--pids-limit` caps (see config.ts's `container.*`)
+// bound what a compromised/malicious review run can do to the host. The
+// read-only Pi tool allowlist (`read,grep,find,ls,report_findings` — no
+// `bash`/`write`/`edit`) and the model/provider/system-prompt/extension flags
+// are now BAKED INTO the image (see docker/reviewer/Dockerfile,
+// docker/reviewer/entrypoint.sh) rather than passed by this module; the only
+// things this module supplies at `docker run` time are the two bind mounts,
+// the provider key, and `--provider`/`--model` as trailing container args.
 //
 // SECURITY: the diff/PR title/body are untrusted, possibly-adversarial text
 // (see reviewer-prompt.md and PLAN.md's threat model) — this module never
-// evals or executes any of it; it only ever gets piped to Pi's stdin as data.
-// The LLM API key is never logged, never written to disk, and never placed on
-// the command line — it is set only on the child process's environment (see
-// workspace.ts for the same "secrets only via env, never argv" pattern used
-// for the GitHub installation token). The findings FILE that
-// `report_findings` writes is itself untrusted (LLM tool-call output reasoning
-// over adversarial PR content) and is re-validated at the trust boundary via
-// `parseFindings` (see findings.ts) before this module ever returns it to a
-// caller.
+// evals or executes any of it; it only ever gets piped to the container's
+// stdin as data. The LLM API key is never logged, never written to disk, and
+// never placed on the command line — it is set only on the spawned `docker`
+// client process's environment and referenced in argv by NAME ONLY
+// (`-e OPENROUTER_API_KEY`, no `=value`), mirroring the same "secrets only
+// via env, never argv" pattern workspace.ts uses for the GitHub installation
+// token. The findings FILE that `report_findings` writes (read back from the
+// host-side `/out` mount after the container exits) is itself untrusted (LLM
+// tool-call output reasoning over adversarial PR content) and is
+// re-validated at the trust boundary via `parseFindings` (see findings.ts)
+// before this module ever returns it to a caller. On timeout or abort, this
+// module kills BOTH the `docker run` client process (SIGTERM, then SIGKILL
+// after a grace period) AND the container itself (`docker kill <name>`,
+// best-effort) — killing only the client does not reliably stop the
+// container (see `startKillSequence` below).
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
 import type { Config } from "./config.js";
+import { createOutputDir, prepareReviewMount } from "./container-mounts.js";
 import { parseFindings, type Finding } from "./findings.js";
-
-const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Absolute path to the committed reviewer system-prompt file, passed to Pi via
- * `--append-system-prompt <path>` (a file path, so it's never read and
- * inlined by this process). Resolved relative to this module's own directory
- * rather than `process.cwd()` — this module lives at
- * `packages/orchestrator/src` (or `packages/orchestrator/dist` once built),
- * both three directories below the repo root where `reviewer-prompt.md` is
- * committed, so the resolution is stable regardless of where the orchestrator
- * process happens to be launched from (see config.ts's `resolveDefaultConfigPath`
- * for the same cwd-independence concern applied to `config.toml`).
- */
-const REVIEWER_PROMPT_PATH = join(MODULE_DIR, "..", "..", "..", "reviewer-prompt.md");
-
-/**
- * Absolute path to the `report_findings` Pi extension's SOURCE file, loaded
- * via `--extension/-e <path>` (Pi runs TypeScript extension sources directly,
- * no build step needed). Resolved the same cwd-independent way as
- * `REVIEWER_PROMPT_PATH` above: this module lives three directories below
- * the repo root, and the extension package lives at
- * `packages/review-extension/src/index.ts` alongside it.
- */
-const REVIEW_EXTENSION_PATH = join(
-  MODULE_DIR,
-  "..",
-  "..",
-  "..",
-  "packages",
-  "review-extension",
-  "src",
-  "index.ts",
-);
-
-/**
- * Read-only tool allowlist, plus the one write-shaped exception:
- * `report_findings` (see REVIEW_EXTENSION_PATH above) is a Magpie-authored
- * tool that only ever writes to a single host-chosen path
- * (`MAGPIE_FINDINGS_PATH`, set below) — not a general filesystem write. No
- * `bash`, no generic `write`/`edit` (see module doc comment).
- */
-const READ_ONLY_TOOLS = "read,grep,find,ls,report_findings";
 
 /** Grace period between SIGTERM and SIGKILL when a job times out. */
 const KILL_GRACE_MS = 5_000;
@@ -81,7 +53,14 @@ const STDERR_TAIL_BYTES = 4_000;
 
 /** Parameters for {@link runReview}. */
 export interface RunReviewParams {
-  /** Absolute path to the checked-out, credential-free PR worktree (see workspace.ts). Used as the subprocess `cwd`. */
+  /**
+   * Absolute path to the checked-out, credential-free PR worktree (see
+   * workspace.ts). Passed through {@link prepareReviewMount} (which strips
+   * `.git` from it IN PLACE and returns the same path) and bind-mounted
+   * read-only at `/work` in the review container. Ownership/cleanup of this
+   * directory stays with the pipeline (`Workspace.cleanup()`) — this module
+   * only ever reads from it (via the mount) and never removes it.
+   */
   workspaceDir: string;
   /** Unified diff text for the PR (see diff.ts's `PrDiffResult.diff`). */
   diff: string;
@@ -91,23 +70,42 @@ export interface RunReviewParams {
   prBody: string;
   config: Config;
   /**
-   * TEST SEAM: overrides the Pi executable Node spawns. Defaults to the
-   * `MAGPIE_PI_BIN` env var, falling back to `"pi"` resolved on `PATH`.
-   * Production callers must leave this undefined; reviewer.test.ts points it
-   * at a throwaway fake NDJSON-emitting script so tests never invoke the
-   * real `pi` binary or a live LLM.
+   * TEST SEAM: overrides the docker (or docker-compatible) binary this
+   * module spawns to run the review container. Defaults to
+   * `config.container.dockerBin` (see config.ts) — this field, when set,
+   * takes priority over that config value, which is how pipeline.ts's
+   * existing `piBinary: deps.piBinary` wiring and pipeline.test.ts's fakes
+   * keep working unchanged across the M1/M2 host subprocess -> M3 container
+   * swap: WHAT gets spawned changed (`pi` directly -> `docker run ...
+   * <image>`), but the override mechanism and its position in this params
+   * object did not. Production callers must leave this undefined;
+   * reviewer.test.ts points it (or `config.container.dockerBin` directly) at
+   * a throwaway fake "docker" script so tests never invoke a real Docker
+   * daemon or a live LLM.
    */
   piBinary?: string;
+  /**
+   * Per-job identifier used to derive the review container's `--name`
+   * (`magpie-<sanitized jobId>`), so the timeout/abort kill path
+   * (`docker kill <name>`) can target the right container. Threaded from
+   * pipeline.ts's job descriptor starting in M3-D; when omitted (e.g. every
+   * reviewer.test.ts case written before M3-D lands, or any other caller
+   * that doesn't have a natural job id) a fresh random id is generated per
+   * run so container names never collide across concurrent jobs. Sanitized
+   * to docker's `[a-zA-Z0-9_.-]` name charset before use, so characters
+   * outside that set don't break `docker run --name`/`docker kill`.
+   */
+  jobId?: string;
   /**
    * The queue's per-job abort signal (see queue.ts's `JobRunner`/`#runOne`).
    * The queue's own timeout is a strictly-later backstop over this module's
    * own `config.limits.jobTimeoutSeconds` timeout (see queue.ts's module doc
    * comment and `QUEUE_TIMEOUT_GRACE_MS`) — it should normally never fire
    * before `runReview`'s own timeout above. If it ever does (this module
-   * failed to honour its own budget for some reason), `pi` is killed exactly
-   * like a timeout: SIGTERM, then SIGKILL after `KILL_GRACE_MS` if it hasn't
-   * exited, and `runReview` still resolves (never throws) with
-   * `{ ok: false, reason: "aborted" }`.
+   * failed to honour its own budget for some reason), the review container
+   * is killed exactly like a timeout: `docker kill` on the container plus
+   * SIGTERM/SIGKILL on the `docker run` client, and `runReview` still
+   * resolves (never throws) with `{ ok: false, reason: "aborted" }`.
    */
   signal?: AbortSignal;
 }
@@ -134,104 +132,149 @@ export type ReviewResult =
   | { ok: true; summary: string; findings: Finding[]; verdict: "approve" | "comment"; usage?: ReviewUsage }
   | { ok: false; reason: string };
 
+/** Docker's allowed container/name-component charset. */
+const DOCKER_NAME_UNSAFE_RE = /[^a-zA-Z0-9_.-]/g;
+
+/** Builds a sanitized `magpie-<id>` container name from a (possibly attacker-influenced-shaped) job id. */
+function buildContainerName(jobId: string): string {
+  const sanitized = jobId.replace(DOCKER_NAME_UNSAFE_RE, "-");
+  return `magpie-${sanitized.length > 0 ? sanitized : "job"}`;
+}
+
 /**
- * Run Pi headless against a PR checkout + diff and return STRUCTURED review
- * findings collected via the `report_findings` tool call.
+ * Run Pi headless, inside a hardened review container, against a PR
+ * checkout + diff, and return STRUCTURED review findings collected via the
+ * `report_findings` tool call.
  *
  * Flow:
- *   1. Spawn `pi -p --mode json --no-session --tools
- *      read,grep,find,ls,report_findings --extension <review-extension>
- *      --no-extensions --provider openrouter --model <config.llm.model>
- *      --append-system-prompt <reviewer-prompt.md>` with `cwd: workspaceDir`,
- *      args passed as an array (never a shell string) and
- *      `OPENROUTER_API_KEY`/`MAGPIE_FINDINGS_PATH` set on a copy of
- *      `process.env`.
- *   2. Pipe the PR title/body/changed-file list/diff to Pi's stdin, clearly
- *      fenced as untrusted data (see `buildPromptPayload`).
- *   3. Parse Pi's NDJSON stdout stream line-by-line (tolerating partial lines
- *      across chunks and ignoring any line that isn't valid JSON) to extract
- *      the final assistant text (used only as a summary fallback, see below)
- *      and basic usage/cost telemetry.
- *   4. Enforce `config.limits.jobTimeoutSeconds` as a hard wall-clock timeout:
- *      SIGTERM, then SIGKILL after a short grace period if still alive.
- *   5. On a clean (code 0) exit, read+validate the findings file the
- *      `report_findings` tool should have written to `MAGPIE_FINDINGS_PATH`
- *      via `parseFindings` (the trust boundary — see findings.ts). This file
- *      is always deleted afterward, on every path.
+ *   1. Bind-mount the (`.git`-stripped) workspace read-only at `/work` and a
+ *      fresh per-job host temp dir read-write at `/out` (see
+ *      container-mounts.ts's `prepareReviewMount`/`createOutputDir`).
+ *   2. Spawn `<dockerBin> run --rm --name magpie-<jobId> --user <uid>:<gid>
+ *      --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges
+ *      --memory=<mem> --cpus=<cpus> --pids-limit=<n> --network <net>
+ *      -v <mount>:/work:ro -v <out>:/out -e OPENROUTER_API_KEY -i <image>
+ *      --provider openrouter --model <model>` with the provider key set only
+ *      on the spawned process's `env` (never argv) and every `MAGPIE_*`
+ *      secret stripped from that env first (belt-and-suspenders — the
+ *      container itself inherits nothing from it beyond the one `-e` flag
+ *      above, but the docker CLIENT process shouldn't carry them either).
+ *   3. Pipe the PR title/body/changed-file list/diff to the container's
+ *      stdin, clearly fenced as untrusted data (see `buildPromptPayload`).
+ *   4. Parse Pi's NDJSON stdout stream (forwarded through by docker)
+ *      line-by-line (tolerating partial lines across chunks and ignoring any
+ *      line that isn't valid JSON) to extract the final assistant text (used
+ *      only as a summary fallback, see below) and basic usage/cost telemetry.
+ *   5. Enforce `config.limits.jobTimeoutSeconds` as a hard wall-clock
+ *      timeout: `docker kill` the container AND SIGTERM/SIGKILL the client.
+ *   6. On a clean (code 0) exit, read+validate the findings file the
+ *      `report_findings` tool should have written to `<outDir>/findings.json`
+ *      (== `/out/findings.json` in-container, baked into the image as
+ *      `MAGPIE_FINDINGS_PATH` — this module never sets that env var itself)
+ *      via `parseFindings` (the trust boundary — see findings.ts). The host
+ *      `/out` temp dir is always removed afterward, on every path.
  *
- * Every failure path — spawn error, non-zero exit, timeout, Pi exiting 0
- * without ever calling `report_findings`, or a findings file that fails
- * `parseFindings` — resolves to `{ ok: false, reason }` rather than throwing,
- * so callers can always post a "review failed" note instead of going silent
- * (PLAN.md §6).
+ * Every failure path — mount-prep error, spawn error, non-zero exit,
+ * timeout, abort, Pi exiting 0 without ever calling `report_findings`, or a
+ * findings file that fails `parseFindings` — resolves to
+ * `{ ok: false, reason }` rather than throwing, so callers can always post a
+ * "review failed" note instead of going silent (PLAN.md §6).
  */
 export async function runReview(params: RunReviewParams): Promise<ReviewResult> {
   const { workspaceDir, diff, changedFiles, prTitle, prBody, config, signal } = params;
   // Fast path: if the queue's backstop already aborted before we even start,
-  // don't spawn `pi`, wire up listeners, or write to stdin — just resolve
+  // don't prep mounts, spawn docker, or write to stdin — just resolve
   // `{ ok: false, reason: "aborted" }` (the same result the mid-run abort path
   // below produces). The `signal?.aborted` guard inside the Promise still
   // covers an abort that lands between here and the spawn.
   if (signal?.aborted) {
     return { ok: false, reason: "aborted" };
   }
-  const piBinary = params.piBinary ?? process.env.MAGPIE_PI_BIN ?? "pi";
+
+  const dockerBin = params.piBinary ?? config.container.dockerBin;
   const jobTimeoutSeconds = config.limits.jobTimeoutSeconds;
   const timeoutMs = jobTimeoutSeconds * 1000;
+  const jobId = params.jobId ?? randomBytes(8).toString("hex");
+  const containerName = buildContainerName(jobId);
 
-  const args = [
-    "-p",
-    "--mode",
-    "json",
-    "--no-session",
-    "--tools",
-    READ_ONLY_TOOLS,
-    // Load ONLY our own report_findings extension (see REVIEW_EXTENSION_PATH
-    // above): `-e <path>` loads it explicitly, and `--no-extensions` disables
-    // Pi's normal auto-discovery of extensions installed under the host's
-    // `~/.pi` config — without it, this host subprocess could pick up
-    // whatever extensions happen to be installed on the machine it runs on,
-    // which is neither reproducible nor something we've reviewed for safety
-    // against an untrusted-diff-driven agent. `--no-extensions` explicitly
-    // does not block explicit `-e` paths (see `pi --help`).
-    "--extension",
-    REVIEW_EXTENSION_PATH,
-    "--no-extensions",
-    "--provider",
-    "openrouter",
-    "--model",
-    config.llm.model,
-    "--append-system-prompt",
-    REVIEWER_PROMPT_PATH,
-  ];
+  // Prep the two bind mounts (see container-mounts.ts): `mountDir` is the
+  // workspace itself (stripped of `.git` IN PLACE, owned/cleaned by the
+  // pipeline — never cleaned up here, that would double-free it), and
+  // `output` is a fresh per-job host temp dir THIS module owns and must
+  // clean up on every settle path (see `finish` below).
+  let mountDir: string;
+  let output: Awaited<ReturnType<typeof createOutputDir>>;
+  try {
+    mountDir = await prepareReviewMount(workspaceDir);
+    output = await createOutputDir();
+  } catch (err) {
+    return { ok: false, reason: `failed to prepare review container mounts: ${errorMessage(err)}` };
+  }
 
-  // Start from a copy of process.env (Pi still needs the ambient PATH/HOME/etc.
-  // to run in M1 host mode) but strip every orchestrator secret first: all of
-  // Magpie's host secrets are namespaced `MAGPIE_*` (webhook secret, GitHub App
-  // private key, the raw LLM key — see config.ts), and the Pi child processes
-  // untrusted, injectable PR content, so per Magpie's core principle it must
-  // hold no secret worth stealing. Deleting the whole `MAGPIE_` prefix (rather
-  // than three hardcoded names) stays robust as new secrets are added. We THEN
-  // set the one credential the child legitimately needs for M1 — the provider
-  // key — which a per-job, budget-capped gateway virtual key replaces in M4.
-  // Fuller env minimization (a curated allowlist) arrives with the M3 container
-  // isolation. Never log this object and never add the key to `args` above.
+  // Another abort check now that the (async) mount prep above has had a
+  // window to observe one, so a signal that fires mid-prep doesn't still go
+  // on to spawn the container.
+  if (signal?.aborted) {
+    await output.cleanup().catch(() => {});
+    return { ok: false, reason: "aborted" };
+  }
+
+  // Start from a copy of process.env only so the docker CLIENT process still
+  // has the ambient PATH/HOME/etc. it needs to run; the CONTAINER itself
+  // inherits none of this — only what's explicitly passed via `-e` below
+  // reaches it. Still strip every orchestrator secret first (all of Magpie's
+  // host secrets are namespaced `MAGPIE_*` — see config.ts) as
+  // belt-and-suspenders: nothing here should legitimately reach the docker
+  // client's env, but deleting the whole `MAGPIE_` prefix costs nothing and
+  // stays robust as new secrets are added. We THEN set the one credential
+  // the container legitimately needs — the provider key — on the SAME env
+  // object, referenced in argv by name only (`-e OPENROUTER_API_KEY`, never
+  // `-e OPENROUTER_API_KEY=<value>`), which a per-job, budget-capped gateway
+  // virtual key replaces in M4. Never log this object and never add the key
+  // to `args` below.
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith("MAGPIE_")) delete env[key];
   }
   env.OPENROUTER_API_KEY = config.secrets.llmApiKey;
 
-  // Per-run tmp path the `report_findings` extension (packages/review-extension)
-  // writes its output to (see that package's `resolveFindingsPath`). This is
-  // NOT a `MAGPIE_*` secret — it's a filesystem path with no sensitive
-  // content of its own — but it MUST be set AFTER the strip loop above:
-  // setting it before would just have the loop delete it again, since it
-  // shares the `MAGPIE_` prefix used for the actual secrets. The nonce keeps
-  // concurrent jobs (and repeated runs sharing `os.tmpdir()`) from colliding
-  // on the same path.
-  const findingsPath = join(tmpdir(), `magpie-findings-${randomBytes(16).toString("hex")}.json`);
-  env.MAGPIE_FINDINGS_PATH = findingsPath;
+  // The hardened `docker run` invocation (mirrors PLAN.md §4 exactly — see
+  // this module's doc comment above for the full flag-by-flag rationale).
+  // Model/provider are the only per-job, non-secret inputs the image needs
+  // and arrive as TRAILING container args, forwarded by
+  // docker/reviewer/entrypoint.sh's `"$@"` onto the baked `pi` invocation —
+  // everything else Pi needs (tools, extension, system prompt) is baked into
+  // the image itself, not passed here.
+  const dockerArgs: string[] = [
+    "run",
+    "--rm",
+    "--name",
+    containerName,
+    "--user",
+    `${process.getuid!()}:${process.getgid!()}`,
+    "--read-only",
+    "--tmpfs",
+    "/tmp",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    `--memory=${config.container.memory}`,
+    `--cpus=${config.container.cpus}`,
+    `--pids-limit=${config.container.pidsLimit}`,
+    "--network",
+    config.container.network,
+    "-v",
+    `${mountDir}:/work:ro`,
+    "-v",
+    `${output.outDir}:/out`,
+    "-e",
+    "OPENROUTER_API_KEY",
+    "-i",
+    config.container.image,
+    "--provider",
+    "openrouter",
+    "--model",
+    config.llm.model,
+  ];
 
   const payload = buildPromptPayload({ prTitle, prBody, changedFiles, diff });
 
@@ -239,14 +282,15 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     let settled = false;
     // The single settle point for every path (spawn failure, timeout, abort,
     // non-zero exit, and the code===0 findings-file outcomes below). Always
-    // deletes the per-run findings tmp file (see `findingsPath` above) before
-    // resolving, so it's cleaned up on every path, not just the happy one —
-    // `unlink` failing (e.g. the file was never created because Pi never
-    // called `report_findings`) is expected and silently ignored.
+    // removes the per-job `/out` host temp dir (see `output.cleanup` above)
+    // before resolving, so it's cleaned up on every path, not just the happy
+    // one — `cleanup()` itself never throws (force-removal, tolerant of a
+    // dir that was never written to).
     const finish = (result: ReviewResult): void => {
       if (settled) return;
       settled = true;
-      unlink(findingsPath)
+      output
+        .cleanup()
         .catch(() => {})
         .finally(() => resolvePromise(result));
     };
@@ -258,9 +302,9 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     // like, which surface asynchronously rather than as a sync throw.
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(piBinary, args, { cwd: workspaceDir, env });
+      child = spawn(dockerBin, dockerArgs, { env });
     } catch (err) {
-      finish({ ok: false, reason: `failed to spawn pi (${piBinary}): ${errorMessage(err)}` });
+      finish({ ok: false, reason: `failed to spawn review container (${dockerBin}): ${errorMessage(err)}` });
       return;
     }
 
@@ -269,7 +313,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     // a clean failure result instead of a later throw on `.on(...)`/`.end(...)`.
     if (!child.stdout || !child.stderr || !child.stdin) {
       child.kill();
-      finish({ ok: false, reason: "failed to spawn pi: stdio streams unavailable" });
+      finish({ ok: false, reason: "failed to spawn review container: stdio streams unavailable" });
       return;
     }
 
@@ -282,13 +326,38 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     let aborted = false;
     let killGraceTimer: NodeJS.Timeout | undefined;
 
-    /** SIGTERM now, SIGKILL after `KILL_GRACE_MS` if still alive — shared by the timeout and the abort-signal paths below. */
+    /**
+     * Best-effort `docker kill <containerName>` — killing only the `docker
+     * run` CLIENT process (below) does not reliably stop the CONTAINER
+     * itself, so timeout/abort must kill both. Spawned fire-and-forget with
+     * its own short-lived process; any failure (including "no such
+     * container", e.g. if the container already exited on its own) is
+     * silently ignored — this is a best-effort backstop, not the primary
+     * signal path. `--rm` on the original `docker run` still removes the
+     * container once it's dead, whether that death came from this kill or a
+     * normal exit.
+     */
+    const killContainerBestEffort = (): void => {
+      try {
+        const killer = spawn(dockerBin, ["kill", containerName], { stdio: "ignore" });
+        killer.on("error", () => {});
+        // Fire-and-forget: never let this best-effort backstop keep the
+        // orchestrator process alive (e.g. if the docker client hangs).
+        killer.unref();
+      } catch {
+        // Ignore — see doc comment above.
+      }
+    };
+
+    /** `docker kill` the container, then SIGTERM the client now and SIGKILL after `KILL_GRACE_MS` if still alive — shared by the timeout and the abort-signal paths below. */
     const startKillSequence = (): void => {
       // Idempotent: if a kill is already in flight (e.g. the timeout fires
       // while an abort's SIGTERM->SIGKILL grace is still counting down, or
-      // vice versa), don't re-SIGTERM or overwrite `killGraceTimer` — that
-      // would leak the first timer and reset the grace period.
+      // vice versa), don't re-issue the docker kill/SIGTERM or overwrite
+      // `killGraceTimer` — that would leak the first timer and reset the
+      // grace period.
       if (killGraceTimer) return;
+      killContainerBestEffort();
       child.kill("SIGTERM");
       killGraceTimer = setTimeout(() => {
         child.kill("SIGKILL");
@@ -301,9 +370,10 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     }, timeoutMs);
 
     // Queue backstop: if the caller's AbortSignal fires (see this param's
-    // doc comment on `RunReviewParams.signal`), kill `pi` the same way a
-    // timeout would and resolve `{ ok: false, reason: "aborted" }` once the
-    // child actually exits (see the 'close' handler below) — never throws.
+    // doc comment on `RunReviewParams.signal`), kill the review container +
+    // client the same way a timeout would and resolve
+    // `{ ok: false, reason: "aborted" }` once the child actually exits (see
+    // the 'close' handler below) — never throws.
     const onAbort = (): void => {
       aborted = true;
       startKillSequence();
@@ -364,7 +434,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
     child.on("error", (err) => {
       clearTimers();
-      finish({ ok: false, reason: `failed to spawn pi (${piBinary}): ${errorMessage(err)}` });
+      finish({ ok: false, reason: `failed to spawn review container (${dockerBin}): ${errorMessage(err)}` });
     });
 
     child.on("close", (code, procSignal) => {
@@ -392,7 +462,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         const stderrNote = stderrTail.trim() || "(no stderr output)";
         finish({
           ok: false,
-          reason: `pi exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
+          reason: `review container exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
         });
         return;
       }
@@ -411,14 +481,15 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         );
       }
 
-      // Pi exited 0. That alone only means it didn't crash — the run is only
-      // actually usable if it called `report_findings` (see
+      // The container exited 0. That alone only means it didn't crash — the
+      // run is only actually usable if Pi called `report_findings` (see
       // reviewer-prompt.md and packages/review-extension) as its final
-      // action, writing `findingsPath`. Read + validate that file now, at
-      // THIS module's trust boundary (`parseFindings` — see findings.ts's
-      // module doc comment): never assume its shape just because Pi exited
-      // cleanly, since the file's content traces back to an LLM reasoning
-      // over an untrusted, possibly-adversarial PR diff.
+      // action, writing `output.findingsPath` (the host side of the mounted
+      // `/out/findings.json`). Read + validate that file now, at THIS
+      // module's trust boundary (`parseFindings` — see findings.ts's module
+      // doc comment): never assume its shape just because the container
+      // exited cleanly, since the file's content traces back to an LLM
+      // reasoning over an untrusted, possibly-adversarial PR diff.
       // Outer try/catch: by this point `clearTimers()` above has already
       // cleared the timeout AND removed the abort listener, so this IIFE is
       // the ONLY thing left that can settle `runReview`'s promise. If
@@ -434,7 +505,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         try {
           let findingsRaw: string;
           try {
-            findingsRaw = await readFile(findingsPath, "utf-8");
+            findingsRaw = await readFile(output.findingsPath, "utf-8");
           } catch {
             // No findings file. WHY this is also where provider errors surface:
             // a failed model call (a 402/rate-limit/context-length error, etc.)
@@ -444,10 +515,9 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             // — so it lands here, in the missing-file path, not the parse path.
             // Prefer that concrete cause over the opaque generic reason when the
             // last assistant turn carries error info (important for debugging
-            // wave-3's live OpenRouter runs); otherwise it's a genuine "model
-            // never called the tool" (refusal, ran out of turns) or an I/O
-            // surprise reading the file. Either way we must not go silent
-            // (PLAN.md §6).
+            // live OpenRouter runs); otherwise it's a genuine "model never
+            // called the tool" (refusal, ran out of turns) or an I/O surprise
+            // reading the file. Either way we must not go silent (PLAN.md §6).
             const last = messages[messages.length - 1];
             if (last && (last.stopReason === "error" || last.errorMessage)) {
               const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
@@ -573,7 +643,9 @@ export function buildPromptPayload(params: PromptPayloadParams): string {
 // the whole run, per pi-ai's `AssistantMessage`/`Usage` types) — everything
 // else (tool_execution_*, turn_start, queue_update, ...) is ignored. Parsed
 // as `unknown` and narrowed defensively since this is untrusted-shape
-// external process output, not a type this codebase controls.
+// external process output, not a type this codebase controls. Docker
+// forwards the container's stdout unchanged, so this parser is unaffected by
+// the M1/M2 host subprocess -> M3 container swap.
 
 /** The handful of `AssistantMessage` fields this module actually reads. */
 interface AssistantMessageLike {

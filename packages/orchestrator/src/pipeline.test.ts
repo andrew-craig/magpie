@@ -41,13 +41,17 @@ function writeFakePi(body: string): string {
 }
 
 /**
- * NDJSON script body for a fake `pi` that emits one assistant review turn AND
- * "calls" the report_findings tool by writing a findings file to
- * `MAGPIE_FINDINGS_PATH` (see reviewer.ts's M2 findings-file contract and
- * reviewer.test.ts's `writeFakePiWithFindings`, which this mirrors) — the
- * child never actually receives the real Pi extension since these are all
- * fake `pi` binaries, so simulating the file write is the only way an ok:true
- * `ReviewResult` (now requiring `findings`/`verdict`) is reachable here.
+ * NDJSON script body for a fake "docker" that emits one assistant review turn
+ * AND "calls" the report_findings tool by writing a findings file into the
+ * mounted `/out` dir — parsed from its own `-v <hostOut>:/out` argv, the same
+ * channel M3's real container writes through (see reviewer.ts's M3 docker
+ * invocation and reviewer.test.ts's `writeFakeDockerWithFindings`, which this
+ * mirrors). The child never receives the real Pi extension since these are all
+ * fake binaries, so simulating the file write is the only way an ok:true
+ * `ReviewResult` (requiring `findings`/`verdict`) is reachable here. NOTE: in
+ * M3 the pipeline's `piBinary` seam is spawned as `<dockerBin> run ...`, so
+ * these scripts see the docker argv (not the old `MAGPIE_FINDINGS_PATH` env,
+ * which reviewer.ts no longer sets — that path is baked into the image now).
  */
 function fakePiScriptEmitting(text: string): string {
   return fakePiScriptEmittingFindings(text, []);
@@ -68,7 +72,13 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
   const findings = { findings: findingsList, summary: text, verdict: "comment" };
   return [
     `const fs = require("fs");`,
-    `fs.writeFileSync(process.env.MAGPIE_FINDINGS_PATH, ${JSON.stringify(JSON.stringify(findings))});`,
+    `const nodepath = require("path");`,
+    `const argv = process.argv.slice(2);`,
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
+    `}`,
+    `fs.writeFileSync(nodepath.join(outHost, "findings.json"), ${JSON.stringify(JSON.stringify(findings))});`,
     `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
     `const msg = ${JSON.stringify(msg)};`,
     `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
@@ -568,6 +578,10 @@ describe("createReviewPipeline / runJob", () => {
       // skip publishing entirely.
       const piBinary = writeFakePi(
         [
+          // In M3 this seam is spawned as `<dockerBin> run ...`, and on abort
+          // reviewer.ts additionally spawns `<dockerBin> kill <name>` — handle
+          // that subcommand by exiting immediately so no fake process lingers.
+          `if (process.argv[2] === "kill") process.exit(0);`,
           `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
           `setTimeout(() => {}, 60000);`,
         ].join("\n"),

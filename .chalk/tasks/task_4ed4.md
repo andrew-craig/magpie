@@ -2,14 +2,14 @@
 id: task_4ed4
 title: M3-C: reviewer.ts — replace host subprocess with hardened docker run
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:25Z
-updated_at: 2026-07-10T09:22:13Z
+updated_at: 2026-07-10T11:59:02Z
 ---
 Wave 2 (depends on task_5b3a image + task_037b plumbing). The core of M3: rewrite the internals
 of `reviewer.ts` so `runReview` runs the reviewer inside a hardened `docker run` instead of a host
@@ -109,3 +109,56 @@ The existing tests fake the child process; keep that pattern. Update fakes so th
 Pipeline wiring and the full live e2e (M3-D). Gateway/egress (M4).
 
 Depends on: task_5b3a, task_037b. Blocks: task_d8aa (M3-D).
+
+## Review (implementation complete — awaiting tech-lead sign-off)
+
+Swapped `runReview`'s internals from a host `spawn(pi, ...)` to a hardened
+`spawn(<dockerBin>, ["run", ...])` while preserving the Promise structure,
+NDJSON parse, timeout/abort kill-grace machinery, findings-read trust
+boundary, and the `finish()` always-settles/never-throws contract.
+
+Final assembled docker argv (values from `config.container` / `config.llm`):
+
+```
+run --rm --name magpie-<sanitized id> --user <uid>:<gid> --read-only
+  --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges
+  --memory=<memory> --cpus=<cpus> --pids-limit=<pidsLimit>
+  --network <network> -v <mountDir>:/work:ro -v <outDir>:/out
+  -e OPENROUTER_API_KEY -i <image> --provider openrouter --model <model>
+```
+
+Key points / deviations from this task file's original argv sketch (all per
+the CTO decisions in the M3-C dispatch brief):
+- **No `-e OPENAI_BASE_URL`** in M3 — today's run is provider-driven
+  (`--provider openrouter`, no base-URL env); the gateway base URL is M4.
+- **No `-e MAGPIE_FINDINGS_PATH`** — it's baked into the image
+  (`ENV MAGPIE_FINDINGS_PATH=/out/findings.json`), so this module never sets it.
+- **`-e OPENROUTER_API_KEY` in the bare name-only form** (no `=value`), value
+  set on the spawned docker process's `env` — secret via env, never argv.
+- Container-inherits-nothing => the container env is an explicit allowlist
+  (`-e`), not the host denylist; the `MAGPIE_*` strip is kept on the docker
+  CLIENT env as belt-and-suspenders.
+- `jobId?: string` added to `RunReviewParams` (additive optional), sanitized to
+  docker's `[a-zA-Z0-9_.-]` charset and defaulted from `randomBytes(8)` when
+  absent (M3-D threads a real id).
+- Out-dir cleanup (`output.cleanup()`, rm -rf) runs in `finish()`, i.e. on
+  EVERY settle path (success/failure/timeout/abort). `mountDir` is the
+  workspace itself (owned/cleaned by the pipeline) — never freed here.
+- Timeout/abort now `docker kill <name>` (best-effort, `unref`'d) IN ADDITION
+  to the client SIGTERM→SIGKILL grace; `--rm` reaps the container.
+
+Tests: `packages/orchestrator/src/reviewer.test.ts` rewritten to a fake
+"docker" script (parses `-v ...:/out`, writes findings.json there, handles the
+`kill` subcommand, records argv/env for assertions). Added hardening-flag,
+secret-not-on-argv, container-kill-on-timeout-AND-abort, and
+cleanup-on-every-path assertions. Also updated `pipeline.test.ts`'s fake-`pi`
+scripts (a strictly-needed fixture tweak) to write findings into the `/out`
+mount instead of the now-unset `MAGPIE_FINDINGS_PATH`.
+
+Results: `npm test` GREEN — orchestrator 154 passed (16 files), review-extension
+11 passed (1 file). `tsc` clean on both workspace build/typecheck scripts.
+Live e2e deferred to M3-D (not run here).
+
+Scope: touched `reviewer.ts` + `reviewer.test.ts` + `pipeline.test.ts` (fixture
+only). No changes to findings.ts, buildPromptPayload, publisher.ts, or
+pipeline.ts. Not closing — tech lead reviews first.
