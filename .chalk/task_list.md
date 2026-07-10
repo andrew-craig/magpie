@@ -3,8 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **decision_7e12** · P1 · open · M1 execution decisions (tech-lead session)  (parent: epic_04f9)
-- **epic_04f9** · P1 · open · Milestone 1 — Walking skeleton (end-to-end review loop)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **task_1ffd** · P1 · open · M4-E: fail-closed startup assertions in the container entry script  (parent: epic_6730)
 - **task_8667** · P1 · open · M4-B: per-job virtual keys — mint before run, spend budget, revoke on cleanup  (parent: epic_6730)
