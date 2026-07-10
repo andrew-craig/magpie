@@ -50,18 +50,38 @@ the extension or the system prompt, you must rebuild this image** (`npm run
 build:reviewer-image`) for the change to take effect; editing those files alone does
 nothing to a running container or a previously-built image.
 
-Everything else — the model, provider, provider credential, and the findings output
-path — is read from the environment at container start (see `entrypoint.sh`'s own
-doc comment for the exact variable names) and is never baked in.
+The findings **output path** is also baked in, as `ENV
+MAGPIE_FINDINGS_PATH=/out/findings.json` — it's part of the image contract (the
+mounted `/out` dir), not per-job config, so the baked-in `report_findings` extension
+sees it without the caller passing anything. The only genuine runtime inputs are the
+model/provider (container args) and the provider credential (`-e OPENROUTER_API_KEY`),
+covered under Running below.
 
 ## Running
 
-The entrypoint (`docker/reviewer/entrypoint.sh`) execs `pi` with the exact flag set
-`packages/orchestrator/src/reviewer.ts` uses for the M1/M2 host subprocess — see that
-file's doc comment and this image's `entrypoint.sh` doc comment for the full flag
-list and the required/optional environment variables. The prompt payload (PR
-title/body/diff) is read from Pi's **stdin**, so the container must be run attached
-(`docker run -i ...`).
+The entrypoint (`docker/reviewer/entrypoint.sh`) execs `pi` with a fixed set of baked
+flags — the exact flags `packages/orchestrator/src/reviewer.ts` uses for the M1/M2
+host subprocess, minus `--provider`/`--model` — and then appends whatever trailing
+args the caller passes (`"$@"`). So the runtime inputs are:
+
+- **Model + provider — as trailing container ARGV.** They're non-secret and are
+  already CLI flags in the host spawn, and a container inherits no ambient host env,
+  so M3-C passes them explicitly on the command line rather than via env:
+
+  ```
+  docker run ... magpie-reviewer:0.1.0 --provider openrouter --model <model-id>
+  ```
+
+  These land after the baked flags via `"$@"` in the entrypoint.
+- **`OPENROUTER_API_KEY` — via `-e OPENROUTER_API_KEY=...`.** The one input that
+  legitimately comes from the environment because it's a secret; pi-ai reads it
+  directly. The entrypoint fails fast if it's unset.
+- **`OPENAI_BASE_URL` — optional, via env.** Unset in M3; M4 will point it at the
+  host-side LiteLLM gateway. Passed through untouched.
+
+The prompt payload (PR title/body/diff) is read from Pi's **stdin**, so the container
+must be run attached (`docker run -i ...`). See `entrypoint.sh`'s own doc comment for
+the full flag list.
 
 ### Interim security note (M3 — read before wiring this into production)
 
@@ -80,10 +100,13 @@ See task_5b3a's Review section (`.chalk/tasks/closed/task_5b3a.md` once closed, 
 `.chalk/tasks/task_5b3a.md` until then) for the exact commands and captured output
 from the last verified build, including:
 
-- `docker run --rm magpie-reviewer:0.1.0 pi --version` prints `0.80.3`.
-- A hand-run of the full entrypoint against a throwaway worktree + `/out` dir with a
-  real API key, producing a valid `/out/findings.json` matching the M2 findings
-  schema (`packages/orchestrator/src/findings.ts`).
+- `docker run --rm --entrypoint pi magpie-reviewer:0.1.0 --version` prints `0.80.3`
+  (the fixed `ENTRYPOINT` runs Pi in review mode and ignores appended args, so
+  override `--entrypoint` to invoke Pi directly for a version check).
+- A hand-run of the full entrypoint against a throwaway worktree + `/out` dir, invoked
+  the production way (`... magpie-reviewer:0.1.0 --provider openrouter --model <id>`,
+  `-e OPENROUTER_API_KEY=...`, prompt on stdin), producing a valid `/out/findings.json`
+  matching the M2 findings schema (`packages/orchestrator/src/findings.ts`).
 - A `--read-only --tmpfs /tmp --user <uid>:<gid>` run, proving the image doesn't
   depend on writing anywhere but `/tmp` and the mounted `/out`.
 - `docker history --no-trunc magpie-reviewer:0.1.0` showing no secrets baked into any

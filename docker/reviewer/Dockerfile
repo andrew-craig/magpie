@@ -1,11 +1,14 @@
 # magpie-reviewer (M3-A): containerized runtime for the Pi coding agent.
 #
 # Runs Pi headless over a mounted, read-only, `.git`-free PR worktree
-# (`/work`) and writes structured findings to a mounted `/out`. No secrets or
-# per-job config are baked in -- everything that varies per job (model,
-# provider key/base URL, findings output path) is read from the environment
-# by docker/reviewer/entrypoint.sh at run time. See docker/reviewer/README.md
-# for build/run instructions and the current pinned-version record.
+# (`/work`) and writes structured findings to a mounted `/out`. No secrets are
+# baked in. The runtime inputs are: the provider + model as trailing container
+# ARGV (`docker run ... IMAGE --provider openrouter --model <id>`, forwarded to
+# `pi` by entrypoint.sh) and the provider credential via `-e OPENROUTER_API_KEY`.
+# The findings OUTPUT PATH is part of the image contract, not per-job config,
+# so it's baked in as an ENV below (always /out/findings.json). See
+# docker/reviewer/README.md for build/run instructions and the pinned-version
+# record.
 #
 # PINNED VERSIONS (bump deliberately -- no floating tags/ranges anywhere in
 # this file; see README.md for the "how to re-pin" checklist):
@@ -59,6 +62,17 @@ RUN groupadd --gid 10001 reviewer \
 
 COPY docker/reviewer/entrypoint.sh /opt/magpie/entrypoint.sh
 RUN chmod +x /opt/magpie/entrypoint.sh
+
+# Findings output path is part of the image contract, not per-job config: the
+# baked-in report_findings extension (packages/review-extension) reads
+# MAGPIE_FINDINGS_PATH from its env, and in-container that is ALWAYS
+# /out/findings.json (the mounted, writable output dir M3-C hands in). Baking
+# it here means M3-C doesn't have to pass it and entrypoint.sh doesn't have to
+# read it. This is a fixed PATH, not a secret. (NOTE: on the host subprocess,
+# MAGPIE_FINDINGS_PATH is a per-run tmp path and MAGPIE_* is stripped from the
+# child env -- that denylist logic is host-only; a container inherits nothing,
+# so here the extension only sees exactly this baked value.)
+ENV MAGPIE_FINDINGS_PATH=/out/findings.json
 
 WORKDIR /work
 ENTRYPOINT ["/opt/magpie/entrypoint.sh"]

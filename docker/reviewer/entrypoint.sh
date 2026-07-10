@@ -18,45 +18,43 @@ set -euo pipefail
 # (see reviewer.ts's buildPromptPayload) -- this container must be run
 # attached (`docker run -i`) so that reaches Pi.
 #
-# Everything that varies per job is read from the environment below (never
-# baked into the image, never hardcoded, never echoed to logs/stdout/stderr):
+# Runtime inputs (a container inherits NO ambient host env -- unlike the M1/M2
+# host subprocess, which inherited process.env and had MAGPIE_* stripped from
+# it -- so M3-C passes ONLY what's needed, explicitly):
 #
-#   MAGPIE_MODEL          Model id/pattern passed to --model. Required (M3-C
-#                         sets this from config.llm.model).
-#   MAGPIE_PROVIDER        Provider name passed to --provider. Optional,
-#                         defaults to "openrouter" (reviewer.ts's current
-#                         hardcoded value).
-#   MAGPIE_FINDINGS_PATH   Path the baked-in report_findings extension writes
-#                         its output to (see packages/review-extension).
-#                         Required (M3-C sets this to /out/findings.json, the
-#                         mounted output dir).
-#   OPENROUTER_API_KEY     Provider credential; pi-ai reads this directly from
-#                         the environment (same as the M1/M2 host subprocess
-#                         -- see reviewer.ts's module doc comment). Required.
-#                         M3 still injects the real, long-lived provider key;
-#                         M4 replaces it with a short-lived, budget-capped
-#                         gateway virtual key -- that's the interim state this
-#                         milestone deliberately leaves in place.
-#   OPENAI_BASE_URL        Optional OpenAI-compatible base URL override. Unset
-#                         in M3 (Pi/pi-ai talk to OpenRouter directly, same as
-#                         today's host subprocess); M4 will point this at the
-#                         host-side LiteLLM gateway. Passed through untouched
-#                         if the caller set it -- never set or read here
-#                         beyond letting it flow through the environment.
+#   `--provider <name> --model <id>` etc. as trailing ARGV. The baked flags
+#     below are the fixed part of the invocation; everything the caller varies
+#     per job (currently just provider + model, both non-secret and already
+#     CLI flags in reviewer.ts's host spawn) arrives as `"$@"` appended after
+#     them. M3-C invokes: `docker run ... IMAGE --provider openrouter --model
+#     <config.llm.model>`.
+#   OPENROUTER_API_KEY (env, `-e OPENROUTER_API_KEY=...`): provider credential;
+#     pi-ai reads it directly from the environment. Required -- the one input
+#     that legitimately comes via env because it's a secret, so we fail-fast if
+#     it's missing (`:?` below) rather than letting Pi fail later with a
+#     confusing provider-auth error. M3 still injects the real, long-lived
+#     provider key; M4 replaces it with a short-lived, budget-capped gateway
+#     virtual key -- the interim state this milestone deliberately leaves in
+#     place. Never echoed to logs/stdout/stderr here.
+#   OPENAI_BASE_URL (env, optional): OpenAI-compatible base URL override. Unset
+#     in M3 (Pi/pi-ai talk to OpenRouter directly, same as today's host
+#     subprocess); M4 will point this at the host-side LiteLLM gateway. Passed
+#     through untouched if the caller set it -- never set or read here beyond
+#     letting it flow through the environment.
 #
-# `set -u` above means any of the required variables being unset fails fast
-# with a clear message (via the `:?` checks) rather than Pi failing later
-# with a confusing provider-auth error.
+# NOT a runtime input: MAGPIE_FINDINGS_PATH. The output path is part of the
+# image contract (always /out/findings.json, the mounted output dir) and is
+# baked into the Dockerfile via `ENV MAGPIE_FINDINGS_PATH=/out/findings.json`,
+# so the baked-in report_findings extension already sees it -- this script
+# neither reads nor requires it.
 
-: "${MAGPIE_MODEL:?MAGPIE_MODEL must be set -- see docker/reviewer/README.md}"
-: "${MAGPIE_FINDINGS_PATH:?MAGPIE_FINDINGS_PATH must be set -- see docker/reviewer/README.md}"
-: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set -- see docker/reviewer/README.md}"
-
-MAGPIE_PROVIDER="${MAGPIE_PROVIDER:-openrouter}"
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (-e OPENROUTER_API_KEY=...) -- see docker/reviewer/README.md}"
 
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly
 # from `docker stop`/`docker kill` (the container-lifecycle timeout/abort
-# path -- see epic_a580) instead of a shell swallowing the signal.
+# path -- see epic_a580) instead of a shell swallowing the signal. `"$@"`
+# forwards the caller's trailing args (--provider/--model) after the fixed
+# baked flags.
 exec pi \
   -p \
   --mode json \
@@ -64,6 +62,5 @@ exec pi \
   --tools read,grep,find,ls,report_findings \
   --extension /opt/magpie/review-extension/src/index.ts \
   --no-extensions \
-  --provider "$MAGPIE_PROVIDER" \
-  --model "$MAGPIE_MODEL" \
-  --append-system-prompt /opt/magpie/reviewer-prompt.md
+  --append-system-prompt /opt/magpie/reviewer-prompt.md \
+  "$@"
