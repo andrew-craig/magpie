@@ -1,5 +1,5 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
@@ -74,6 +74,12 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
     `const fs = require("fs");`,
     `const nodepath = require("path");`,
     `const argv = process.argv.slice(2);`,
+    // Record the full "docker run" argv this fake was invoked with so tests
+    // can assert on it afterwards (e.g. that pipeline.ts threaded job.id
+    // through to reviewer.ts's `--name magpie-<jobId>` — see the
+    // "threads the job id into the container name" test below), mirroring
+    // reviewer.test.ts's `invocation.json` pattern.
+    `fs.writeFileSync(${JSON.stringify(join(root, INVOCATION_FILE))}, JSON.stringify(argv));`,
     `let outHost = "";`,
     `for (let i = 0; i < argv.length - 1; i++) {`,
     `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
@@ -84,6 +90,16 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
     `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
     `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
   ].join("\n");
+}
+
+/** Name of the file the fake docker script (see `fakePiScriptEmittingFindings`) records its argv to, under `root`. */
+const INVOCATION_FILE = "invocation.json";
+
+/** Reads back the `docker run` argv the fake docker script recorded, or `undefined` if it never ran. */
+function readRecordedArgv(): string[] | undefined {
+  const path = join(root, INVOCATION_FILE);
+  if (!existsSync(path)) return undefined;
+  return JSON.parse(readFileSync(path, "utf-8")) as string[];
 }
 
 /** Fake `pi` script that exits non-zero, simulating a failed review run. */
@@ -254,6 +270,42 @@ describe("createReviewPipeline / runJob", () => {
     });
     expect(cleanupCalls).toHaveLength(1);
     expect(existsSync(cleanupCalls[0])).toBe(false);
+  });
+
+  it("threads the queue's job id into the reviewer's container name (--name magpie-<jobId>)", async () => {
+    // M3-D: pipeline.ts must pass `jobId: job.id` through to runReview so
+    // reviewer.ts's `buildContainerName` derives `magpie-<jobId>` (see
+    // reviewer.ts) rather than a fresh random id per run — otherwise the
+    // queue's `AbortController` -> reviewer.ts's `docker kill` path (already
+    // proven at the reviewer.ts unit level in reviewer.test.ts) couldn't be
+    // told which container name to target from outside runReview. Asserted
+    // here via the fake docker's recorded argv (see `readRecordedArgv`)
+    // rather than re-testing the kill mechanics themselves, which belong to
+    // reviewer.test.ts.
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good, no issues found."));
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ id: "job-e2e-42" }), new AbortController().signal);
+
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    const nameIdx = argv!.indexOf("--name");
+    expect(nameIdx).toBeGreaterThanOrEqual(0);
+    expect(argv![nameIdx + 1]).toBe("magpie-job-e2e-42");
   });
 
   it("anchors a findable finding to an inline comment and folds an unanchorable one into Other observations", async () => {

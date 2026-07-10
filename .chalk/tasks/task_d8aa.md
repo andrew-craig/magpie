@@ -2,14 +2,14 @@
 id: task_d8aa
 title: M3-D: pipeline integration + config wiring + live e2e verification
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:25Z
-updated_at: 2026-07-10T20:52:30Z
+updated_at: 2026-07-10T20:54:47Z
 ---
 Wave 3 (depends on task_4ed4 runner + task_5b3a image). Finish M3: make sure the containerized
 runner is threaded correctly through `pipeline.ts`, that all container/mount resources are cleaned
@@ -82,3 +82,122 @@ Gateway, per-job virtual keys, `magpie-net`, iptables egress lockdown, fail-clos
 all M4.
 
 Depends on: task_4ed4, task_5b3a. Closing this + all siblings closes epic_a580 (M3).
+
+## Live E2E Verification (M3)
+
+Date: 2026-07-11
+
+**Setup:** Image confirmed current via `scripts/build-reviewer-image.sh` (`docker images` shows
+`magpie-reviewer:0.1.0`, id `8c376ffb861e`). `config.toml` has no `[container]` override, so the
+config.ts default `image = "magpie-reviewer:0.1.0"` is what ran. Orchestrator started via
+`npm run dev` on branch `m3-containerize` (host process, real Pi + OpenRouter `z-ai/glm-5.2`),
+listening on `127.0.0.1:8787`, exposed via the existing `cloudflared` systemd tunnel
+(`magpie.seatrain.net`). Startup log confirmed the docker preflight passed (process didn't abort)
+and orphan cleanup ran and found nothing (`{"event":"orphan-cleanup","removedCount":0}`) — logged
+right after `assertDockerAvailable`, before `magpie-started`. `GET /healthz` returned `ok` both
+locally and through the tunnel.
+
+A throwaway branch `e2e-m3-probe-1783717580` was created off `origin/main` (NOT off
+`m3-containerize`) adding `e2e-probe-m3.js` with two intentional, genuine defects: an inverted
+upper-bound comparison in `clamp` (`value < max` instead of `value > max`) and an `isEven`
+that actually tests for odd (`n % 2 === 1`). This fired PR **#26**:
+https://github.com/andrew-craig/magpie/pull/26
+
+**Job lifecycle** (from `/tmp/magpie-e2e-m3.log`, three pushes to drive `synchronize` deliveries —
+`opened` + two follow-up pushes, the last used to capture `docker ps` mid-run):
+
+```
+start id=3e046511-d3d2-44cf-9fe4-1898f6a25978 headSha=a8c35655...
+minting-token → computing-diff → running-review
+[reviewer] pi run complete: turns=1 tokens(in/out/total)=4277/506/5487 cost=$0.0056
+publishing-review (resultOk=true)
+published-review commentId=4675016602
+  commentUrl=https://github.com/andrew-craig/magpie/pull/26#pullrequestreview-4675016602
+workspace-cleaned
+finish durationMs=40222 outcome=success
+```
+
+**Container evidence — job ran inside `magpie-reviewer`:**
+`docker ps` polled every 0.4s during the third push's job caught the container live for its whole
+run, e.g.:
+```
+[07:10:29] magpie-3e046511-d3d2-44cf-9fe4-1898f6a25978  Up 3 seconds
+...
+[07:11:01] magpie-3e046511-d3d2-44cf-9fe4-1898f6a25978  Up 35 seconds
+```
+(container name == `magpie-<jobId>`, confirming pipeline.ts's `jobId: job.id` threading into
+`runReview` — see reviewer.ts's `buildContainerName`). Immediately after `finish` was logged,
+`docker ps -a --format '{{.Names}}' | grep magpie-` returned nothing — container fully removed
+(the `docker run --rm` path, no kill needed since this run completed normally).
+
+**Read-only, `.git`-free mount (verified from source, since M3-C already bakes this into every
+`docker run`):** reviewer.ts's `dockerArgs` always includes `"--read-only"` and
+`` `${mountDir}:/work:ro` ``, and `mountDir` comes from `prepareReviewMount(workspace.dir)`, which
+`rm -rf`s `.git` from the checkout in place before it's ever bind-mounted — see reviewer.ts:255,266
+and container-mounts.ts:44-47. `findings.json` is read back from `output.findingsPath`
+(`<hostOutDir>/findings.json`, the host side of the `-v <out>:/out` mount) only after a clean
+container exit, and the posted review's findings (below) came from exactly that channel — there is
+no other code path that produces `ReviewResult.findings`.
+
+**Posted review** (final push, `headSha` `a8c35655...`) — verified via `gh api`:
+- Exactly **one** review for this delivery: id `4675016602`, author `magpie-reviewer[bot]`,
+  `state: COMMENTED`.
+- Review body (marker + summary + usage footer):
+  > `<!-- magpie-review -->` "## 🐦 Magpie review — This throwaway M3 e2e probe (as stated in the PR
+  > description) contains two genuine correctness defects in `e2e-probe-m3.js`: an inverted
+  > upper-bound comparison in `clamp` (line 10) and an `isEven` implementation that actually tests
+  > for odd (line 20)..." — footer: `_turns=1 tokens=5487 cost=$0.0056_`
+- **2 inline comments**, both diff-anchored, both `original_line == line` (no drift):
+  - `e2e-probe-m3.js:11` — "Blocking (correctness) — The upper-bound check uses `value < max`
+    instead of `value > max`..."
+  - `e2e-probe-m3.js:20` — "Blocking (correctness) — `isEven` returns `n % 2 === 1`, which is true
+    for odd numbers, not even ones..."
+- Issue comments on #26 at this point = **0** — no stray/duplicate `issues.createComment`; the
+  review body is the sole summary. (Across all three pushes in the success run, every push produced
+  exactly one review and zero issue comments each time — three total magpie-reviewer reviews, one
+  per head sha, which is expected M1/M2 per-push behaviour, not a duplicate-posting bug. An unrelated
+  pre-existing `gemini-code-assist[bot]` review also appeared on the PR — not part of magpie.)
+- Workspace: `/var/lib/magpie/work` empty (only `.`/`..`) after `workspace-cleaned`; no leftover
+  `magpie-out-*` temp dirs under `/tmp`.
+
+**Timeout/abort case:** `config.toml`'s `job_timeout_seconds` temporarily set to `5`, orchestrator
+restarted (fresh startup log again showed the preflight pass + `orphan-cleanup removedCount=0`).
+A fourth push (`headSha` `1d189ead...`) drove a `synchronize` job that could not finish inside 5s:
+
+```
+start id=6cadc986-bf00-4cd7-8eb3-d300aaf5fd36
+minting-token → computing-diff → running-review
+publishing-review (resultOk=false)
+published-review commentId=4939585196
+  commentUrl=https://github.com/andrew-craig/magpie/pull/26#issuecomment-4939585196
+workspace-cleaned
+finish durationMs=9476 outcome=success
+```
+
+- `resultOk=false` and the published comment is an `issues.createComment` (URL contains
+  `#issuecomment-...`, not `#pullrequestreview-...`) — the M1/M2 failure-note path, not a review.
+- Comment body: `"Magpie could not complete a review of this PR.\n\nReason:\n\`\`\`\ntimeout after 5s\n\`\`\`"`
+  — the PR gets a clear failure note, not silence.
+- `durationMs=9476` (~9.5s: the 5s `runReview` timeout plus the `KILL_GRACE_MS` SIGTERM→SIGKILL
+  window) confirms the container was actually killed rather than left to finish.
+- `docker ps -a --format '{{.Names}}' | grep magpie-` immediately after: **empty** — no container
+  left running or dangling.
+- No new PR review was posted for this head sha (review count stayed at 3; issue-comment count on
+  the PR became 1, exactly the failure note above) and no leftover `/var/lib/magpie/work` or
+  `/tmp/magpie-out-*` directories.
+
+**Cleanup performed:**
+- PR #26 closed and remote branch `e2e-m3-probe-1783717580` deleted via
+  `gh pr close 26 --repo andrew-craig/magpie --delete-branch`.
+- Orchestrator background process stopped (`SIGTERM`, graceful `shutting-down` logged); port 8787
+  confirmed free.
+- `config.toml`'s `job_timeout_seconds` restored from `5` back to `600`.
+- Local throwaway checkout (`/tmp/magpie-e2e-checkout`) removed.
+- Run logs left in place: `/tmp/magpie-e2e-m3.log` (success run, three pushes) and
+  `/tmp/magpie-e2e-m3-timeout.log` (timeout run).
+
+**Verdict: PASS.** Single `COMMENTED` review per push with two genuinely diff-anchored inline
+findings, correct usage footer, zero stray issue comments, container evidence captured live via
+`docker ps` and confirmed removed after, workspace/out dirs cleaned. Timeout case: container killed
+within the SIGTERM/SIGKILL grace window, no orphaned container or temp dirs, and the PR received the
+M1/M2 failure comment instead of going silent. Nothing to re-run.

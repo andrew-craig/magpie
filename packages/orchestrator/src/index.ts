@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { loadConfig, ConfigError } from "./config.js";
 import { assertDockerAvailable, DockerUnavailableError } from "./docker.js";
 import { createPullRequestFilter } from "./filter.js";
+import { cleanupOrphanContainers } from "./orphan-cleanup.js";
 import { createReviewPipeline } from "./pipeline.js";
 import type { JobOutcome } from "./queue.js";
 import { JobQueue, jobQueueOptionsFromConfig } from "./queue.js";
@@ -82,6 +83,13 @@ async function main(): Promise<void> {
   // failing every subsequent job the same way. Refusing to start at all is
   // strictly better for a self-hosted, unattended service.
   await assertDockerAvailable(config);
+
+  // Defence-in-depth (M3-D, see orphan-cleanup.ts): remove any `magpie-*`
+  // review containers left running by a previous crash of this process
+  // (normal exits, including the graceful-shutdown path below, never leave
+  // one behind — see reviewer.ts's `--rm` + kill-on-timeout/abort handling).
+  // Best-effort and non-fatal: never blocks startup on a docker error.
+  await cleanupOrphanContainers(config);
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
   const { runJob, cleanupJob } = createReviewPipeline(config);
