@@ -2,14 +2,14 @@
 id: task_5b3a
 title: M3-A: magpie-reviewer container image (Dockerfile + entrypoint + build script)
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:20Z
-updated_at: 2026-07-10T07:48:29Z
+updated_at: 2026-07-10T09:22:13Z
 ---
 Wave 1 (parallel with task_037b). Build the `magpie-reviewer` Docker image that runs Pi
 headless over a mounted worktree. Pure image/build work — no orchestrator TS changes here.

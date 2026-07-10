@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_5b3a,task_037b]
+blocked_by: []
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:25Z
-updated_at: 2026-07-10T06:47:25Z
+updated_at: 2026-07-10T09:22:13Z
 ---
 Wave 2 (depends on task_5b3a image + task_037b plumbing). The core of M3: rewrite the internals
 of `reviewer.ts` so `runReview` runs the reviewer inside a hardened `docker run` instead of a host

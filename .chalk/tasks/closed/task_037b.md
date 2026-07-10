@@ -2,14 +2,14 @@
 id: task_037b
 title: M3-B: orchestrator plumbing — config, docker preflight, .git-stripped read-only worktree + /out handoff
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:20Z
-updated_at: 2026-07-10T07:48:29Z
+updated_at: 2026-07-10T09:22:13Z
 ---
 Wave 1 (parallel with task_5b3a). Build the orchestrator-side helpers and config that the M3-C
 docker runner will call, so M3-C can focus purely on assembling and running the `docker run`

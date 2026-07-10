@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_4ed4,task_5b3a]
+blocked_by: [task_4ed4]
 parent: epic_a580
 remote_task_url: null
 created_at: 2026-07-10T06:47:25Z
-updated_at: 2026-07-10T06:47:29Z
+updated_at: 2026-07-10T09:22:13Z
 ---
 Wave 3 (depends on task_4ed4 runner + task_5b3a image). Finish M3: make sure the containerized
 runner is threaded correctly through `pipeline.ts`, that all container/mount resources are cleaned
