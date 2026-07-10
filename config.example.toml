@@ -88,3 +88,38 @@ max_diff_lines = 4000
 # For local development, point this at a directory under your home or repo
 # checkout (e.g. "./.magpie-work") instead of the production system path.
 work_dir = "/var/lib/magpie/work"
+
+[container]
+# Docker image tag the review container runs (see PLAN.md Milestone 3). This
+# MUST match the tag produced by the magpie-reviewer image build (docker/) —
+# the orchestrator does not build or pull the image itself.
+# Default: "magpie-reviewer:0.1.0"
+image = "magpie-reviewer:0.1.0"
+
+# Memory limit passed to `docker run --memory` for the review container.
+# Bounds how much host memory a single (possibly prompt-injected) review job
+# can consume. See PLAN.md §4 for the container hardening rationale.
+# Default: "4g"
+memory = "4g"
+
+# CPU limit passed to `docker run --cpus` for the review container.
+# Default: "2"
+cpus = "2"
+
+# Max number of processes/threads the review container may create, passed to
+# `docker run --pids-limit`. Bounds fork-bomb-style resource exhaustion.
+# Default: 256
+pids_limit = 256
+
+# Path to the docker CLI binary used to run review containers. Override this
+# on hosts where `docker` isn't on PATH, or where a docker-compatible CLI
+# (e.g. podman) is used instead.
+# Default: "docker"
+docker_bin = "docker"
+
+# Docker network the review container is attached to, via `docker run
+# --network`. Default: "bridge" (Docker's default bridge network). Milestone
+# 4 introduces a dedicated `magpie-net` bridge with host iptables egress
+# lockdown (see PLAN.md §5) — this field exists now so flipping to it later
+# is a config change, not a code change.
+network = "bridge"

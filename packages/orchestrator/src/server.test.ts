@@ -25,6 +25,14 @@ function testConfig(): Config {
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
     repoAllowlist: [],
     workspace: { workDir: "/tmp/magpie-work" },
+    container: {
+      image: "magpie-reviewer:0.1.0",
+      memory: "4g",
+      cpus: "2",
+      pidsLimit: 256,
+      dockerBin: "docker",
+      network: "bridge",
+    },
     secrets: {
       webhookSecret: WEBHOOK_SECRET,
       llmApiKey: "test-llm-api-key",
