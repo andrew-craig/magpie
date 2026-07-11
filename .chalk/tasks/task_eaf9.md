@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_eb22,task_8667]
+blocked_by: [task_8667]
 parent: epic_6730
 remote_task_url: null
 created_at: 2026-07-10T21:51:06Z
-updated_at: 2026-07-10T21:51:06Z
+updated_at: 2026-07-11T03:21:22Z
 ---
 Wave 2/3. Rewire the reviewer invocation so the container never sees the real provider key (PLAN.md §4/§5).
 

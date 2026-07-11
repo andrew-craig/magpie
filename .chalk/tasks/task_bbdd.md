@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_eb22]
+blocked_by: []
 parent: epic_6730
 remote_task_url: null
 created_at: 2026-07-10T21:51:17Z
-updated_at: 2026-07-10T21:51:17Z
+updated_at: 2026-07-11T03:21:22Z
 ---
 Wave 2 (parallel with M4-B/C; needs the gateway's listen address from M4-A). Network lockdown per PLAN.md §5.
 

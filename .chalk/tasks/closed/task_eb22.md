@@ -2,14 +2,14 @@
 id: task_eb22
 title: M4-A: LiteLLM gateway service — own user, real provider key, OpenAI-compatible endpoint
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_6730
 remote_task_url: null
 created_at: 2026-07-10T21:50:44Z
-updated_at: 2026-07-11T02:24:14Z
+updated_at: 2026-07-11T03:21:22Z
 ---
 Wave 1. Stand up the host-side LiteLLM proxy per PLAN.md §5.
 
