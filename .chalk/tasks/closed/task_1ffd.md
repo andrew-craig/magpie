@@ -2,14 +2,14 @@
 id: task_1ffd
 title: M4-E: fail-closed startup assertions in the container entry script
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: []
 blocked_by: []
 parent: epic_6730
 remote_task_url: null
 created_at: 2026-07-10T21:51:30Z
-updated_at: 2026-07-11T22:26:12Z
+updated_at: 2026-07-11T23:05:57Z
 ---
 Wave 3 (final M4 task; needs the gateway wiring and the network lockdown in place). PLAN.md milestone 4's explicit acceptance check.
 

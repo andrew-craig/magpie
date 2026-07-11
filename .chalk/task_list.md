@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_1ffd** · P1 · in_progress · M4-E: fail-closed startup assertions in the container entry script  (parent: epic_6730)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_4a75** · P2 · open · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
