@@ -3,9 +3,16 @@
 // Reads a TOML config file (see /config.example.toml at the repo root for the
 // template and per-field documentation), validates it, applies defaults, and
 // resolves the handful of secrets that deliberately live in the environment
-// rather than the TOML file (webhook secret, LLM API key, gateway master key,
-// and optionally the GitHub App private key). See PLAN.md "Repository
-// layout" / "Defaults chosen" for the surrounding design.
+// rather than the TOML file (webhook secret, gateway master key, and
+// optionally the GitHub App private key). See PLAN.md "Repository layout" /
+// "Defaults chosen" for the surrounding design.
+//
+// NOTE (M4-C): there is no LLM provider API key here. The real OpenRouter
+// key now lives ONLY in packages/gateway's own process env
+// (MAGPIE_GATEWAY_OPENROUTER_KEY) — this orchestrator mints a short-lived,
+// budget-capped virtual key per job against the gateway's management plane
+// (gateway.ts, authenticated with secrets.gatewayMasterKey below) instead of
+// ever holding a long-lived provider credential itself.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -87,6 +94,21 @@ const rawConfigSchema = z
         // Default matches packages/gateway's own default
         // GATEWAY_MGMT_PORT=4100 on loopback.
         base_url: z.string().min(1).default("http://127.0.0.1:4100"),
+        // Container-facing PROXY (data) plane base URL — where the review
+        // CONTAINER itself sends chat-completions requests (M4-C). This is a
+        // SEPARATE address from `base_url` above on purpose: `base_url` is
+        // the loopback-only mgmt plane this orchestrator process calls to
+        // mint/revoke keys, while this one must be reachable from inside the
+        // review container on `magpie-net` (an `--internal` docker network —
+        // loopback inside the container is the container itself, not the
+        // host). Default matches M4-D's fixed magpie-net gateway IP
+        // (172.31.99.1, the network's gateway address) and the gateway's own
+        // default GATEWAY_PROXY_PORT=4000, with the `/v1` suffix `pi`'s
+        // OpenAI-compatible provider config expects (see reviewer.ts's
+        // module doc comment on how this reaches Pi — a `~/.pi/agent/
+        // models.json` provider-baseUrl override written by
+        // docker/reviewer/entrypoint.sh, NOT an env var Pi itself reads).
+        container_base_url: z.string().min(1).default("http://172.31.99.1:4000/v1"),
         // Per-job USD spend cap passed as `budgetUsd` when minting a virtual
         // key (see gateway.ts's mintGatewayKeyFromConfig). This is the HARD
         // cost cap Pi itself lacks (no --max-turns/budget flag): the
@@ -149,6 +171,18 @@ export interface Config {
   gateway: {
     /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see PLAN.md §5. */
     baseUrl: string;
+    /**
+     * Container-facing PROXY (data) plane base URL (M4-C) — passed into the
+     * review container's env as `OPENAI_BASE_URL` (see reviewer.ts) and
+     * translated by docker/reviewer/entrypoint.sh into a `~/.pi/agent/
+     * models.json` `openrouter` provider `baseUrl` override, which is the
+     * mechanism that actually redirects Pi's traffic (Pi 0.80.3 has no
+     * generic env-var base-URL override — see reviewer.ts's module doc
+     * comment). Deliberately a SEPARATE value from `baseUrl` above: that one
+     * is loopback-only and unreachable from `magpie-net`; this one is the
+     * only address a review container can reach on that network.
+     */
+    containerBaseUrl: string;
     /** Per-job USD spend cap passed to the gateway when minting a virtual key. The hard cost cap Pi itself lacks. */
     perJobBudgetUsd: number;
     /** Extra seconds added to `limits.jobTimeoutSeconds` for the minted key's TTL, so it outlives the job's own wall-clock budget. */
@@ -157,7 +191,6 @@ export interface Config {
   /** Secrets resolved from the environment (never sourced from the TOML file). */
   secrets: {
     webhookSecret: string;
-    llmApiKey: string;
     /** PEM contents of the GitHub App private key. */
     githubPrivateKey: string;
     /**
@@ -326,13 +359,14 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
-  const llmApiKey = process.env.MAGPIE_LLM_API_KEY;
-  if (!llmApiKey) {
-    problems.push(
-      "MAGPIE_LLM_API_KEY env var is required (LLM provider API key)",
-    );
-  }
-
+  // NOTE: there is deliberately no MAGPIE_LLM_API_KEY here (M4-C — CTO
+  // decision). The real OpenRouter key now lives ONLY in the gateway
+  // process's own env (MAGPIE_GATEWAY_OPENROUTER_KEY, see
+  // packages/gateway/README.md); this orchestrator never holds it, so it
+  // can't leak it into the reviewer/container path even by accident. The
+  // review container instead authenticates to the gateway with a per-job
+  // virtual key minted via MAGPIE_GATEWAY_MASTER_KEY below (see gateway.ts,
+  // pipeline.ts, reviewer.ts).
   const gatewayMasterKey = process.env.MAGPIE_GATEWAY_MASTER_KEY;
   if (!gatewayMasterKey) {
     problems.push(
@@ -416,12 +450,12 @@ export function loadConfig(configPath?: string): Config {
     },
     gateway: {
       baseUrl: data.gateway.base_url,
+      containerBaseUrl: data.gateway.container_base_url,
       perJobBudgetUsd: data.gateway.per_job_budget_usd,
       ttlMarginSeconds: data.gateway.ttl_margin_seconds,
     },
     secrets: {
       webhookSecret: webhookSecret!,
-      llmApiKey: llmApiKey!,
       githubPrivateKey: githubPrivateKey!,
       gatewayMasterKey: gatewayMasterKey!,
     },

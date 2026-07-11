@@ -23,12 +23,12 @@ function testConfig(overrides: Partial<Config["container"]> = {}): Config {
     },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
+      containerBaseUrl: "http://172.31.99.1:4000/v1",
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
     secrets: {
       webhookSecret: "test-webhook-secret",
-      llmApiKey: "test-llm-api-key",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
       gatewayMasterKey: "test-gateway-master-key",
     },

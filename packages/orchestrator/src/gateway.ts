@@ -22,12 +22,12 @@
 //    ever puts it in the `Authorization` request header, never in a URL,
 //    argv, or a log/error payload.
 //  - The minted virtual key (`GatewayKey.key`) is likewise never logged here.
-//    It is also NOT consumed by this module or by reviewer.ts yet — M4-C
-//    wires it into the review container's `-e OPENROUTER_API_KEY` in place of
-//    the real provider key (`config.secrets.llmApiKey`). Until that lands,
-//    the mint/revoke lifecycle below is fully exercised per job, but the
-//    minted key itself is unused by the running review (see pipeline.ts's
-//    doc comment for the same note).
+//    As of M4-C, pipeline.ts threads it into reviewer.ts's `runReview` as
+//    `gatewayApiKey`, which sets it as the review container's
+//    `-e OPENROUTER_API_KEY` — the orchestrator no longer loads a real
+//    provider key at all (see config.ts: `secrets.llmApiKey` was removed),
+//    so this virtual key is the ONLY OpenRouter-shaped credential the
+//    reviewer path ever sees.
 //  - `revokeGatewayKey` is BEST-EFFORT and NEVER THROWS (mirrors
 //    orphan-cleanup.ts's `cleanupOrphanContainers` and reviewer.ts's
 //    `output.cleanup()`): a revoke failure (network hiccup, gateway

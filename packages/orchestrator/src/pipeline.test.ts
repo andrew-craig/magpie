@@ -91,6 +91,13 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
     // "threads the job id into the container name" test below), mirroring
     // reviewer.test.ts's `invocation.json` pattern.
     `fs.writeFileSync(${JSON.stringify(join(root, INVOCATION_FILE))}, JSON.stringify(argv));`,
+    // Record the OPENROUTER_API_KEY value this fake saw in its own env, so
+    // tests can assert the pipeline threaded the minted gateway virtual key
+    // (not any other value) into the container — see reviewer.test.ts's
+    // equivalent `openRouterKey` invocation field, mirrored here at the
+    // pipeline level since this is the only place that observes what
+    // pipeline.ts (not reviewer.ts directly) actually passed through.
+    `fs.writeFileSync(${JSON.stringify(join(root, ENV_FILE))}, JSON.stringify({ openRouterKey: process.env.OPENROUTER_API_KEY ?? null }));`,
     `let outHost = "";`,
     `for (let i = 0; i < argv.length - 1; i++) {`,
     `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
@@ -106,11 +113,21 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
 /** Name of the file the fake docker script (see `fakePiScriptEmittingFindings`) records its argv to, under `root`. */
 const INVOCATION_FILE = "invocation.json";
 
+/** Name of the file the fake docker script records its observed env to, under `root` (see `readRecordedEnv`). */
+const ENV_FILE = "env.json";
+
 /** Reads back the `docker run` argv the fake docker script recorded, or `undefined` if it never ran. */
 function readRecordedArgv(): string[] | undefined {
   const path = join(root, INVOCATION_FILE);
   if (!existsSync(path)) return undefined;
   return JSON.parse(readFileSync(path, "utf-8")) as string[];
+}
+
+/** Reads back the `OPENROUTER_API_KEY` value the fake docker script observed in its own env, or `undefined` if it never ran. */
+function readRecordedEnv(): { openRouterKey: string | null } | undefined {
+  const path = join(root, ENV_FILE);
+  if (!existsSync(path)) return undefined;
+  return JSON.parse(readFileSync(path, "utf-8")) as { openRouterKey: string | null };
 }
 
 /** Fake `pi` script that exits non-zero, simulating a failed review run. */
@@ -139,12 +156,12 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
     },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
+      containerBaseUrl: "http://172.31.99.1:4000/v1",
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
     secrets: {
       webhookSecret: "test-webhook-secret",
-      llmApiKey: "test-llm-api-key",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
       gatewayMasterKey: "test-gateway-master-key",
     },
@@ -912,6 +929,36 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
     expect(mintGatewayKey).toHaveBeenCalledTimes(1);
     expect(revokeGatewayKey).toHaveBeenCalledTimes(1);
     expect(revokedIds).toEqual([minted.id]);
+  });
+
+  it("threads the minted virtual key into the container's OPENROUTER_API_KEY env (M4-C)", async () => {
+    // Not just "a key" flows through: the SPECIFIC minted virtual key from
+    // step 2a (gatewaySpies()'s `minted.key`) must reach the container's env
+    // verbatim — see reviewer.ts's `RunReviewParams.gatewayApiKey` wiring and
+    // pipeline.ts's `gatewayApiKey: gatewayKey.key` call site.
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("All good."));
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { minted, mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(readRecordedEnv()).toEqual({ openRouterKey: minted.key });
   });
 
   it("revokes the key even when the review fails (failure path)", async () => {

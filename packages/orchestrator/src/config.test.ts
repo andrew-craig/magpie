@@ -6,7 +6,6 @@ import { ConfigError, loadConfig, resolveDefaultConfigPath } from "./config.js";
 
 const REQUIRED_ENV = {
   MAGPIE_WEBHOOK_SECRET: "test-webhook-secret",
-  MAGPIE_LLM_API_KEY: "test-llm-api-key",
   MAGPIE_GATEWAY_MASTER_KEY: "test-gateway-master-key",
 } as const;
 
@@ -82,12 +81,16 @@ describe("loadConfig", () => {
     expect(config.container.dockerBin).toBe("docker");
     expect(config.container.network).toBe("bridge");
     expect(config.gateway.baseUrl).toBe("http://127.0.0.1:4100");
+    expect(config.gateway.containerBaseUrl).toBe("http://172.31.99.1:4000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(0.5);
     expect(config.gateway.ttlMarginSeconds).toBe(120);
     expect(config.secrets.webhookSecret).toBe("test-webhook-secret");
-    expect(config.secrets.llmApiKey).toBe("test-llm-api-key");
     expect(config.secrets.githubPrivateKey).toContain("BEGIN PRIVATE KEY");
     expect(config.secrets.gatewayMasterKey).toBe("test-gateway-master-key");
+    // No config.secrets.llmApiKey field exists any more (M4-C — CTO
+    // decision): the real provider key now lives only in the gateway
+    // process's own env, never this orchestrator's.
+    expect(config.secrets).not.toHaveProperty("llmApiKey");
   });
 
   it("allows overriding defaults via TOML", () => {
@@ -125,6 +128,7 @@ network = "magpie-net"
 
 [gateway]
 base_url = "http://10.0.0.1:9100"
+container_base_url = "http://10.0.0.2:9000/v1"
 per_job_budget_usd = 1.25
 ttl_margin_seconds = 300
 `);
@@ -148,6 +152,7 @@ ttl_margin_seconds = 300
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
     expect(config.container.network).toBe("magpie-net");
     expect(config.gateway.baseUrl).toBe("http://10.0.0.1:9100");
+    expect(config.gateway.containerBaseUrl).toBe("http://10.0.0.2:9000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(1.25);
     expect(config.gateway.ttlMarginSeconds).toBe(300);
   });
@@ -210,15 +215,15 @@ model = "anthropic/claude-sonnet-4.5"
   it("reports a missing env secret by name", () => {
     const pemPath = writePemFile();
     const configPath = writeConfig(MINIMAL_TOML(pemPath));
-    process.env.MAGPIE_WEBHOOK_SECRET = "test-webhook-secret";
-    // MAGPIE_LLM_API_KEY intentionally left unset.
+    process.env.MAGPIE_GATEWAY_MASTER_KEY = "test-gateway-master-key";
+    // MAGPIE_WEBHOOK_SECRET intentionally left unset.
 
     expect.assertions(2);
     try {
       loadConfig(configPath);
     } catch (err) {
       expect(err).toBeInstanceOf(ConfigError);
-      expect((err as ConfigError).message).toMatch(/MAGPIE_LLM_API_KEY/);
+      expect((err as ConfigError).message).toMatch(/MAGPIE_WEBHOOK_SECRET/);
     }
   });
 
@@ -226,7 +231,6 @@ model = "anthropic/claude-sonnet-4.5"
     const pemPath = writePemFile();
     const configPath = writeConfig(MINIMAL_TOML(pemPath));
     process.env.MAGPIE_WEBHOOK_SECRET = "test-webhook-secret";
-    process.env.MAGPIE_LLM_API_KEY = "test-llm-api-key";
     // MAGPIE_GATEWAY_MASTER_KEY intentionally left unset.
 
     expect.assertions(2);
@@ -258,7 +262,7 @@ model = "anthropic/claude-sonnet-4.5"
       const message = (err as ConfigError).message;
       expect(message).toMatch(/github\.app_id/);
       expect(message).toMatch(/MAGPIE_WEBHOOK_SECRET/);
-      expect(message).toMatch(/MAGPIE_LLM_API_KEY/);
+      expect(message).toMatch(/MAGPIE_GATEWAY_MASTER_KEY/);
       expect(message).toMatch(/private_key_path/);
       expect(message).toMatch(/repo_allowlist/);
     }

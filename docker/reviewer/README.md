@@ -54,7 +54,8 @@ The findings **output path** is also baked in, as `ENV
 MAGPIE_FINDINGS_PATH=/out/findings.json` — it's part of the image contract (the
 mounted `/out` dir), not per-job config, so the baked-in `report_findings` extension
 sees it without the caller passing anything. The only genuine runtime inputs are the
-model/provider (container args) and the provider credential (`-e OPENROUTER_API_KEY`),
+model/provider (container args), the gateway virtual-key credential
+(`-e OPENROUTER_API_KEY`), and the gateway's proxy-plane URL (`-e OPENAI_BASE_URL`),
 covered under Running below.
 
 ## Running
@@ -75,24 +76,36 @@ args the caller passes (`"$@"`). So the runtime inputs are:
   These land after the baked flags via `"$@"` in the entrypoint.
 - **`OPENROUTER_API_KEY` — via `-e OPENROUTER_API_KEY=...`.** The one input that
   legitimately comes from the environment because it's a secret; pi-ai reads it
-  directly. The entrypoint fails fast if it's unset.
-- **`OPENAI_BASE_URL` — optional, via env.** Unset in M3; M4 will point it at the
-  host-side LiteLLM gateway. Passed through untouched.
+  directly. As of M4-C this is always a short-lived, budget-capped **gateway virtual
+  key** (packages/gateway), never a real OpenRouter key — the orchestrator no longer
+  holds one at all. The entrypoint fails fast if it's unset.
+- **`OPENAI_BASE_URL` — via `-e OPENAI_BASE_URL=...`, required as of M4-C.** The
+  gateway's container-facing proxy/data plane (default
+  `http://172.31.99.1:4000/v1`, `magpie-net`'s fixed gateway IP — see PLAN.md §5 and
+  `scripts/setup-network.sh`). **Pi itself does not read this env var** — verified
+  empirically against a stub HTTP server that a bare `OPENAI_BASE_URL` is silently
+  ignored by Pi 0.80.3. The entrypoint instead writes it into
+  `~/.pi/agent/models.json` as an `openrouter` provider `baseUrl` override before
+  exec'ing `pi` (see `entrypoint.sh`'s doc comment for the full explanation) — that
+  file-based override is the mechanism that actually redirects Pi's OpenRouter
+  traffic.
 
 The prompt payload (PR title/body/diff) is read from Pi's **stdin**, so the container
 must be run attached (`docker run -i ...`). See `entrypoint.sh`'s own doc comment for
 the full flag list.
 
-### Interim security note (M3 — read before wiring this into production)
+### Gateway wiring (M4-C)
 
-**In M3, the real `OPENROUTER_API_KEY` is still injected directly into the
-container, and network egress is NOT locked down.** The container can reach
-OpenRouter (and anything else) on the default bridge network, exactly as the M1/M2
-host subprocess could. The host-side LiteLLM gateway, per-job short-lived virtual
-keys, and the `magpie-net` egress lockdown that remove the last secret from the
-container are **Milestone 4** (see `PLAN.md` §5 and `epic_a580`) — not built yet.
-Containerizing Pi (this milestone) buys process/filesystem isolation and a read-only,
-`.git`-free worktree; it does not yet buy egress control or credential minimization.
+As of M4-C, the review container **never holds a real OpenRouter key**. It
+authenticates to the host-side gateway (`packages/gateway`) with a per-job,
+budget-capped, short-lived virtual key minted by the orchestrator
+(`packages/orchestrator/src/gateway.ts`) and revoked on cleanup, and reaches the
+gateway's proxy plane over `magpie-net` (an `--internal` docker network whose only
+permitted destination is the gateway — M4-D's `scripts/setup-network.sh`). The real
+OpenRouter key lives only in the gateway process's own environment
+(`MAGPIE_GATEWAY_OPENROUTER_KEY`). Containerizing Pi (M3) bought process/filesystem
+isolation and a read-only, `.git`-free worktree; this milestone (M4) is what removes
+the long-lived provider credential and locks down egress on top of that.
 
 ## Smoke-testing a build
 
@@ -105,9 +118,16 @@ from the last verified build, including:
   override `--entrypoint` to invoke Pi directly for a version check).
 - A hand-run of the full entrypoint against a throwaway worktree + `/out` dir, invoked
   the production way (`... magpie-reviewer:0.1.0 --provider openrouter --model <id>`,
-  `-e OPENROUTER_API_KEY=...`, prompt on stdin), producing a valid `/out/findings.json`
-  matching the M2 findings schema (`packages/orchestrator/src/findings.ts`).
+  `-e OPENROUTER_API_KEY=... -e OPENAI_BASE_URL=...`, prompt on stdin), producing a
+  valid `/out/findings.json` matching the M2 findings schema
+  (`packages/orchestrator/src/findings.ts`).
 - A `--read-only --tmpfs /tmp --user <uid>:<gid>` run, proving the image doesn't
-  depend on writing anywhere but `/tmp` and the mounted `/out`.
+  depend on writing anywhere but `/tmp` (including `~/.pi/agent/models.json`, M4-C)
+  and the mounted `/out`.
 - `docker history --no-trunc magpie-reviewer:0.1.0` showing no secrets baked into any
   layer.
+
+See task_eaf9's Review section for M4-C's own verification evidence: the empirical
+provider-override finding, a full gateway-routed live review through the real
+`magpie-reviewer` image, and confirmation the container holds only the per-job
+virtual key.

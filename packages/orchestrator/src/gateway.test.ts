@@ -263,10 +263,9 @@ describe("mintGatewayKeyFromConfig", () => {
         dockerBin: "docker",
         network: "bridge",
       },
-      gateway: { baseUrl, perJobBudgetUsd: 0.75, ttlMarginSeconds: 90 },
+      gateway: { baseUrl, containerBaseUrl: "http://172.31.99.1:4000/v1", perJobBudgetUsd: 0.75, ttlMarginSeconds: 90 },
       secrets: {
         webhookSecret: "test-webhook-secret",
-        llmApiKey: "test-llm-api-key",
         githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
         gatewayMasterKey: MASTER_KEY,
       },

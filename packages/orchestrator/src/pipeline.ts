@@ -25,10 +25,11 @@
 //      outlive (and be cleaned up around) everything the workspace cleanup
 //      already wraps. Revocation is best-effort and never throws (see
 //      gateway.ts) — a revoke failure is logged but never changes the job's
-//      outcome. NOTE: the minted key itself is not yet consumed by
-//      `runReview` below — wiring it into the container's
-//      `OPENROUTER_API_KEY` in place of `config.secrets.llmApiKey` is M4-C's
-//      job; this step only establishes the mint/revoke lifecycle.
+//      outcome. The minted key's `.key` is threaded straight into
+//      `runReview` below as `gatewayApiKey` (M4-C), which sets it as the
+//      review container's `OPENROUTER_API_KEY` — the orchestrator never
+//      holds (and, since M4-C, no longer even loads — see config.ts) a real
+//      provider key to substitute instead.
 //   3. Create the credential-free host workspace (workspace.ts) for the PR
 //      head checkout. From here on the rest of the job body runs inside a
 //      (nested) `try/finally` so the workspace is always cleaned up, on every
@@ -308,6 +309,10 @@ export function createReviewPipeline(
             prTitle: pr.title,
             prBody: pr.body ?? "",
             config,
+            // The per-job virtual key minted in step 2a above (see this
+            // module's doc comment) — reviewer.ts sets this as the review
+            // container's OPENROUTER_API_KEY (M4-C).
+            gatewayApiKey: gatewayKey.key,
             piBinary: deps.piBinary,
             // The queue's own per-job id (see queue.ts's `JobDescriptor.id`,
             // already used for every log line via `jobLogFields` above) doubles

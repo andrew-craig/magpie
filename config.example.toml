@@ -12,15 +12,6 @@
 #                             verify the X-Hub-Signature-256 header on
 #                             incoming webhook deliveries.
 #
-#   MAGPIE_LLM_API_KEY        (required for now) API key for the LLM provider
-#                             configured in [llm] below. This is the *real*
-#                             provider key; once the M4 gateway is wired into
-#                             the orchestrator (M4-B/D), it will mint
-#                             short-lived per-job virtual keys against
-#                             packages/gateway instead and this will stop
-#                             being a long-lived secret. Until then, treat it
-#                             as sensitive.
-#
 #   MAGPIE_GITHUB_PRIVATE_KEY (optional) PEM contents of the GitHub App
 #                             private key. If set, this takes priority over
 #                             `github.private_key_path` below and the file on
@@ -39,6 +30,14 @@
 #                             OpenRouter key (that is the gateway's
 #                             MAGPIE_GATEWAY_OPENROUTER_KEY, which this
 #                             orchestrator never has or needs).
+# ---------------------------------------------------------------------------
+#
+# NOTE (M4-C): there is deliberately no MAGPIE_LLM_API_KEY here. The real
+# OpenRouter key now lives ONLY in the gateway process's own environment
+# (MAGPIE_GATEWAY_OPENROUTER_KEY, see packages/gateway/README.md) — this
+# orchestrator mints a short-lived, budget-capped per-job virtual key against
+# the gateway's management plane instead of ever holding a long-lived
+# provider credential itself. See [gateway] below.
 # ---------------------------------------------------------------------------
 #
 # The Milestone 4 credential-injecting LLM gateway (PLAN.md §5) is a SEPARATE
@@ -167,9 +166,21 @@ network = "magpie-net"
 # orchestrator to mint/revoke virtual keys (POST/DELETE /admin/keys). The
 # gateway binds this plane to loopback only (see packages/gateway/README.md),
 # so this is a 127.0.0.1 URL. This is NOT the proxy/data-plane URL the review
-# container talks to (that container-side base-URL wiring is a later M4 step).
+# container talks to — see container_base_url below for that.
 # Default: "http://127.0.0.1:4100" (matches the gateway's default mgmt port).
 base_url = "http://127.0.0.1:4100"
+
+# Base URL of the gateway's container-facing PROXY (data) plane (M4-C) — where
+# the review CONTAINER itself sends chat-completions requests, via
+# `-e OPENAI_BASE_URL=...` on `docker run` (see reviewer.ts). Deliberately a
+# SEPARATE address from base_url above: that one is loopback-only and
+# unreachable from magpie-net; this one is the only address a review container
+# on magpie-net (M4-D's `--internal` docker network) can reach at all.
+# Default: "http://172.31.99.1:4000/v1" — magpie-net's fixed gateway IP
+# (172.31.99.1, provisioned by scripts/setup-network.sh) on the gateway's
+# default proxy port (4000), with the /v1 suffix Pi's OpenAI-compatible
+# provider config expects.
+container_base_url = "http://172.31.99.1:4000/v1"
 
 # Per-job spend cap, in USD, for each minted virtual key. This is the HARD
 # cost cap Pi itself lacks (no --max-turns/budget flag): once a job's key has
