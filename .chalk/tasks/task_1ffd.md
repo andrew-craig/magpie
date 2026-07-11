@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: []
-blocked_by: [task_eaf9,task_bbdd]
+blocked_by: [task_eaf9]
 parent: epic_6730
 remote_task_url: null
 created_at: 2026-07-10T21:51:30Z
-updated_at: 2026-07-10T21:51:30Z
+updated_at: 2026-07-11T13:03:07Z
 ---
 Wave 3 (final M4 task; needs the gateway wiring and the network lockdown in place). PLAN.md milestone 4's explicit acceptance check.
 
