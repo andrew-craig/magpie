@@ -60,7 +60,7 @@ PR content execute in a context holding secrets.
 │   1. mint installation token (1h TTL)                               │
 │   2. git clone/fetch refs/pull/N/head into /var/lib/magpie/work/…   │
 │      (token in URL only on host; checkout handed over cred-free)    │
-│   3. mint per-job virtual key on the LiteLLM gateway (budget-capped) │
+│   3. mint per-job virtual key on the gateway (budget-capped)        │
 │   4. docker run (hardened, isolated bridge net) ──▶ Pi review        │
 │   5. parse findings JSON from container output                      │
 │   6. POST /repos/…/pulls/N/reviews (inline comments + summary)      │
@@ -70,7 +70,7 @@ PR content execute in a context holding secrets.
           ▼
 ┌─ Container: magpie-reviewer ──────────┐                                    openrouter.ai
 │  ephemeral · non-root · ro rootfs     │                                        ▲ HTTPS
-│  cap-drop=ALL · mem/cpu/pids limits   │   ┌─ LiteLLM gateway (host, own user) ─┴─┐
+│  cap-drop=ALL · mem/cpu/pids limits   │   ┌─ gateway (host, own user, TS) ──────┴─┐
 │  egress default-deny → gateway is     │   │  holds real OpenRouter key           │
 │  the ONLY reachable host              │   │  per-job virtual keys + spend budgets │
 │  contents: repo checkout (ro, no .git)│   │  egress allowlist: openrouter.ai only │
@@ -141,7 +141,7 @@ docker run --rm \
 ```
 
 - **No long-lived provider key in the container.** Pi's provider base URL points at the
-  host-side LiteLLM gateway (§5), and the only credential injected is a short-lived per-job
+  host-side gateway (§5), and the only credential injected is a short-lived per-job
   virtual key the orchestrator mints before the run and revokes on cleanup. Even a fully
   prompt-injected agent has no key worth exfiltrating. (Exact env var names depend on how Pi
   overrides base URL/key — confirm against `pi-ai` provider config; the transparent-proxy
@@ -158,10 +158,27 @@ docker run --rm \
 
 ### 5. Egress control: credential-injecting LLM gateway (host-side)
 
-The container's only permitted egress destination is a **host-side LiteLLM gateway**, which
-holds the real provider key and brokers all LLM traffic. This does three jobs at once —
-credential custody, hostname-based egress filtering, and hard cost enforcement — and removes
-the last secret from the container.
+The container's only permitted egress destination is a **host-side gateway**, which holds the
+real provider key and brokers all LLM traffic. This does three jobs at once — credential
+custody, hostname-based egress filtering, and hard cost enforcement — and removes the last
+secret from the container.
+
+> **Implementation deviation from the original plan (M4-A, task_eb22).** This section
+> originally specified **LiteLLM** as the gateway implementation. The CTO decided **not** to
+> adopt LiteLLM and **not** to run Postgres or any database for it: LiteLLM's virtual-key/budget
+> features assume a DB-backed deployment for anything beyond the simplest setups, which is much
+> more operational surface (a whole extra service + schema + backup story) than a
+> single-provider, single-host personal project needs. Instead, magpie implements a **small,
+> purpose-built TypeScript proxy** — `packages/gateway` (`@magpie/gateway`) — that speaks only
+> to OpenRouter (no generic multi-provider abstraction) and keeps virtual keys in an **in-memory
+> `Map`**, matching the orchestrator's existing `node:http` + `zod` conventions rather than
+> pulling in a new framework/language/runtime dependency. Losing all keys on a gateway restart
+> is an accepted property, not a gap: keys are minted per-job, immediately before a review run,
+> and revoked on cleanup, so nothing survives a restart that a re-triggered review wouldn't
+> re-mint anyway. Everything else in this section — hostname-based filtering (not IP
+> allowlisting), per-job budget-capped virtual keys, the gateway as the container's only
+> reachable destination — is unchanged; only the *implementation* of the gateway changed, not
+> its role or guarantees.
 
 **Why not an IP allowlist.** The obvious approach (host `iptables`/`ipset` allowing IPs
 resolved from `openrouter.ai`) is inadequate: OpenRouter sits behind Cloudflare, whose edge
@@ -170,16 +187,29 @@ slice of the internet, including plausible exfil endpoints — so it does *not* 
 only reach the LLM API" property the threat model claims. Filtering must be by **hostname/SNI**,
 which a gateway (or an SNI-filtering proxy) does natively.
 
-**Gateway (LiteLLM proxy).**
-- Runs on the host as its **own unprivileged user**, outside the container's blast radius,
-  reachable from `magpie-net` only as the configured egress target (nothing else on the host).
-- Holds the single real `OPENROUTER_API_KEY`. Exposes an **OpenAI-compatible** endpoint; Pi is
-  pointed at it via provider base-URL override, so the container never sees the real key.
-- **Per-job virtual keys:** the orchestrator mints a fresh LiteLLM virtual key before each run
-  (scoped model + spend/request budget) and revokes it on cleanup. A leaked virtual key is
-  short-lived and budget-capped — worthless to steal, which is the point. This is also the
-  **hard cost cap** Pi itself lacks (no `--max-turns`/budget flag): the gateway cuts the job
-  off at its budget regardless of what the agent does.
+**Gateway (custom TypeScript proxy, `packages/gateway`).**
+- Runs on the host as its **own unprivileged user** (`magpie-gateway`), outside the container's
+  blast radius, reachable from `magpie-net` only as the configured egress target (nothing else
+  on the host).
+- Holds the single real OpenRouter key (`MAGPIE_GATEWAY_OPENROUTER_KEY`, gateway-process-only
+  env). Exposes an **OpenAI-compatible** endpoint (`POST /v1/chat/completions`, streaming and
+  non-streaming); Pi is pointed at it via provider base-URL override, so the container never
+  sees the real key.
+- **Two planes, two listeners:** a **proxy (data) plane** — the OpenAI-compatible surface plus
+  `GET /healthz` — bound to the configurable address the container reaches (never `0.0.0.0`;
+  the `magpie-net` gateway IP in production), and a **management (control) plane** —
+  `POST /admin/keys` / `DELETE /admin/keys/:id`, master-key-authenticated — bound to
+  `127.0.0.1` only, so it is structurally unreachable from `magpie-net` regardless of container
+  compromise.
+- **Per-job virtual keys:** the orchestrator mints a fresh virtual key (`sk-magpie-...`) before
+  each run (optional model scope + USD spend budget + TTL) and revokes it on cleanup. A leaked
+  virtual key is short-lived and budget-capped — worthless to steal, which is the point. This is
+  also the **hard cost cap** Pi itself lacks (no `--max-turns`/budget flag): the NEXT request on
+  a key that has crossed its budget is refused with `402`, regardless of what the agent does.
+  Cost is read from OpenRouter's own per-request `usage.cost` (requesting `usage: {include:
+  true}` on every forwarded call, including streaming); if that's ever unparseable the gateway
+  falls back to a token-based estimate, then a flat per-request charge, so a parsing failure can
+  never silently zero out the cap.
 - **Upstream egress:** only the gateway process may reach the network, and only to the provider
   host. Enforce with host `iptables` on `magpie-net` (default-deny; the bridge may reach only
   the gateway's listen address) plus, if you want defense-in-depth on the gateway's own
@@ -216,7 +246,7 @@ established **tool-call-as-structured-output** pattern, which Pi supports first-
   (focus on correctness/security/clarity; no style nitpicking that a linter would catch;
   cite file:line for every finding).
 - Cost control: Pi lacks a hard `--max-turns`/cost cap flag today, so enforcement lives
-  outside Pi. The **per-job virtual-key budget on the LiteLLM gateway (§5) is the hard cap** —
+  outside Pi. The **per-job virtual-key budget on the gateway (§5) is the hard cap** —
   the run is cut off at its spend/request limit no matter what the agent does. The
   orchestration layer adds a wall-clock timeout and a diff-size cap (skip or summarize-only
   above ~4k changed lines); NDJSON usage events give post-hoc cost logging.
@@ -250,17 +280,16 @@ magpie/
 │   │       ├── workspace.ts     # clone/fetch/cleanup under /var/lib/magpie/work
 │   │       ├── runner.ts        # docker run + NDJSON parsing
 │   │       └── diff.ts          # hunk parsing, comment anchoring
-│   └── review-extension/        # Pi extension: report_findings tool + reviewer prompt
+│   ├── review-extension/        # Pi extension: report_findings tool + reviewer prompt
+│   └── gateway/                 # custom TS OpenRouter-only proxy: virtual keys, budgets (M4-A, §5)
 ├── docker/
 │   └── reviewer/Dockerfile      # node + git + pi + extension, pinned versions
-├── gateway/
-│   └── litellm.config.yaml      # LiteLLM: real provider key, model routing, virtual-key budgets
 ├── scripts/
 │   ├── setup-network.sh         # magpie-net bridge + iptables: container → gateway only
 │   └── install.sh               # systemd units, dirs, cloudflared notes
 ├── systemd/
 │   ├── magpie.service           # orchestrator
-│   ├── magpie-gateway.service   # LiteLLM gateway (own user, started before orchestrator)
+│   ├── magpie-gateway.service   # @magpie/gateway (own user, started before orchestrator)
 │   └── magpie-firewall.service  # oneshot network setup at boot
 └── config.example.toml          # app id, key path, gateway URL, provider/model, limits, repo allowlist
 ```
@@ -274,11 +303,13 @@ magpie/
    diff-hunk anchoring, single review with inline comments, out-of-diff fallback to summary.
 3. **Containerize:** reviewer image, hardened `docker run`, read-only workspace handoff,
    credential stripping, findings via mounted output dir.
-4. **Network lockdown + credential-injecting gateway:** stand up the LiteLLM gateway (own user,
-   real key), point Pi at it via base-URL override, mint/revoke a per-job virtual key with a
-   spend budget; `magpie-net` + host iptables so the container can reach *only* the gateway.
-   Startup assertion in the entry script: fail closed if any host other than the gateway is
-   reachable, and confirm no long-lived provider key is present in the container env.
+4. **Network lockdown + credential-injecting gateway:** stand up the gateway (own user, real
+   key; a small custom TypeScript OpenRouter-only proxy — `packages/gateway` — rather than
+   LiteLLM/Postgres, see §5's deviation note), point Pi at it via base-URL override, mint/revoke
+   a per-job virtual key with a spend budget; `magpie-net` + host iptables so the container can
+   reach *only* the gateway. Startup assertion in the entry script: fail closed if any host
+   other than the gateway is reachable, and confirm no long-lived provider key is present in the
+   container env.
 5. **Production hardening:** Cloudflare Tunnel, systemd units, timeouts/concurrency/diff-size
    caps, incremental re-review + comment minimization, cost logging, `synchronize` dedup.
 6. **Nice-to-haves (later):** `@magpie review` comment command for on-demand re-review,
@@ -291,7 +322,8 @@ magpie/
   `reopened`/`synchronize`, gated by a repo allowlist in config (don't auto-run on every repo
   the app could be installed on).
 - **Review posture:** `COMMENT` only — magpie never approves or requests changes.
-- **LLM provider:** OpenRouter with model configurable, reached through a host-side LiteLLM
-  gateway that holds the key and enforces per-job budgets (container gets only a virtual key).
+- **LLM provider:** OpenRouter with model configurable, reached through a host-side gateway
+  (custom TS proxy, `packages/gateway`) that holds the key and enforces per-job budgets
+  (container gets only a virtual key).
 - **Limits:** concurrency 2, 10-minute job timeout, ~4k-changed-lines diff cap, 4 GB / 2 CPU
   per container.

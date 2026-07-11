@@ -14,11 +14,12 @@
 #
 #   MAGPIE_LLM_API_KEY        (required for now) API key for the LLM provider
 #                             configured in [llm] below. This is the *real*
-#                             provider key; once the M4 LiteLLM gateway lands,
-#                             the orchestrator will mint short-lived per-job
-#                             virtual keys instead and this will stop being a
-#                             long-lived secret. Until then, treat it as
-#                             sensitive.
+#                             provider key; once the M4 gateway is wired into
+#                             the orchestrator (M4-B/D), it will mint
+#                             short-lived per-job virtual keys against
+#                             packages/gateway instead and this will stop
+#                             being a long-lived secret. Until then, treat it
+#                             as sensitive.
 #
 #   MAGPIE_GITHUB_PRIVATE_KEY (optional) PEM contents of the GitHub App
 #                             private key. If set, this takes priority over
@@ -26,6 +27,14 @@
 #                             disk is never read. Useful for containerized or
 #                             CI deployments where mounting a PEM file is
 #                             awkward.
+# ---------------------------------------------------------------------------
+#
+# The Milestone 4 credential-injecting LLM gateway (PLAN.md §5) is a SEPARATE
+# service — packages/gateway (@magpie/gateway) — with its OWN env vars, read
+# by its OWN process (never this orchestrator config or process):
+# MAGPIE_GATEWAY_OPENROUTER_KEY, MAGPIE_GATEWAY_MASTER_KEY, and non-secret
+# GATEWAY_* settings. See packages/gateway/README.md for the full list and
+# the security rationale for keeping them out of this file.
 # ---------------------------------------------------------------------------
 
 # List of "owner/repo" pairs that magpie is allowed to automatically review.

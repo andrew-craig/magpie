@@ -52,8 +52,8 @@ pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the PR 
 credential-free (`workspace.ts`), fetch the diff (`diff.ts`), run the Pi reviewer on the
 host (`reviewer.ts`), and publish exactly one summary comment back to the PR
 (`publisher.ts`). The process shuts down gracefully on `SIGINT`/`SIGTERM`. The container
-sandbox, `report_findings` inline comments, and the LiteLLM gateway described in PLAN.md
-are still later milestones (see the chalk tasks under `epic_04f9`).
+sandbox, `report_findings` inline comments, and the credential-injecting LLM gateway
+described in PLAN.md §5 (now `packages/gateway` — see its README) are later milestones.
 
 ### Reproducing an end-to-end review
 

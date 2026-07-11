@@ -11,7 +11,10 @@
     "start": "npm run start --workspace=@magpie/orchestrator",
     "test": "npm run test --workspaces --if-present",
     "dev:smee": "node --env-file-if-exists=.env scripts/dev-smee.mjs",
-    "build:reviewer-image": "bash scripts/build-reviewer-image.sh"
+    "build:reviewer-image": "bash scripts/build-reviewer-image.sh",
+    "gateway:dev": "npm run dev --workspace=@magpie/gateway",
+    "gateway:build": "npm run build --workspace=@magpie/gateway",
+    "gateway:start": "npm run start --workspace=@magpie/gateway"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
