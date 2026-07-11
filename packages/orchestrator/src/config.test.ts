@@ -7,6 +7,7 @@ import { ConfigError, loadConfig, resolveDefaultConfigPath } from "./config.js";
 const REQUIRED_ENV = {
   MAGPIE_WEBHOOK_SECRET: "test-webhook-secret",
   MAGPIE_LLM_API_KEY: "test-llm-api-key",
+  MAGPIE_GATEWAY_MASTER_KEY: "test-gateway-master-key",
 } as const;
 
 let workDir: string;
@@ -80,9 +81,13 @@ describe("loadConfig", () => {
     expect(config.container.pidsLimit).toBe(256);
     expect(config.container.dockerBin).toBe("docker");
     expect(config.container.network).toBe("bridge");
+    expect(config.gateway.baseUrl).toBe("http://127.0.0.1:4100");
+    expect(config.gateway.perJobBudgetUsd).toBe(0.5);
+    expect(config.gateway.ttlMarginSeconds).toBe(120);
     expect(config.secrets.webhookSecret).toBe("test-webhook-secret");
     expect(config.secrets.llmApiKey).toBe("test-llm-api-key");
     expect(config.secrets.githubPrivateKey).toContain("BEGIN PRIVATE KEY");
+    expect(config.secrets.gatewayMasterKey).toBe("test-gateway-master-key");
   });
 
   it("allows overriding defaults via TOML", () => {
@@ -117,6 +122,11 @@ cpus = "4"
 pids_limit = 512
 docker_bin = "/usr/local/bin/podman"
 network = "magpie-net"
+
+[gateway]
+base_url = "http://10.0.0.1:9100"
+per_job_budget_usd = 1.25
+ttl_margin_seconds = 300
 `);
     Object.assign(process.env, REQUIRED_ENV);
 
@@ -137,6 +147,9 @@ network = "magpie-net"
     expect(config.container.pidsLimit).toBe(512);
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
     expect(config.container.network).toBe("magpie-net");
+    expect(config.gateway.baseUrl).toBe("http://10.0.0.1:9100");
+    expect(config.gateway.perJobBudgetUsd).toBe(1.25);
+    expect(config.gateway.ttlMarginSeconds).toBe(300);
   });
 
   it("reports a malformed [container] field by name", () => {
@@ -206,6 +219,22 @@ model = "anthropic/claude-sonnet-4.5"
     } catch (err) {
       expect(err).toBeInstanceOf(ConfigError);
       expect((err as ConfigError).message).toMatch(/MAGPIE_LLM_API_KEY/);
+    }
+  });
+
+  it("reports a missing MAGPIE_GATEWAY_MASTER_KEY by name", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(MINIMAL_TOML(pemPath));
+    process.env.MAGPIE_WEBHOOK_SECRET = "test-webhook-secret";
+    process.env.MAGPIE_LLM_API_KEY = "test-llm-api-key";
+    // MAGPIE_GATEWAY_MASTER_KEY intentionally left unset.
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/MAGPIE_GATEWAY_MASTER_KEY/);
     }
   });
 

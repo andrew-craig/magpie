@@ -16,11 +16,24 @@
 //      (see github.ts): that helper re-derives its own token internally via
 //      `authStrategy`, which would mean two tokens minted per job instead of
 //      one.
+//   2a. Mint ONE fresh gateway virtual key (gateway.ts's
+//      `mintGatewayKeyFromConfig`, M4-B) scoped to `config.llm.model`, with a
+//      budget/TTL from `config.gateway`. From here on the rest of the job
+//      body runs inside a `try/finally` that revokes this key on every exit
+//      path (success, a thrown error, or a "review failed" result) — mirrors
+//      step 3's workspace `try/finally` one level out, since the key must
+//      outlive (and be cleaned up around) everything the workspace cleanup
+//      already wraps. Revocation is best-effort and never throws (see
+//      gateway.ts) — a revoke failure is logged but never changes the job's
+//      outcome. NOTE: the minted key itself is not yet consumed by
+//      `runReview` below — wiring it into the container's
+//      `OPENROUTER_API_KEY` in place of `config.secrets.llmApiKey` is M4-C's
+//      job; this step only establishes the mint/revoke lifecycle.
 //   3. Create the credential-free host workspace (workspace.ts) for the PR
 //      head checkout. From here on the rest of the job body runs inside a
-//      `try/finally` so the workspace is always cleaned up, on every exit
-//      path (success, a thrown error, or a "review failed" result — the last
-//      of those is not an error at all, see step 6).
+//      (nested) `try/finally` so the workspace is always cleaned up, on every
+//      exit path (success, a thrown error, or a "review failed" result — the
+//      last of those is not an error at all, see step 6).
 //   4. Compute the PR diff via the GitHub API (diff.ts), capped by
 //      `config.limits.maxDiffLines`.
 //   5. Fetch PR title/body/head sha (needed by the reviewer prompt; the
@@ -66,7 +79,9 @@
 // reviewer subprocess (reviewer.ts strips all `MAGPIE_*` env vars from that
 // child's environment before spawning it). Every log line emitted by this
 // module is a plain object of ids/counts/urls — never the token, never
-// `config.secrets`, never the raw Octokit client.
+// `config.secrets`, never the raw Octokit client, never a gateway master key
+// or minted virtual key (gateway.ts's own mint/revoke functions carry the
+// same never-log discipline for those — see gateway.ts's module doc comment).
 
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -74,6 +89,8 @@ import { Octokit } from "@octokit/rest";
 import { anchorFindings } from "./anchor.js";
 import type { Config } from "./config.js";
 import { computePrDiff } from "./diff.js";
+import type { GatewayKey } from "./gateway.js";
+import { mintGatewayKeyFromConfig, revokeGatewayKeyFromConfig } from "./gateway.js";
 import { mintInstallationTokenFromConfig } from "./github.js";
 import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
@@ -133,6 +150,21 @@ export interface PipelineDeps {
   piBinary?: string;
   /** Defaults to {@link createWorkspace}. Overridable so tests can skip real git. */
   createWorkspace?: typeof createWorkspace;
+  /**
+   * Mint the per-job gateway virtual key (M4-B). Defaults to
+   * {@link mintGatewayKeyFromConfig}. Overridable so pipeline.test.ts can run
+   * the whole flow against a fake gateway (or none at all) — production
+   * callers (index.ts) leave it undefined so the real gateway mgmt API is
+   * called.
+   */
+  mintGatewayKey?: (config: Config) => Promise<GatewayKey>;
+  /**
+   * Revoke a per-job gateway virtual key by id (M4-B). Defaults to
+   * {@link revokeGatewayKeyFromConfig}. Best-effort by contract — never
+   * throws (see gateway.ts) — so the pipeline's cleanup can call it
+   * unconditionally without a revoke failure ever masking the job result.
+   */
+  revokeGatewayKey?: (config: Config, id: string) => Promise<void>;
   logger?: PipelineLogger;
 }
 
@@ -151,10 +183,13 @@ export function createReviewPipeline(
   config: Config,
   deps: PipelineDeps = {},
 ): ReviewPipeline {
+  const logger = deps.logger ?? consoleLogger;
   const mintToken = deps.mintToken ?? mintInstallationTokenFromConfig;
   const makeOctokit = deps.makeOctokit ?? ((token: string) => new Octokit({ auth: token }));
   const makeWorkspace = deps.createWorkspace ?? createWorkspace;
-  const logger = deps.logger ?? consoleLogger;
+  const mintGatewayKey = deps.mintGatewayKey ?? mintGatewayKeyFromConfig;
+  const revokeGatewayKey =
+    deps.revokeGatewayKey ?? ((cfg: Config, id: string) => revokeGatewayKeyFromConfig(cfg, id, logger));
 
   const runJob: JobRunner = async (job, signal) => {
     if (job.installationId === undefined) {
@@ -175,161 +210,183 @@ export function createReviewPipeline(
 
     if (signal.aborted) return;
 
-    const workspace = await makeWorkspace({
-      owner: job.owner,
-      repo: job.repo,
-      prNumber: job.prNumber,
-      headSha: job.headSha,
-      token,
-      workDir: config.workspace.workDir,
-    });
+    // Step 2a: mint the per-job gateway virtual key (see module doc comment).
+    // A mint failure throws (gateway.ts) and propagates like any other
+    // pre-workspace failure — no key was allocated, so there is nothing to
+    // revoke. On success, the outer `try/finally` below revokes it on EVERY
+    // subsequent exit path (success, thrown error, review-failed result,
+    // abort), one level out from the workspace cleanup.
+    logger.info({ event: "minting-gateway-key", ...jobLogFields(job) });
+    const gatewayKey = await mintGatewayKey(config);
 
     try {
       if (signal.aborted) return;
 
-      logger.info({ event: "computing-diff", ...jobLogFields(job) });
-      const prDiff = await computePrDiff({
-        octokit,
+      const workspace = await makeWorkspace({
         owner: job.owner,
         repo: job.repo,
         prNumber: job.prNumber,
-        maxDiffLines: config.limits.maxDiffLines,
+        headSha: job.headSha,
+        token,
+        workDir: config.workspace.workDir,
       });
 
-      if (signal.aborted) return;
+      try {
+        if (signal.aborted) return;
 
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner: job.owner,
-        repo: job.repo,
-        pull_number: job.prNumber,
-      });
-
-      // HEAD VERIFY: see the module doc comment (step 5a) for why this check
-      // is placed here — after the diff fetch, before either the tooLarge or
-      // runReview branch — and why a mismatch returns without publishing
-      // rather than throwing.
-      const actualHeadSha: string | undefined = pr.head?.sha;
-      if (actualHeadSha !== job.headSha) {
-        // Logged at INFO, not ERROR: a mid-job force-push is a benign, expected
-        // race that the system self-heals (a fresh webhook for the new head
-        // re-triggers the review), exactly like the `diff-too-large` skip above
-        // — surfacing it at error level would trip error-based alerting for a
-        // non-error. Both SHAs are included so the skip is still traceable.
-        logger.info({
-          event: "head-sha-mismatch",
-          ...jobLogFields(job),
-          expected: job.headSha,
-          actual: actualHeadSha,
-        });
-        return;
-      }
-
-      // An abort can land during the metadata fetch above; short-circuit here
-      // so we don't spawn `pi` (or synthesize a summary) for a job the queue
-      // has already terminated.
-      if (signal.aborted) return;
-
-      let result: ReviewResult;
-      if (prDiff.tooLarge) {
-        logger.info({
-          event: "diff-too-large",
-          ...jobLogFields(job),
-          changedLineCount: prDiff.changedLineCount,
+        logger.info({ event: "computing-diff", ...jobLogFields(job) });
+        const prDiff = await computePrDiff({
+          octokit,
+          owner: job.owner,
+          repo: job.repo,
+          prNumber: job.prNumber,
           maxDiffLines: config.limits.maxDiffLines,
         });
-        result = {
-          ok: true,
-          summary:
-            `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
-            `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
-          // No findings possible for a skipped review (task_0d97/wave 3 owns
-          // the real anchor+inline wiring); this is a minimal type-fix so this
-          // synthetic result still satisfies reviewer.ts's now-required
-          // ReviewResult.findings/verdict fields.
-          findings: [],
-          verdict: "comment",
-        };
-      } else {
-        logger.info({ event: "running-review", ...jobLogFields(job) });
-        result = await runReview({
-          workspaceDir: workspace.dir,
-          // Not tooLarge, so diff.ts guarantees a non-null diff (see
-          // diff.ts's PrDiffResult doc comment: "diff is null exactly when
-          // tooLarge").
-          diff: prDiff.diff as string,
-          changedFiles: prDiff.changedFiles,
-          prTitle: pr.title,
-          prBody: pr.body ?? "",
-          config,
-          piBinary: deps.piBinary,
-          // The queue's own per-job id (see queue.ts's `JobDescriptor.id`,
-          // already used for every log line via `jobLogFields` above) doubles
-          // as the review container's name (`magpie-<sanitized id>` — see
-          // reviewer.ts's `buildContainerName`), so the timeout/abort
-          // `docker kill` path targets the right container. No parallel id
-          // is minted here.
-          jobId: job.id,
-          signal,
-        });
-      }
 
-      // NO DOUBLE-HANDLING: if the queue's backstop timeout already fired
-      // (see queue.ts), it has already recorded this job as "timed-out" and
-      // may already be running/have run its own cleanup. Publishing a review
-      // comment here too would double-handle the same job. `runReview` above
-      // itself resolves promptly once `signal` aborts (never throws), so this
-      // check catches that case before we ever call `publishReview`.
-      if (signal.aborted) return;
+        if (signal.aborted) return;
 
-      logger.info({
-        event: "publishing-review",
-        ...jobLogFields(job),
-        resultOk: result.ok,
-      });
-
-      // See the module doc comment (step 7) for the three-way branch: a
-      // failed review and a tooLarge-skipped review both keep using
-      // publishReview's M1 single-summary-comment path unchanged (there are
-      // no real findings to anchor in either case); only a genuine
-      // `{ ok: true }` result from `runReview` has findings worth anchoring
-      // against the diff and publishing as inline PR review comments.
-      let published: { id: number; url: string };
-      if (!result.ok || prDiff.tooLarge) {
-        published = await publishReview({
-          octokit,
+        const { data: pr } = await octokit.rest.pulls.get({
           owner: job.owner,
           repo: job.repo,
-          prNumber: job.prNumber,
-          result,
+          pull_number: job.prNumber,
         });
-      } else {
-        const { inline, other } = anchorFindings(prDiff.diff as string, {
-          findings: result.findings,
-          summary: result.summary,
-          verdict: result.verdict,
-        });
-        published = await publishReviewWithFindings({
-          octokit,
-          owner: job.owner,
-          repo: job.repo,
-          prNumber: job.prNumber,
-          summary: result.summary,
-          inline,
-          other,
-          usage: result.usage,
-          verdict: result.verdict,
-        });
-      }
 
-      logger.info({
-        event: "published-review",
-        ...jobLogFields(job),
-        commentId: published.id,
-        commentUrl: published.url,
-      });
+        // HEAD VERIFY: see the module doc comment (step 5a) for why this check
+        // is placed here — after the diff fetch, before either the tooLarge or
+        // runReview branch — and why a mismatch returns without publishing
+        // rather than throwing.
+        const actualHeadSha: string | undefined = pr.head?.sha;
+        if (actualHeadSha !== job.headSha) {
+          // Logged at INFO, not ERROR: a mid-job force-push is a benign, expected
+          // race that the system self-heals (a fresh webhook for the new head
+          // re-triggers the review), exactly like the `diff-too-large` skip above
+          // — surfacing it at error level would trip error-based alerting for a
+          // non-error. Both SHAs are included so the skip is still traceable.
+          logger.info({
+            event: "head-sha-mismatch",
+            ...jobLogFields(job),
+            expected: job.headSha,
+            actual: actualHeadSha,
+          });
+          return;
+        }
+
+        // An abort can land during the metadata fetch above; short-circuit here
+        // so we don't spawn `pi` (or synthesize a summary) for a job the queue
+        // has already terminated.
+        if (signal.aborted) return;
+
+        let result: ReviewResult;
+        if (prDiff.tooLarge) {
+          logger.info({
+            event: "diff-too-large",
+            ...jobLogFields(job),
+            changedLineCount: prDiff.changedLineCount,
+            maxDiffLines: config.limits.maxDiffLines,
+          });
+          result = {
+            ok: true,
+            summary:
+              `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
+              `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
+            // No findings possible for a skipped review (task_0d97/wave 3 owns
+            // the real anchor+inline wiring); this is a minimal type-fix so this
+            // synthetic result still satisfies reviewer.ts's now-required
+            // ReviewResult.findings/verdict fields.
+            findings: [],
+            verdict: "comment",
+          };
+        } else {
+          logger.info({ event: "running-review", ...jobLogFields(job) });
+          result = await runReview({
+            workspaceDir: workspace.dir,
+            // Not tooLarge, so diff.ts guarantees a non-null diff (see
+            // diff.ts's PrDiffResult doc comment: "diff is null exactly when
+            // tooLarge").
+            diff: prDiff.diff as string,
+            changedFiles: prDiff.changedFiles,
+            prTitle: pr.title,
+            prBody: pr.body ?? "",
+            config,
+            piBinary: deps.piBinary,
+            // The queue's own per-job id (see queue.ts's `JobDescriptor.id`,
+            // already used for every log line via `jobLogFields` above) doubles
+            // as the review container's name (`magpie-<sanitized id>` — see
+            // reviewer.ts's `buildContainerName`), so the timeout/abort
+            // `docker kill` path targets the right container. No parallel id
+            // is minted here.
+            jobId: job.id,
+            signal,
+          });
+        }
+
+        // NO DOUBLE-HANDLING: if the queue's backstop timeout already fired
+        // (see queue.ts), it has already recorded this job as "timed-out" and
+        // may already be running/have run its own cleanup. Publishing a review
+        // comment here too would double-handle the same job. `runReview` above
+        // itself resolves promptly once `signal` aborts (never throws), so this
+        // check catches that case before we ever call `publishReview`.
+        if (signal.aborted) return;
+
+        logger.info({
+          event: "publishing-review",
+          ...jobLogFields(job),
+          resultOk: result.ok,
+        });
+
+        // See the module doc comment (step 7) for the three-way branch: a
+        // failed review and a tooLarge-skipped review both keep using
+        // publishReview's M1 single-summary-comment path unchanged (there are
+        // no real findings to anchor in either case); only a genuine
+        // `{ ok: true }` result from `runReview` has findings worth anchoring
+        // against the diff and publishing as inline PR review comments.
+        let published: { id: number; url: string };
+        if (!result.ok || prDiff.tooLarge) {
+          published = await publishReview({
+            octokit,
+            owner: job.owner,
+            repo: job.repo,
+            prNumber: job.prNumber,
+            result,
+          });
+        } else {
+          const { inline, other } = anchorFindings(prDiff.diff as string, {
+            findings: result.findings,
+            summary: result.summary,
+            verdict: result.verdict,
+          });
+          published = await publishReviewWithFindings({
+            octokit,
+            owner: job.owner,
+            repo: job.repo,
+            prNumber: job.prNumber,
+            summary: result.summary,
+            inline,
+            other,
+            usage: result.usage,
+            verdict: result.verdict,
+          });
+        }
+
+        logger.info({
+          event: "published-review",
+          ...jobLogFields(job),
+          commentId: published.id,
+          commentUrl: published.url,
+        });
+      } finally {
+        await workspace.cleanup();
+        logger.info({ event: "workspace-cleaned", ...jobLogFields(job) });
+      }
     } finally {
-      await workspace.cleanup();
-      logger.info({ event: "workspace-cleaned", ...jobLogFields(job) });
+      // Best-effort revoke on EVERY exit path (success, thrown error,
+      // review-failed result, abort). `revokeGatewayKey` never throws (see
+      // gateway.ts), so this can't mask the job's real outcome — a revoke
+      // failure is only logged. Runs OUTSIDE the workspace `finally` above so
+      // the key is still revoked even if `makeWorkspace` itself threw before
+      // that inner try was entered.
+      await revokeGatewayKey(config, gatewayKey.id);
+      logger.info({ event: "gateway-key-revoked", ...jobLogFields(job), keyId: gatewayKey.id });
     }
   };
 

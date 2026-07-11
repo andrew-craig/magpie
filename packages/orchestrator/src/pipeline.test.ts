@@ -22,6 +22,17 @@ import type { CreateWorkspaceParams, Workspace } from "./workspace.js";
 
 const FAKE_TOKEN = "ghs_super-secret-installation-token-fixture-should-never-leak";
 
+// Default fake gateway lifecycle deps (M4-B) for the tests that aren't
+// specifically about the key lifecycle: mint returns a fixed fake virtual key
+// and revoke is a no-op, so the pipeline never reaches for the real gateway
+// mgmt API over the network. The dedicated "gateway virtual-key lifecycle"
+// describe block below injects its own spies instead to assert the calls.
+const FAKE_GATEWAY_KEY = { id: "gw-key-fixture", key: "sk-magpie-fixture-should-never-leak" };
+async function fakeMintGatewayKey(): Promise<{ id: string; key: string }> {
+  return FAKE_GATEWAY_KEY;
+}
+async function fakeRevokeGatewayKey(): Promise<void> {}
+
 let root: string;
 
 beforeEach(() => {
@@ -126,10 +137,16 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       dockerBin: "docker",
       network: "bridge",
     },
+    gateway: {
+      baseUrl: "http://127.0.0.1:4100",
+      perJobBudgetUsd: 0.5,
+      ttlMarginSeconds: 120,
+    },
     secrets: {
       webhookSecret: "test-webhook-secret",
       llmApiKey: "test-llm-api-key",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+      gatewayMasterKey: "test-gateway-master-key",
     },
   };
 }
@@ -236,6 +253,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig(), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -294,6 +313,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig(), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -354,6 +375,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig(), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -402,6 +425,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig({ maxDiffLines: 100 }), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -432,6 +457,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig(), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -456,6 +483,8 @@ describe("createReviewPipeline / runJob", () => {
 
     const { runJob } = createReviewPipeline(testConfig(), {
       mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -497,6 +526,8 @@ describe("createReviewPipeline / runJob", () => {
     try {
       const { runJob } = createReviewPipeline(testConfig(), {
         mintToken,
+        mintGatewayKey: fakeMintGatewayKey,
+        revokeGatewayKey: fakeRevokeGatewayKey,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -537,6 +568,8 @@ describe("createReviewPipeline / runJob", () => {
     try {
       const { runJob } = createReviewPipeline(testConfig(), {
         mintToken,
+        mintGatewayKey: fakeMintGatewayKey,
+        revokeGatewayKey: fakeRevokeGatewayKey,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
         piBinary,
@@ -569,6 +602,8 @@ describe("createReviewPipeline / runJob", () => {
 
       const { runJob } = createReviewPipeline(testConfig(), {
         mintToken,
+        mintGatewayKey: fakeMintGatewayKey,
+        revokeGatewayKey: fakeRevokeGatewayKey,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -601,6 +636,8 @@ describe("createReviewPipeline / runJob", () => {
 
       const { runJob } = createReviewPipeline(testConfig(), {
         mintToken,
+        mintGatewayKey: fakeMintGatewayKey,
+        revokeGatewayKey: fakeRevokeGatewayKey,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -641,6 +678,8 @@ describe("createReviewPipeline / runJob", () => {
 
       const { runJob } = createReviewPipeline(testConfig(), {
         mintToken,
+        mintGatewayKey: fakeMintGatewayKey,
+        revokeGatewayKey: fakeRevokeGatewayKey,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
         piBinary,
@@ -708,6 +747,8 @@ describe("createReviewPipeline / runJob", () => {
       try {
         const { runJob } = createReviewPipeline(testConfig(), {
           mintToken,
+          mintGatewayKey: fakeMintGatewayKey,
+          revokeGatewayKey: fakeRevokeGatewayKey,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -756,6 +797,8 @@ describe("createReviewPipeline / runJob", () => {
       try {
         const { runJob } = createReviewPipeline(testConfig(), {
           mintToken,
+          mintGatewayKey: fakeMintGatewayKey,
+          revokeGatewayKey: fakeRevokeGatewayKey,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -801,6 +844,8 @@ describe("createReviewPipeline / runJob", () => {
       try {
         const { runJob } = createReviewPipeline(testConfig(), {
           mintToken,
+          mintGatewayKey: fakeMintGatewayKey,
+          revokeGatewayKey: fakeRevokeGatewayKey,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -822,5 +867,191 @@ describe("createReviewPipeline / runJob", () => {
       const serializedLogs = JSON.stringify(logCalls);
       expect(serializedLogs).not.toContain(FAKE_TOKEN);
     });
+  });
+});
+
+// M4-B: the per-job gateway virtual-key lifecycle. These inject spy
+// mint/revoke deps (rather than the default fakes above) to assert the
+// pipeline mints one key per job and revokes it — by the id mint returned —
+// on every exit path, best-effort.
+describe("gateway virtual-key lifecycle (M4-B)", () => {
+  /** Spy mint/revoke deps that record the minted key and every revoke id. */
+  function gatewaySpies() {
+    const minted = { id: "gw-live-key-id", key: "sk-magpie-live-should-never-leak" };
+    const revokedIds: string[] = [];
+    const mintGatewayKey = vi.fn(async () => minted);
+    const revokeGatewayKey = vi.fn(async (_config: Config, id: string) => {
+      revokedIds.push(id);
+    });
+    return { minted, revokedIds, mintGatewayKey, revokeGatewayKey };
+  }
+
+  it("mints one key and revokes it by id on the happy path", async () => {
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("All good."));
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { minted, revokedIds, mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(mintGatewayKey).toHaveBeenCalledTimes(1);
+    expect(revokeGatewayKey).toHaveBeenCalledTimes(1);
+    expect(revokedIds).toEqual([minted.id]);
+  });
+
+  it("revokes the key even when the review fails (failure path)", async () => {
+    const { octokit, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptFailing());
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { minted, revokedIds, mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    // The review failed and still posted its failure comment...
+    expect(createComment).toHaveBeenCalledTimes(1);
+    // ...and the key was still revoked.
+    expect(revokeGatewayKey).toHaveBeenCalledTimes(1);
+    expect(revokedIds).toEqual([minted.id]);
+  });
+
+  it("revokes the key when a post-mint stage throws (workspace/diff error path)", async () => {
+    // A workspace factory that throws simulates a failure after the gateway
+    // key is minted but before the inner workspace try is entered — the outer
+    // finally must still revoke the key.
+    const throwingWorkspace = async (): Promise<never> => {
+      throw new Error("clone failed");
+    };
+    const { octokit } = fakeOctokit({ title: "x", body: "", files: [], diffText: "" });
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { minted, revokedIds, mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: throwingWorkspace,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).rejects.toThrow(/clone failed/);
+
+    expect(mintGatewayKey).toHaveBeenCalledTimes(1);
+    expect(revokedIds).toEqual([minted.id]);
+  });
+
+  it("revokes the key on the abort/timeout path (runReview resolves aborted)", async () => {
+    const { octokit, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const controller = new AbortController();
+    // Fake docker that hangs until killed, so the abort is observed mid-review
+    // (mirrors the AbortSignal test above); on the `kill` subcommand it exits.
+    const piBinary = writeFakePi(
+      [
+        `if (process.argv[2] === "kill") process.exit(0);`,
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        `setTimeout(() => {}, 60000);`,
+      ].join("\n"),
+    );
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { minted, revokedIds, mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    const jobPromise = runJob(testJob(), controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    await jobPromise;
+
+    expect(createComment).not.toHaveBeenCalled();
+    expect(revokeGatewayKey).toHaveBeenCalledTimes(1);
+    expect(revokedIds).toEqual([minted.id]);
+  });
+
+  it("does not mint a key when the job is rejected for a missing installationId", async () => {
+    const { octokit } = fakeOctokit({ title: "x", body: "", files: [], diffText: "" });
+    const { factory } = fakeWorkspaceFactory();
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpies();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+    });
+
+    await expect(runJob(testJob({ installationId: undefined }), new AbortController().signal)).rejects.toThrow();
+
+    expect(mintGatewayKey).not.toHaveBeenCalled();
+    expect(revokeGatewayKey).not.toHaveBeenCalled();
+  });
+
+  it("a gateway mint failure fails the job before any workspace is created", async () => {
+    const { octokit, createComment } = fakeOctokit({ title: "x", body: "", files: [], diffText: "" });
+    const { factory, createCalls } = fakeWorkspaceFactory();
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const mintGatewayKey = vi.fn(async () => {
+      throw new Error("gateway unreachable");
+    });
+    const revokeGatewayKey = vi.fn(async () => {});
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).rejects.toThrow(/gateway unreachable/);
+
+    // No key was allocated, so nothing to revoke; and we never got as far as
+    // cloning or publishing.
+    expect(revokeGatewayKey).not.toHaveBeenCalled();
+    expect(createCalls).toHaveLength(0);
+    expect(createComment).not.toHaveBeenCalled();
   });
 });

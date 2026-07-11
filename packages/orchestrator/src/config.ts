@@ -3,9 +3,9 @@
 // Reads a TOML config file (see /config.example.toml at the repo root for the
 // template and per-field documentation), validates it, applies defaults, and
 // resolves the handful of secrets that deliberately live in the environment
-// rather than the TOML file (webhook secret, LLM API key, and optionally the
-// GitHub App private key). See PLAN.md "Repository layout" / "Defaults
-// chosen" for the surrounding design.
+// rather than the TOML file (webhook secret, LLM API key, gateway master key,
+// and optionally the GitHub App private key). See PLAN.md "Repository
+// layout" / "Defaults chosen" for the surrounding design.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -77,6 +77,34 @@ const rawConfigSchema = z
       })
       .strict()
       .prefault({}),
+    gateway: z
+      .object({
+        // Management (control) plane base URL for the credential-injecting
+        // LLM gateway (M4-A, packages/gateway; PLAN.md §5). This orchestrator
+        // process only ever talks to the mgmt plane (mint/revoke virtual
+        // keys, see gateway.ts) — never the proxy/data plane, which the
+        // review container reaches directly (M4-C wiring, not this field).
+        // Default matches packages/gateway's own default
+        // GATEWAY_MGMT_PORT=4100 on loopback.
+        base_url: z.string().min(1).default("http://127.0.0.1:4100"),
+        // Per-job USD spend cap passed as `budgetUsd` when minting a virtual
+        // key (see gateway.ts's mintGatewayKeyFromConfig). This is the HARD
+        // cost cap Pi itself lacks (no --max-turns/budget flag): the
+        // gateway's NEXT request on a key that has crossed this stops with a
+        // 402, no matter what the agent does. 0.50 is a sane single-review
+        // default for typical diff sizes against Claude/GPT-class models via
+        // OpenRouter; tune per provider/model pricing.
+        per_job_budget_usd: z.number().positive().default(0.5),
+        // Extra seconds added on top of limits.job_timeout_seconds for the
+        // minted key's TTL (see gateway.ts), so the key comfortably outlives
+        // the job's own wall-clock budget (including reviewer.ts's
+        // SIGTERM->SIGKILL grace period and the queue's backstop timeout —
+        // see queue.ts's QUEUE_TIMEOUT_GRACE_MS) and is always cleaned up by
+        // an explicit revoke on cleanup rather than expiring mid-run.
+        ttl_margin_seconds: z.number().int().nonnegative().default(120),
+      })
+      .strict()
+      .prefault({}),
   })
   .strict();
 
@@ -118,12 +146,30 @@ export interface Config {
     /** `docker run --network`. "bridge" until M4 introduces `magpie-net`. */
     network: string;
   };
+  gateway: {
+    /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see PLAN.md §5. */
+    baseUrl: string;
+    /** Per-job USD spend cap passed to the gateway when minting a virtual key. The hard cost cap Pi itself lacks. */
+    perJobBudgetUsd: number;
+    /** Extra seconds added to `limits.jobTimeoutSeconds` for the minted key's TTL, so it outlives the job's own wall-clock budget. */
+    ttlMarginSeconds: number;
+  };
   /** Secrets resolved from the environment (never sourced from the TOML file). */
   secrets: {
     webhookSecret: string;
     llmApiKey: string;
     /** PEM contents of the GitHub App private key. */
     githubPrivateKey: string;
+    /**
+     * Bearer token authenticating this orchestrator to the gateway's
+     * management plane (env: MAGPIE_GATEWAY_MASTER_KEY). Must be provisioned
+     * with the SAME value as the gateway process's own
+     * MAGPIE_GATEWAY_MASTER_KEY (see packages/gateway/README.md) — it is one
+     * shared secret known to both processes, distinct from the gateway's
+     * MAGPIE_GATEWAY_OPENROUTER_KEY (the real provider key), which this
+     * orchestrator never has or needs.
+     */
+    gatewayMasterKey: string;
   };
 }
 
@@ -287,6 +333,13 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
+  const gatewayMasterKey = process.env.MAGPIE_GATEWAY_MASTER_KEY;
+  if (!gatewayMasterKey) {
+    problems.push(
+      "MAGPIE_GATEWAY_MASTER_KEY env var is required (must match the LLM gateway's own MAGPIE_GATEWAY_MASTER_KEY — see packages/gateway/README.md)",
+    );
+  }
+
   // The private key can come from the raw TOML even if other parts of the
   // document failed validation, so resolve it independently of `parsed`.
   const rawGithub =
@@ -361,10 +414,16 @@ export function loadConfig(configPath?: string): Config {
       dockerBin: data.container.docker_bin,
       network: data.container.network,
     },
+    gateway: {
+      baseUrl: data.gateway.base_url,
+      perJobBudgetUsd: data.gateway.per_job_budget_usd,
+      ttlMarginSeconds: data.gateway.ttl_margin_seconds,
+    },
     secrets: {
       webhookSecret: webhookSecret!,
       llmApiKey: llmApiKey!,
       githubPrivateKey: githubPrivateKey!,
+      gatewayMasterKey: gatewayMasterKey!,
     },
   };
 }
