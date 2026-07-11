@@ -107,6 +107,45 @@ OpenRouter key lives only in the gateway process's own environment
 isolation and a read-only, `.git`-free worktree; this milestone (M4) is what removes
 the long-lived provider credential and locks down egress on top of that.
 
+### Fail-closed startup confinement assertions (M4-E)
+
+Before `exec`ing Pi, `entrypoint.sh` now verifies its OWN confinement and aborts
+non-zero (surfaced by the orchestrator as a review-failure comment) if either
+invariant below is violated — PLAN.md milestone 4's explicit acceptance check:
+
+1. **`OPENROUTER_API_KEY` must be a magpie gateway virtual key** (`sk-magpie-`
+   prefix, per `packages/gateway/src/keystore.ts`'s `KEY_PREFIX`), never a real
+   OpenRouter key (`sk-or-...`) or anything else. Note this reconciles the
+   original M4-E task text ("fail if a real key is *present*") against what
+   M4-C actually built: the container now *always* legitimately holds
+   `OPENROUTER_API_KEY` (it's how Pi's OpenRouter provider resolves its
+   credential), so "present" can no longer be the bar — "wrong shape" is.
+2. **Network confinement**: a couple of canaries that must be UNREACHABLE (a
+   raw public IP, `1.1.1.1:443`, plus a name-based one, `github.com:443`,
+   which is expected to fail at DNS resolution on `magpie-net`'s `--internal`
+   bridge) and the gateway's proxy-plane `GET /healthz` (host:port parsed from
+   `OPENAI_BASE_URL`, not a second hardcoded copy) which must SUCCEED. Both
+   probes use bash's builtin `/dev/tcp` plus `timeout` — no new image
+   dependency (curl/wget/nc) was added for this.
+
+**Manual check** (reproduces the exact commands/output captured in
+task_1ffd's Review section — see `.chalk/tasks/task_1ffd.md` /
+`.chalk/tasks/closed/task_1ffd.md` once closed):
+
+- Happy path: `docker run ... --network magpie-net -e OPENROUTER_API_KEY=<a
+  freshly minted sk-magpie- key> -e OPENAI_BASE_URL=http://172.31.99.1:4000/v1
+  ... magpie-reviewer:0.1.0 --provider openrouter --model <id>` completes a
+  real review through the gateway, exit `0`.
+- Real-key injection: same command with `OPENROUTER_API_KEY=sk-or-v1-deadbeef...`
+  aborts immediately with `magpie-reviewer: refusing to run: OPENROUTER_API_KEY
+  is not a magpie gateway virtual key ...`, exit `1`, no LLM traffic (verify
+  against the gateway's own log — no new request line).
+- Extra network route: the SAME image run with `--network bridge` instead of
+  `magpie-net` (where `1.1.1.1` is actually routable) aborts with
+  `magpie-reviewer: refusing to run: network canary 1.1.1.1:443 is REACHABLE
+  from this container ...`, exit `1` — proving the probe genuinely detects an
+  escape rather than trusting the network name.
+
 ## Smoke-testing a build
 
 See task_5b3a's Review section (`.chalk/tasks/closed/task_5b3a.md` once closed, or
