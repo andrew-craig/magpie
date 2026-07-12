@@ -1,0 +1,82 @@
+# magpie-gateway.service — the credential-injecting LLM gateway
+# (Milestone 5, task_56ad; runs @magpie/gateway from packages/gateway, M4-A).
+#
+# This is the ONLY process that holds the real OpenRouter key
+# (MAGPIE_GATEWAY_OPENROUTER_KEY). It runs as its OWN unprivileged user,
+# `magpie-gateway`, separate from the orchestrator's `magpie` user, so a
+# compromise of the orchestrator's filesystem access never yields the provider
+# key (see packages/gateway/README.md "Provisioning" and PLAN.md §5). It has
+# NO docker access and NO writable state — the virtual-key store is in-memory
+# by design (keys are per-job ephemeral; losing them on restart just fails any
+# in-flight job closed), so there is no state directory to protect.
+#
+# Ordering: started AFTER magpie-firewall.service because in production the
+# proxy plane binds the magpie-net bridge IP (GATEWAY_PROXY_HOST=172.31.99.1),
+# which does not exist until the firewall oneshot has created br-magpie; and
+# BEFORE the orchestrator so a PR review can mint a key the moment magpie is up.
+#
+# Secrets come from EnvironmentFile=/etc/magpie-gateway/gateway.env (chmod 600,
+# owned by magpie-gateway) — see scripts/install.sh. Required keys:
+#   MAGPIE_GATEWAY_OPENROUTER_KEY  (the real provider key)
+#   MAGPIE_GATEWAY_MASTER_KEY      (shared with the orchestrator; mgmt-plane auth)
+#   GATEWAY_PROXY_HOST=172.31.99.1 (bind the bridge IP in production)
+# and optionally GATEWAY_DEFAULT_MODEL, GATEWAY_PROXY_PORT, GATEWAY_MGMT_PORT.
+
+[Unit]
+Description=magpie LLM gateway (credential-injecting OpenRouter proxy)
+Documentation=file:/opt/magpie/packages/gateway/README.md
+Requires=magpie-firewall.service
+After=magpie-firewall.service network-online.target
+Wants=network-online.target
+Before=magpie.service
+
+[Service]
+Type=simple
+User=magpie-gateway
+Group=magpie-gateway
+WorkingDirectory=/opt/magpie/packages/gateway
+EnvironmentFile=/etc/magpie-gateway/gateway.env
+ExecStart=/usr/bin/node /opt/magpie/packages/gateway/dist/index.js
+Restart=on-failure
+RestartSec=5s
+
+# --- systemd hardening ------------------------------------------------------
+# The gateway is host-side but sits directly behind the (fully-compromisable)
+# review container on the data plane, so it gets a tight sandbox. It needs
+# only: outbound TCP to OpenRouter, a listening socket on the proxy + mgmt
+# planes, and read access to its own code + env file. Nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# No writable filesystem paths: the key store is in-memory, so nothing to
+# persist. ProtectSystem=strict already makes the whole tree read-only.
+# Drop ALL capabilities — the proxy (4000) and mgmt (4100) ports are >1024, so
+# not even CAP_NET_BIND_SERVICE is needed.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# INET(6) for the listeners + the outbound call to OpenRouter; UNIX for Node's
+# internal use (e.g. DNS/threadpool signalling); NETLINK because glibc's
+# resolver (getaddrinfo) opens an AF_NETLINK socket to enumerate interfaces
+# for source-address/IPv6 selection — blocking it can make DNS lookups (e.g.
+# openrouter.ai) slow or fail. No others.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# NOTE: deliberately NO MemoryDenyWriteExecute — V8's JIT needs W^X memory and
+# would crash under it.
+
+[Install]
+WantedBy=multi-user.target
