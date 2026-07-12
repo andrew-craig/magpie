@@ -145,4 +145,34 @@ describe("createOutputDir", () => {
       await cleanup();
     }
   });
+
+  // Regression (M5): under systemd `PrivateTmp=true` the OS tmpdir is private
+  // to the orchestrator process and invisible to the Docker daemon, so the
+  // `/out` bind-mount source must be created under a host-visible base
+  // (config.workspace.workDir). Callers pass that base explicitly.
+  it("creates the per-job dir under an explicitly provided baseDir", async () => {
+    const base = join(root, "state", "work");
+    const { outDir, findingsPath, cleanup } = await createOutputDir(base);
+    try {
+      expect(relative(base, outDir).startsWith("..")).toBe(false);
+      expect(join(outDir, "findings.json")).toBe(findingsPath);
+      expect(existsSync(outDir)).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("creates the baseDir if it does not exist yet (recursive)", async () => {
+    // A base under the StateDirectory may not exist before the very first job.
+    const base = join(root, "not", "created", "yet");
+    expect(existsSync(base)).toBe(false);
+
+    const { outDir, cleanup } = await createOutputDir(base);
+    try {
+      expect(existsSync(base)).toBe(true);
+      expect(existsSync(outDir)).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
 });

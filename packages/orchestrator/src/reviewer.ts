@@ -238,13 +238,20 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // Prep the two bind mounts (see container-mounts.ts): `mountDir` is the
   // workspace itself (stripped of `.git` IN PLACE, owned/cleaned by the
   // pipeline — never cleaned up here, that would double-free it), and
-  // `output` is a fresh per-job host temp dir THIS module owns and must
-  // clean up on every settle path (see `finish` below).
+  // `output` is a fresh per-job host dir (under the host-visible workDir
+  // tree, not the OS tmpdir — see the createOutputDir call below) THIS module
+  // owns and must clean up on every settle path (see `finish` below).
   let mountDir: string;
   let output: Awaited<ReturnType<typeof createOutputDir>>;
   try {
     mountDir = await prepareReviewMount(workspaceDir);
-    output = await createOutputDir();
+    // The `/out` bind-mount source MUST live somewhere the Docker daemon can
+    // see in its own mount namespace. Under systemd (`PrivateTmp=true`) the OS
+    // tmpdir is private to this process, so an out dir created there mounts as
+    // an empty root-owned dir the container can't write into — see
+    // createOutputDir's doc comment. Base it on the same host-visible
+    // StateDirectory tree that already backs the `/work` mount.
+    output = await createOutputDir(config.workspace.workDir);
   } catch (err) {
     return { ok: false, reason: `failed to prepare review container mounts: ${errorMessage(err)}` };
   }
