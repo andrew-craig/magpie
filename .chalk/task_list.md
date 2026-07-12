@@ -6,7 +6,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_4a75** · P2 · open · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
-- **task_56ad** · P2 · open · M5-A: systemd units + install script — magpie, gateway, firewall oneshot  (parent: epic_d6c1)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **task_a193** · P2 · open · M5-B: incremental re-review on synchronize — review only the before...after range  (parent: epic_d6c1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)

@@ -1,0 +1,89 @@
+# magpie.service — the orchestrator (webhook server, queue, git ops, docker
+# reviewer runner, publisher). Milestone 5, task_56ad.
+#
+# Runs as a dedicated unprivileged `magpie` user. Unlike the gateway, this
+# process DOES need docker (it launches each review as an ephemeral
+# `docker run`, see packages/orchestrator/src/reviewer.ts), so `magpie` is in
+# the `docker` supplementary group — that is its only privilege. It never holds
+# the real OpenRouter key (it mints a short-lived per-job virtual key from the
+# gateway instead, M4-C) and only the webhook secret + GitHub App key live in
+# its environment / config.
+#
+# Ordering: started AFTER the gateway (so a webhook arriving right after boot
+# can immediately mint a virtual key) and AFTER docker + the firewall. On stop
+# it must DRAIN in-flight jobs rather than be killed mid-review — the SIGTERM
+# graceful-shutdown path already exists (packages/orchestrator/src/index.ts +
+# shutdown.ts); TimeoutStopSec below is sized to let that drain finish.
+#
+# Config: MAGPIE_CONFIG=/etc/magpie/config.toml is set in the EnvironmentFile so
+# the loader finds it regardless of WorkingDirectory. Secrets
+# (MAGPIE_WEBHOOK_SECRET, MAGPIE_GATEWAY_MASTER_KEY) come from
+# /etc/magpie/magpie.env (chmod 600, owned by magpie) — see scripts/install.sh.
+
+[Unit]
+Description=magpie orchestrator (GitHub PR review bot)
+Documentation=file:/opt/magpie/PLAN.md
+Requires=docker.service
+After=docker.service network-online.target magpie-gateway.service magpie-firewall.service
+Wants=network-online.target magpie-gateway.service
+
+[Service]
+Type=simple
+User=magpie
+Group=magpie
+# Only privilege beyond the base user: talk to the docker socket to run the
+# review containers.
+SupplementaryGroups=docker
+WorkingDirectory=/opt/magpie
+EnvironmentFile=/etc/magpie/magpie.env
+ExecStart=/usr/bin/node /opt/magpie/packages/orchestrator/dist/index.js
+Restart=on-failure
+RestartSec=5s
+
+# Graceful drain on stop: the shutdown handler stops accepting webhooks, then
+# drains queued/running jobs so each job's cleanup runs (workspace removal,
+# container kill, virtual-key revoke) instead of being cut off. The drain is
+# bounded by the queue's own per-job timeout, so give systemd headroom past
+# limits.job_timeout_seconds (default 600s) before it escalates to SIGKILL.
+# Keep this GREATER THAN config.toml's limits.job_timeout_seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=660s
+
+# --- systemd hardening ------------------------------------------------------
+# Creates/owns /var/lib/magpie (0750) and adds it to the writable set — this is
+# where PR checkouts live (workspace.work_dir = /var/lib/magpie/work). Nothing
+# else on the filesystem is writable.
+StateDirectory=magpie
+StateDirectoryMode=0750
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The proxy container work happens in the docker daemon, not here; this process
+# only needs to drop all capabilities. The webhook listener (default :8787) is
+# >1024 so no CAP_NET_BIND_SERVICE.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# AF_UNIX: the docker socket + git. AF_INET(6): the webhook server, the GitHub
+# API, and the gateway mgmt plane. No others.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# NOTE: deliberately NO MemoryDenyWriteExecute — V8's JIT needs W^X memory.
+# NOTE: PrivateDevices is intentionally NOT set — kept conservative so the
+# docker CLI's socket handling is never surprised; the container itself is what
+# gets device isolation (docker run defaults), applied by the daemon.
+
+[Install]
+WantedBy=multi-user.target
