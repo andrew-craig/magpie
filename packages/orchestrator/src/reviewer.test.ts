@@ -669,4 +669,20 @@ describe("buildPromptPayload (untrusted-data fence)", () => {
     expect(payload).toMatch(/report_findings/);
     expect(payload).not.toMatch(/reply with your\s+findings as plain text/);
   });
+
+  it("adds an incremental-update notice (outside the fence) only when incremental", () => {
+    const base = { prTitle: "t", prBody: "b", changedFiles: ["x"], diff: "diff", nonce: "0".repeat(32) };
+
+    const full = buildPromptPayload(base);
+    expect(full).not.toMatch(/INCREMENTAL update/);
+
+    const inc = buildPromptPayload({ ...base, incremental: true });
+    expect(inc).toMatch(/INCREMENTAL update/);
+    expect(inc).toMatch(/ONLY the changes pushed since your/);
+    // The notice is a TRUSTED instruction and must sit before the untrusted
+    // data fence opens, so PR-controlled content can never precede/spoof it.
+    expect(inc.indexOf("INCREMENTAL update")).toBeLessThan(
+      inc.indexOf(`<UNTRUSTED_PR_DATA nonce="${base.nonce}">`),
+    );
+  });
 });
