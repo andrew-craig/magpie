@@ -2,14 +2,14 @@
 id: task_711a
 title: M5 bug: PrivateTmp breaks reviewer /out bind mount (reviews fail 'did not call report_findings')
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_d6c1
 remote_task_url: null
 created_at: 2026-07-12T08:50:55Z
-updated_at: 2026-07-12T08:59:16Z
+updated_at: 2026-07-12T09:36:43Z
 ---
 
 

@@ -4,7 +4,6 @@
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
-- **task_711a** · P2 · in_progress · M5 bug: PrivateTmp breaks reviewer /out bind mount (reviews fail 'did not call report_findings')  (parent: epic_d6c1)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_4a75** · P2 · open · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
