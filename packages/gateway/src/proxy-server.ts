@@ -114,6 +114,18 @@ async function handleChatCompletions(
   keyStore: KeyStore,
   fetchImpl: FetchLike,
 ): Promise<void> {
+  // If the client (the review container) goes away before we've finished
+  // relaying the response, abort the upstream request too — otherwise the
+  // gateway would keep pulling (and paying OpenRouter for) tokens nobody is
+  // reading, quietly burning the key's budget. Bind to the RESPONSE stream's
+  // `close`, not the request's: `req` 'close' fires as soon as the request
+  // body is fully read (well before the response is done), which would abort
+  // every call prematurely, whereas `res` 'close' fires on response
+  // completion OR a premature client disconnect — aborting after the fetch
+  // has already settled is a harmless no-op, so binding it is always safe.
+  const abortController = new AbortController();
+  res.on("close", () => abortController.abort());
+
   try {
     const token = extractBearerToken(req);
     if (!token) {
@@ -177,8 +189,16 @@ async function handleChatCompletions(
           authorization: `Bearer ${config.secrets.openrouterKey}`,
         },
         body: JSON.stringify(outboundBody),
+        // Cancel the upstream call if the client disconnects (see the
+        // AbortController set up at the top of this function).
+        signal: abortController.signal,
       });
     } catch (err) {
+      // A client that disconnected before we even reached upstream aborted
+      // this fetch — that's an expected client-side outcome, not a gateway
+      // fault, so don't log it as an upstream failure or try to write a
+      // response to a socket that's already gone.
+      if (err instanceof Error && err.name === "AbortError") return;
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[magpie-gateway] upstream request failed for key id=${entry.id}: ${message}`);
       sendJsonError(res, 502, "upstream request failed", "upstream_error");
@@ -218,6 +238,11 @@ async function handleChatCompletions(
       }
     }
   } catch (err) {
+    // A client disconnect mid-stream aborts the upstream body iteration with
+    // an AbortError (see the AbortController above). The client is already
+    // gone, so there is nothing to report and no socket left to write to —
+    // treat it as an expected end, not an internal error.
+    if (err instanceof Error && err.name === "AbortError") return;
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[magpie-gateway] proxy request error: ${message}`);
     if (!res.headersSent) {

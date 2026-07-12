@@ -19,7 +19,7 @@
 // `timingSafeEqual`, matching the care `@octokit/webhooks` uses for webhook
 // signatures elsewhere in this codebase). The master key is never logged.
 
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import * as http from "node:http";
 import { z } from "zod";
 import type { GatewayConfig } from "./config.js";
@@ -43,15 +43,14 @@ export interface AdminServer {
 
 /** Constant-time bearer-token comparison — avoids a timing side-channel on the master key, same rationale as GitHub webhook signature verification elsewhere in this codebase. */
 function timingSafeEqualStrings(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, "utf-8");
-  const bufB = Buffer.from(b, "utf-8");
-  if (bufA.length !== bufB.length) {
-    // Still run a comparison of equal-length buffers so this branch doesn't
-    // take a measurably different amount of time than the equal-length one.
-    timingSafeEqual(bufA, bufA);
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+  // Hash both inputs to fixed-length SHA-256 digests first, then compare the
+  // digests in constant time. Because the digests are always the same length
+  // regardless of the inputs', there is no length-based branch here at all —
+  // eliminating the length side-channel a raw buffer comparison would leak
+  // (an attacker learns nothing about the master key's length from timing).
+  const hashA = createHash("sha256").update(a, "utf-8").digest();
+  const hashB = createHash("sha256").update(b, "utf-8").digest();
+  return timingSafeEqual(hashA, hashB);
 }
 
 function isAuthorized(req: http.IncomingMessage, masterKey: string): boolean {

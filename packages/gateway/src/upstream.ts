@@ -122,8 +122,17 @@ export function determineCost(bodyText: string, isStream: boolean): CostResult {
 
   if (usage?.promptTokens !== undefined || usage?.completionTokens !== undefined) {
     const totalTokens = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
-    const costUsd = (totalTokens / 1000) * FALLBACK_COST_PER_1K_TOKENS_USD;
-    return { costUsd, source: "token-estimate" };
+    // Only a genuinely nonzero token count yields a token-estimate charge.
+    // A response that reports zero tokens (present-but-zero fields — e.g. a
+    // malformed, errored, or adversarial body) must NOT resolve to a zero
+    // charge, or it would defeat the budget cap entirely (unlimited free
+    // requests within the key's TTL). Fall through to the flat fallback
+    // below so this module keeps its "never a no-charge result" invariant
+    // (see the SECURITY note in the module doc comment).
+    if (totalTokens > 0) {
+      const costUsd = (totalTokens / 1000) * FALLBACK_COST_PER_1K_TOKENS_USD;
+      return { costUsd, source: "token-estimate" };
+    }
   }
 
   return { costUsd: FALLBACK_FLAT_CHARGE_USD, source: "flat-fallback" };

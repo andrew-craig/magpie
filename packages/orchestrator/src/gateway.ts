@@ -81,6 +81,18 @@ const consoleLogger: GatewayLogger = {
 /** Validates the gateway's mint response shape before trusting it — the response crosses a process boundary (loopback HTTP), so it's parsed defensively like every other external-input trust boundary in this codebase (see findings.ts). */
 const mintResponseSchema = z.object({ id: z.string().min(1), key: z.string().min(1) }).strict();
 
+/**
+ * Per-call timeout for the loopback HTTP calls to the gateway's management
+ * plane. The gateway is a local process answering trivial in-memory
+ * mint/revoke operations, so a call that takes longer than this is hung, not
+ * slow — without a bound, an unresponsive gateway would block a queue worker
+ * until the far coarser per-job wall-clock backstop (see queue.ts) fired.
+ * Kept well under that backstop so a stuck mint surfaces as a fast, clean job
+ * failure instead of a stall, and a stuck revoke is abandoned (best-effort;
+ * never throws) rather than delaying cleanup.
+ */
+const GATEWAY_REQUEST_TIMEOUT_MS = 5000;
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -130,6 +142,7 @@ export async function mintGatewayKey(
         budgetUsd: options.budgetUsd,
         ttlSeconds: options.ttlSeconds,
       }),
+      signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
     throw new Error(`failed to reach LLM gateway management API (${url}): ${errorMessage(err)}`);
@@ -176,6 +189,7 @@ export async function revokeGatewayKey(
     const res = await fetch(url, {
       method: "DELETE",
       headers: { authorization: `Bearer ${gateway.secrets.gatewayMasterKey}` },
+      signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
     });
     if (res.status !== 204) {
       const detail = await safeReadErrorDetail(res);

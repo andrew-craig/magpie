@@ -49,6 +49,14 @@ export class KeyStore {
    * admin-server.ts's zod schema) — this method trusts its params.
    */
   mint(params: MintKeyParams): { id: string; key: string } {
+    // Opportunistic cleanup: expired entries are normally evicted lazily on
+    // `findByKey` (see below), but a key that is minted and then NEVER looked
+    // up or revoked — e.g. the orchestrator is hard-killed after minting, or
+    // a review makes zero LLM calls — would otherwise linger in the maps
+    // forever. Sweeping on mint keeps this long-running service's store from
+    // slowly accumulating dead entries. Cheap: the store never holds more
+    // than single-digit live keys (see class doc comment).
+    this.#evictExpired();
     const id = randomBytes(8).toString("hex");
     const key = `${KEY_PREFIX}${randomBytes(24).toString("hex")}`;
     const entry: KeyEntry = {
@@ -119,6 +127,17 @@ export class KeyStore {
     if (!entry) return;
     const safeCost = Number.isFinite(costUsd) && costUsd > 0 ? costUsd : 0;
     entry.spentUsd += safeCost;
+  }
+
+  /** Evict every entry whose TTL has elapsed from both maps. Called opportunistically on {@link mint} so keys that are never looked up or revoked don't linger; {@link findByKey} still evicts individually on the hot path. */
+  #evictExpired(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.#entries) {
+      if (now >= entry.expiresAt) {
+        this.#entries.delete(id);
+        this.#keyToId.delete(entry.key);
+      }
+    }
   }
 
   /** Test/introspection helper: number of live (not-yet-expired, per {@link findByKey}'s lazy eviction) entries. Not part of the locked HTTP contract. */
