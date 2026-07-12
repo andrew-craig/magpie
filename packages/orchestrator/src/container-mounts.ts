@@ -6,7 +6,7 @@
 // results into the actual `docker run` args; this module doesn't know or
 // care what container consumes its output.
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -75,20 +75,49 @@ export interface OutputDir {
 }
 
 /**
- * Creates a fresh, per-job host temp directory (under the OS tmpdir) meant
- * to be bind-mounted at `/out` in the review container (see PLAN.md §4:
- * `-v <output-dir>:/out`). `mkdtemp` is used (rather than a predictable
- * name) so concurrent jobs never collide on the same path and so the
- * directory can't be pre-staged by anything else on the host.
+ * Creates a fresh, per-job host directory meant to be bind-mounted at `/out`
+ * in the review container (see PLAN.md §4: `-v <output-dir>:/out`). `mkdtemp`
+ * is used (rather than a predictable name) so concurrent jobs never collide on
+ * the same path and so the directory can't be pre-staged by anything else on
+ * the host.
+ *
+ * `baseDir` is the parent under which that per-job dir is created. It MUST be
+ * a path the Docker DAEMON can resolve in its own (host) mount namespace,
+ * because `docker run -v <outDir>:/out` is resolved daemon-side, not by this
+ * process. That rules out the OS tmpdir under systemd: `magpie.service` runs
+ * with `PrivateTmp=true` (see systemd/magpie.service), which gives this
+ * process a PRIVATE `/tmp` the daemon can't see — so an `/out` created there
+ * would mount as an empty, root-owned dir the `--user`-dropped container can't
+ * write `findings.json` into, silently failing every review with "pi did not
+ * call report_findings". Callers in the systemd deployment therefore pass
+ * `config.workspace.workDir` (`/var/lib/magpie/work`, the StateDirectory tree
+ * that already backs the `/work` mount and IS host-visible). The default stays
+ * the OS tmpdir for non-systemd/dev/test callers that share the daemon's
+ * namespace. `mkdir(baseDir, { recursive: true })` first so a not-yet-created
+ * base (e.g. before the first job) doesn't make `mkdtemp` fail.
  *
  * Per epic decision #4, the container process runs as the orchestrator's own
  * uid (no separate `reviewer` user mapping across the mount boundary in M3),
  * so no extra chmod/chown is needed beyond `mkdtemp`'s default `0o700` —
  * the directory is already owned by, and writable only by, this process's
  * user, which is exactly the container's runtime uid too.
+ *
+ * `baseDir` must be absolute: the `-v <outDir>:/out` mount is resolved
+ * daemon-side (see above), and the `mkdir(..., { recursive: true })` below
+ * would otherwise create a stray tree under `process.cwd()`. As with
+ * {@link prepareReviewMount}, config-supplied paths (`config.workspace.workDir`)
+ * are already asserted absolute at config load and the default `tmpdir()` is
+ * absolute, so this only ever fires on a bad/relative caller — fail loudly
+ * before touching the filesystem rather than write to the wrong place.
  */
-export async function createOutputDir(): Promise<OutputDir> {
-  const outDir = await mkdtemp(join(tmpdir(), "magpie-out-"));
+export async function createOutputDir(baseDir: string = tmpdir()): Promise<OutputDir> {
+  if (!isAbsolute(baseDir)) {
+    throw new Error(
+      `createOutputDir requires an absolute baseDir path, got: "${baseDir}"`,
+    );
+  }
+  await mkdir(baseDir, { recursive: true });
+  const outDir = await mkdtemp(join(baseDir, "magpie-out-"));
   const findingsPath = join(outDir, "findings.json");
 
   const cleanup = async (): Promise<void> => {
