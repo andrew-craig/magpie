@@ -20,4 +20,4 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_624d** · P3 · open · M6-C: gVisor (runsc) runtime for the reviewer container  (parent: epic_3c41)
 - **task_9c9d** · P3 · open · M6-D: multi-provider support beyond OpenRouter  (parent: epic_3c41)
 - **task_ad15** · P3 · open · M6-A: @magpie review — on-demand re-review via PR comment command  (parent: epic_3c41)
-- **task_de02** · P3 · open · M7-7: Reframe docs to self-hostable; platform matrix; add Distribution milestone to PLAN.md  (parent: epic_0162)
+- **task_de02** · P3 · open · M7-8: Reframe docs to self-hostable; platform matrix; add Distribution milestone to PLAN.md  (parent: epic_0162)

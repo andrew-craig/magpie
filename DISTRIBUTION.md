@@ -100,7 +100,7 @@ plane. Pi is pointed at it exactly as today (`reviewer.ts` documents that Pi 0.8
 writing that file). The `baseUrl` becomes `http://127.0.0.1:4000/v1`, served by a **tiny
 in-container TCP→unix forwarder** (listening on the container's loopback, which `--network none`
 leaves intact) that relays to `/run/gw.sock`. The forwarder holds no secret, so it is safe to ship
-inside the untrusted image.
+inside the reviewer image (which runs untrusted content).
 
 ### 2.4 What this buys, versus today and versus the rejected compose model
 
@@ -132,9 +132,45 @@ Every existing `docker run` flag stays: `--user`, `--read-only --tmpfs /tmp`, `-
    strongly implies it will (Pi already talks to an arbitrary HTTP `baseUrl`), but this gates the
    architecture, so prove it before the rest of the epic proceeds. Fallback if Pi ever grows native
    unix support: drop the forwarder; until then the forwarder removes the dependency.
-2. **Socket ownership.** The per-job socket must be connectable by the reviewer's `--user` uid
-   (the orchestrator's uid) and by nothing else; create it per job in a dir reachable only by the
-   right users, `0660`, correct group. Implementation detail, not a blocker.
+2. **Socket lifecycle: launch ordering + permissions.** Two structural invariants make the
+   per-job unix socket robust — neither is tuning.
+
+   *Launch ordering — mount the directory, bind before run.* `docker run -v <src>:<dst>` creates
+   `<src>` as a **root-owned directory** if it does not already exist, which would clobber the
+   socket path and break both the gateway's `bind()` and the reviewer's connect. So the mount
+   *source* is the pre-created per-job **directory** (`…/jobs/<id>/`), never the not-yet-existent
+   socket file: the directory always exists at `docker run` time, so Docker can never invent a
+   root-owned path, and the socket appears inside the live bind-mount view once the gateway binds
+   it. Ordering is fixed — orchestrator creates the job dir → gateway mints the virtual key and
+   `bind()`s the socket → orchestrator waits for gateway readiness (path exists and is a socket) →
+   `docker run`. The in-container forwarder additionally retries `connect()` with backoff as
+   belt-and-suspenders.
+
+   *Permissions — directory traversal, not a shared group.* Access control is the bind mount plus
+   directory perms, not socket-level ACLs. The gateway's runtime tree is `0700 magpie-gateway`, so
+   every *other* host user is stopped at the top (the socket path is visible in `/proc/net/unix`
+   but untraversable); the reviewer never walks those host-side ancestors — it enters through the
+   bind mount directly onto the job dir. Layout:
+     - `/run/magpie-gateway/` — `magpie-gateway:magpie-gateway`, **0700** (systemd `RuntimeDirectory`).
+     - `…/jobs/<id>/` — `magpie-gateway:magpie-gateway`, **0711**: the reviewer gets search (to reach
+       the socket) but **no write**, so a compromised reviewer cannot `unlink` the socket or squat a
+       replacement in the dir.
+     - `…/jobs/<id>/<id>.sock` — **0666** (explicit `chmod` after `bind()`, not umask-dependent):
+       `connect()` needs write on the socket inode, and the reviewer shares neither owner nor group
+       with the gateway, so the grant lives on the socket while the `0711` dir prevents tampering.
+       The dir is bind-mounted **read-only** — the kernel's read-only-mount check fires only on
+       filesystem *mutations*, not on `connect()`, so the socket still works while every FS write
+       from inside the container is refused.
+
+   This deliberately drops the shared-`magpie-ipc`-group scheme. Given the reviewer is already
+   `--network none`, holds no secret, and the socket only reaches a spend-capped, key-custodial
+   gateway, a shared group defends against nothing the `0700` directory does not — its only real
+   payoff is surviving a *future* privileged misconfiguration, which does not justify permanently
+   entangling the two principals this architecture exists to separate. (Abstract-namespace sockets
+   are likewise rejected: they are scoped to the network namespace, so `--network none` cannot see
+   them; and random socket *names* are not access control, since `/proc/net/unix` lists every bound
+   path. If Magpie ever moves to podman, `--preserve-fds` lets us pass the connected fd and delete
+   the pathname socket entirely.)
 3. **Fail-closed runtime assertion (cheap belt-and-suspenders).** The reviewer entrypoint asserts
    at startup that it has **no** external route (e.g. a connect to a public IP fails) and that the
    gateway socket is present, and refuses to run otherwise — mirroring PLAN.md M4's "fail closed if
