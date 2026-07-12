@@ -89,7 +89,8 @@ import { join } from "node:path";
 import { Octokit } from "@octokit/rest";
 import { anchorFindings } from "./anchor.js";
 import type { Config } from "./config.js";
-import { computePrDiff } from "./diff.js";
+import type { PrDiffResult } from "./diff.js";
+import { computeIncrementalDiff, computePrDiff, listPrChangedFiles } from "./diff.js";
 import type { GatewayKey } from "./gateway.js";
 import { mintGatewayKeyFromConfig, revokeGatewayKeyFromConfig } from "./gateway.js";
 import { mintInstallationTokenFromConfig } from "./github.js";
@@ -236,13 +237,83 @@ export function createReviewPipeline(
         if (signal.aborted) return;
 
         logger.info({ event: "computing-diff", ...jobLogFields(job) });
-        const prDiff = await computePrDiff({
-          octokit,
-          owner: job.owner,
-          repo: job.repo,
-          prNumber: job.prNumber,
-          maxDiffLines: config.limits.maxDiffLines,
-        });
+        // Incremental re-review (M5-B): on a `synchronize` delivery the filter
+        // carries the pre/post-push head SHAs (job.before/job.after). Try to
+        // review just that `before...after` range instead of the whole PR — a
+        // small follow-up push shouldn't re-review (and re-bill) everything.
+        // `computeIncrementalDiff` is conservative: it reports the range as
+        // unavailable (force-push that rewrote `before`, rebase/revert/no-op,
+        // empty range, any compare error) whenever it isn't a clean
+        // fast-forward, in which case we fall back to the full PR diff (see
+        // diff.ts). The size cap applies to whichever range we end up using.
+        let prDiff: PrDiffResult;
+        let incremental = false;
+        // The file list handed to the reviewer as context. For an incremental
+        // review this is the WHOLE-PR changed-file list (task_a193), NOT just
+        // the incremental range's files — so the reviewer still sees every file
+        // the PR touches even though the diff is only the new range.
+        let reviewChangedFiles: string[] = [];
+        if (job.before && job.after) {
+          const inc = await computeIncrementalDiff({
+            octokit,
+            owner: job.owner,
+            repo: job.repo,
+            base: job.before,
+            head: job.after,
+            maxDiffLines: config.limits.maxDiffLines,
+          });
+          if (inc.available) {
+            prDiff = inc.result;
+            incremental = true;
+            // Only fetch the whole-PR file list when we'll actually review the
+            // range — an over-cap (tooLarge) incremental range takes the
+            // synthesized summary-only branch below and never reads
+            // reviewChangedFiles, so skip the extra paginated listFiles call.
+            if (!prDiff.tooLarge) {
+              reviewChangedFiles = (
+                await listPrChangedFiles({
+                  octokit,
+                  owner: job.owner,
+                  repo: job.repo,
+                  prNumber: job.prNumber,
+                })
+              ).changedFiles;
+            }
+            logger.info({
+              event: "incremental-diff",
+              ...jobLogFields(job),
+              base: job.before,
+              head: job.after,
+              changedLineCount: prDiff.changedLineCount,
+              tooLarge: prDiff.tooLarge,
+            });
+          } else {
+            logger.info({
+              event: "incremental-diff-fallback",
+              ...jobLogFields(job),
+              base: job.before,
+              head: job.after,
+              reason: inc.reason,
+            });
+            prDiff = await computePrDiff({
+              octokit,
+              owner: job.owner,
+              repo: job.repo,
+              prNumber: job.prNumber,
+              maxDiffLines: config.limits.maxDiffLines,
+            });
+            reviewChangedFiles = prDiff.changedFiles;
+          }
+        } else {
+          prDiff = await computePrDiff({
+            octokit,
+            owner: job.owner,
+            repo: job.repo,
+            prNumber: job.prNumber,
+            maxDiffLines: config.limits.maxDiffLines,
+          });
+          reviewChangedFiles = prDiff.changedFiles;
+        }
 
         if (signal.aborted) return;
 
@@ -287,9 +358,12 @@ export function createReviewPipeline(
           });
           result = {
             ok: true,
-            summary:
-              `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
-              `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
+            summary: incremental
+              ? `The changes pushed since the last review total ${prDiff.changedLineCount} lines, ` +
+                `which exceeds the configured review cap of ${config.limits.maxDiffLines}. ` +
+                `Skipping automated review of this update.`
+              : `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
+                `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
             // No findings possible for a skipped review (task_0d97/wave 3 owns
             // the real anchor+inline wiring); this is a minimal type-fix so this
             // synthetic result still satisfies reviewer.ts's now-required
@@ -305,7 +379,11 @@ export function createReviewPipeline(
             // diff.ts's PrDiffResult doc comment: "diff is null exactly when
             // tooLarge").
             diff: prDiff.diff as string,
-            changedFiles: prDiff.changedFiles,
+            // Whole-PR file list as context even for an incremental review (see
+            // reviewChangedFiles above); `incremental` tells reviewer.ts the
+            // diff itself is only the newly-pushed range.
+            changedFiles: reviewChangedFiles,
+            incremental,
             prTitle: pr.title,
             prBody: pr.body ?? "",
             config,

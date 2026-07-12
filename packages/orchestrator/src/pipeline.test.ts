@@ -110,6 +110,52 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
   ].join("\n");
 }
 
+/**
+ * Like {@link fakePiScriptEmittingFindings} but ALSO records the full stdin
+ * payload (the prompt reviewer.ts pipes to the container — PR metadata +
+ * changed-file list + diff) to a file, so incremental-review tests can assert
+ * exactly which diff/notice reached Pi. Emission of stdout is deferred to
+ * stdin's `end` so the whole payload is captured first.
+ */
+function fakePiScriptCapturingStdin(text: string): string {
+  const msg = {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.001 } },
+  };
+  const findings = { findings: [], summary: text, verdict: "comment" };
+  return [
+    `const fs = require("fs");`,
+    `const nodepath = require("path");`,
+    `const argv = process.argv.slice(2);`,
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "-v" && argv[i + 1].endsWith(":/out")) outHost = argv[i + 1].slice(0, -5);`,
+    `}`,
+    `let stdinData = "";`,
+    `process.stdin.setEncoding("utf-8");`,
+    `process.stdin.on("data", (d) => { stdinData += d; });`,
+    `process.stdin.on("end", () => {`,
+    `  fs.writeFileSync(${JSON.stringify(join(root, STDIN_FILE))}, stdinData);`,
+    `  fs.writeFileSync(nodepath.join(outHost, "findings.json"), ${JSON.stringify(JSON.stringify(findings))});`,
+    `  process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+    `  const msg = ${JSON.stringify(msg)};`,
+    `  process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
+    `  process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
+    `});`,
+  ].join("\n");
+}
+
+/** Name of the file `fakePiScriptCapturingStdin` records the stdin payload to, under `root`. */
+const STDIN_FILE = "stdin.txt";
+
+/** Reads back the stdin payload the fake docker script captured, or `undefined` if it never ran. */
+function readRecordedStdin(): string | undefined {
+  const path = join(root, STDIN_FILE);
+  if (!existsSync(path)) return undefined;
+  return readFileSync(path, "utf-8");
+}
+
 /** Name of the file the fake docker script (see `fakePiScriptEmittingFindings`) records its argv to, under `root`. */
 const INVOCATION_FILE = "invocation.json";
 
@@ -206,6 +252,13 @@ function fakeOctokit(opts: {
   files: FakeFile[];
   diffText: string;
   head?: { sha: string };
+  /**
+   * Optional compare-API surface for incremental-review tests (M5-B). When set,
+   * `rest.repos.compareCommitsWithBasehead` resolves to `{ status, files }` for
+   * metadata calls and `compareDiffText` for the `format: "diff"` call, or
+   * throws `compareError` to simulate a 404/API failure.
+   */
+  compare?: { status?: string; files?: FakeFile[]; compareDiffText?: string; compareError?: unknown };
 }) {
   const listFiles = vi.fn();
   const paginate = vi.fn(async () => opts.files);
@@ -216,6 +269,16 @@ function fakeOctokit(opts: {
     }
     return { data: { title: opts.title, body: opts.body, head } };
   });
+  const compareCommitsWithBasehead = vi.fn(
+    async (args: { basehead: string; mediaType?: { format: string } }) => {
+      const c = opts.compare ?? {};
+      if (c.compareError !== undefined) throw c.compareError;
+      if (args?.mediaType?.format === "diff") {
+        return { data: c.compareDiffText ?? "" };
+      }
+      return { data: { status: c.status, files: c.files } };
+    },
+  );
   const createComment = vi.fn(async (_args: { owner: string; repo: string; issue_number: number; body: string }) => ({
     data: { id: 42, html_url: "https://github.com/acme/widgets/pull/7#issuecomment-42" },
   }));
@@ -225,12 +288,12 @@ function fakeOctokit(opts: {
 
   const octokit = {
     paginate,
-    rest: { pulls: { get, listFiles } },
+    rest: { pulls: { get, listFiles }, repos: { compareCommitsWithBasehead } },
     issues: { createComment },
     pulls: { createReview },
   };
 
-  return { octokit, get, listFiles, paginate, createComment, createReview };
+  return { octokit, get, listFiles, paginate, compareCommitsWithBasehead, createComment, createReview };
 }
 
 /** Fake `createWorkspace`: a real throwaway temp dir, no git involved. */
@@ -1100,5 +1163,180 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
     expect(revokeGatewayKey).not.toHaveBeenCalled();
     expect(createCalls).toHaveLength(0);
     expect(createComment).not.toHaveBeenCalled();
+  });
+});
+
+/** A PipelineLogger that records every event payload for assertions. */
+function capturingLogger() {
+  const events: Record<string, unknown>[] = [];
+  const logger = {
+    info: (p: Record<string, unknown>) => events.push(p),
+    error: (p: Record<string, unknown>) => events.push(p),
+  };
+  return { logger, events };
+}
+
+describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () => {
+  const AFTER = "deadbeef"; // matches testJob().headSha, so HEAD VERIFY passes
+  const BEFORE = "b".repeat(40);
+
+  it("synchronize: sends only the before...after range to Pi with the full-PR file list as context", async () => {
+    const incrementalDiff = "diff --git a/src/new.ts b/src/new.ts\n+brand new line\n";
+    const { octokit, get, compareCommitsWithBasehead } = fakeOctokit({
+      title: "Add feature",
+      body: "body",
+      // Full-PR file list (listPrChangedFiles) — larger than the incremental set.
+      files: [
+        { filename: "src/old.ts", additions: 5, deletions: 0 },
+        { filename: "src/new.ts", additions: 1, deletions: 0 },
+      ],
+      diffText: "diff --git a/WHOLE b/WHOLE\n+should NOT be sent\n",
+      compare: {
+        status: "ahead",
+        files: [{ filename: "src/new.ts", additions: 1, deletions: 0 }],
+        compareDiffText: incrementalDiff,
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("Reviewed the new changes."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    // The incremental range was resolved via the compare API...
+    expect(compareCommitsWithBasehead).toHaveBeenCalledWith(
+      expect.objectContaining({ basehead: `${BEFORE}...${AFTER}` }),
+    );
+    // ...and the full PR diff body was NEVER fetched (only the metadata get).
+    const diffGets = get.mock.calls.filter((c) => c[0]?.mediaType?.format === "diff");
+    expect(diffGets).toHaveLength(0);
+
+    const stdin = readRecordedStdin();
+    expect(stdin).toBeDefined();
+    // Only the incremental range reached Pi, not the whole-PR diff.
+    expect(stdin).toContain("brand new line");
+    expect(stdin).not.toContain("should NOT be sent");
+    // The whole-PR file list is still present as context.
+    expect(stdin).toContain("src/old.ts");
+    expect(stdin).toContain("src/new.ts");
+    // And Pi is told this is an incremental update.
+    expect(stdin).toMatch(/INCREMENTAL update/);
+
+    expect(events).toContainEqual(expect.objectContaining({ event: "incremental-diff" }));
+  });
+
+  it("synchronize: falls back to the full PR diff when the range is not a fast-forward", async () => {
+    const wholeDiff = "diff --git a/WHOLE b/WHOLE\n+full pr line\n";
+    const { octokit, get, compareCommitsWithBasehead } = fakeOctokit({
+      title: "Rebased",
+      body: "body",
+      files: [{ filename: "src/x.ts", additions: 2, deletions: 0 }],
+      diffText: wholeDiff,
+      compare: { status: "diverged", files: [{ filename: "src/x.ts", additions: 2, deletions: 0 }] },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("Reviewed the full PR."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    // Compare was attempted (metadata only — diverged, so no diff fetch)...
+    expect(compareCommitsWithBasehead).toHaveBeenCalledTimes(1);
+    // ...and the full PR diff body WAS fetched as the fallback.
+    const diffGets = get.mock.calls.filter((c) => c[0]?.mediaType?.format === "diff");
+    expect(diffGets).toHaveLength(1);
+
+    const stdin = readRecordedStdin();
+    expect(stdin).toContain("full pr line");
+    // Full review => no incremental notice.
+    expect(stdin).not.toMatch(/INCREMENTAL update/);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "incremental-diff-fallback", reason: expect.stringMatching(/not a fast-forward/) }),
+    );
+  });
+
+  it("non-synchronize (no before/after): never touches the compare API", async () => {
+    const { octokit, get, compareCommitsWithBasehead } = fakeOctokit({
+      title: "Opened",
+      body: "body",
+      files: [{ filename: "src/x.ts", additions: 2, deletions: 0 }],
+      diffText: "diff --git a/x b/x\n+line\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("Reviewed."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(compareCommitsWithBasehead).not.toHaveBeenCalled();
+    const diffGets = get.mock.calls.filter((c) => c[0]?.mediaType?.format === "diff");
+    expect(diffGets).toHaveLength(1);
+    expect(readRecordedStdin()).not.toMatch(/INCREMENTAL update/);
+  });
+
+  it("synchronize: an over-cap incremental range posts a summary-only skip and skips the whole-PR file fetch", async () => {
+    // testConfig()'s maxDiffLines is 100; a 150-line incremental range is over
+    // the cap, so the range is tooLarge -> summary-only, and the whole-PR file
+    // list (a paginated listFiles call) must NOT be fetched.
+    const { octokit, paginate, compareCommitsWithBasehead, createComment, createReview } = fakeOctokit({
+      title: "Big push",
+      body: "body",
+      files: [{ filename: "src/x.ts", additions: 1, deletions: 0 }],
+      diffText: "unused",
+      compare: { status: "ahead", files: [{ filename: "src/big.ts", additions: 150, deletions: 0 }] },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("should not run"));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    // Only the compare metadata call (no diff body fetch for an over-cap range).
+    expect(compareCommitsWithBasehead).toHaveBeenCalledTimes(1);
+    // Efficiency: the whole-PR file list (paginated listFiles) is skipped when
+    // the range is tooLarge — reviewChangedFiles is never read on that branch.
+    expect(paginate).not.toHaveBeenCalled();
+    // Pi never ran; a summary-only skip comment was posted (not a review).
+    expect(readRecordedStdin()).toBeUndefined();
+    expect(createReview).not.toHaveBeenCalled();
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(createComment.mock.calls[0][0].body).toMatch(/pushed since the last review/);
   });
 });
