@@ -2,14 +2,14 @@
 id: task_a193
 title: M5-B: incremental re-review on synchronize — review only the before...after range
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_d6c1
 remote_task_url: null
 created_at: 2026-07-10T21:52:09Z
-updated_at: 2026-07-12T10:05:14Z
+updated_at: 2026-07-12T11:20:24Z
 ---
 Wave 1 (parallel with M5-A). PLAN.md §7 re-review scope.
 
