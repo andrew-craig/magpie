@@ -18,6 +18,12 @@ npm install
 npm run build
 ```
 
+To run the unit tests across all workspaces:
+
+```bash
+npm test
+```
+
 ### Configuration
 
 Non-secret settings live in `config.toml` at the repo root — copy
