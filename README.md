@@ -27,7 +27,11 @@ Secrets are kept **out** of `config.toml` and read from the environment. Copy
 `.env.example` to `.env` (also git-ignored) and set:
 
 - `MAGPIE_WEBHOOK_SECRET` — the GitHub App webhook secret
-- `MAGPIE_LLM_API_KEY` — the LLM provider API key
+- `MAGPIE_GATEWAY_MASTER_KEY` — bearer token authenticating this orchestrator to the
+  LLM gateway's (`packages/gateway`) management plane when minting/revoking each job's
+  short-lived virtual key. As of M4-C there is no separate LLM provider API key here —
+  the real key lives only in the gateway process's own environment; see
+  `packages/gateway/README.md`.
 
 The GitHub App private key stays a `.pem` file on disk; point
 `github.private_key_path` in `config.toml` at it (don't put it in `.env`).
@@ -52,13 +56,14 @@ pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the PR 
 credential-free (`workspace.ts`), fetch the diff (`diff.ts`), run the Pi reviewer on the
 host (`reviewer.ts`), and publish exactly one summary comment back to the PR
 (`publisher.ts`). The process shuts down gracefully on `SIGINT`/`SIGTERM`. The container
-sandbox, `report_findings` inline comments, and the LiteLLM gateway described in PLAN.md
-are still later milestones (see the chalk tasks under `epic_04f9`).
+sandbox, `report_findings` inline comments, and the credential-injecting LLM gateway
+described in PLAN.md §5 (now `packages/gateway` — see its README) are later milestones.
 
 ### Reproducing an end-to-end review
 
-1. Configure `.env` (`MAGPIE_WEBHOOK_SECRET`, `MAGPIE_LLM_API_KEY`) and `config.toml`
-   (add the test repo to `repo_allowlist`) as described above.
+1. Configure `.env` (`MAGPIE_WEBHOOK_SECRET`, `MAGPIE_GATEWAY_MASTER_KEY`) and
+   `config.toml` (add the test repo to `repo_allowlist`) as described above, and start
+   `packages/gateway` (see its README) with the real provider key.
 2. Expose the webhook endpoint and point the GitHub App's webhook URL at it, using
    whichever ingress you run: a `cloudflared` tunnel for the real/production path
    (see [docs/cloudflared.md](docs/cloudflared.md)) or a smee.io channel for local dev

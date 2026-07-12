@@ -7,36 +7,58 @@
 // M1/M2 ran Pi as a plain host subprocess with a denylist-scrubbed copy of
 // this process's own env; M3 replaces that with a container that inherits
 // NOTHING from the launching process. The container's env is instead an
-// explicit ALLOWLIST built one `-e NAME` at a time (currently just
-// `OPENROUTER_API_KEY`), the `/work` mount is read-only, and `/tmp` inside
-// the container is a throwaway tmpfs (the container's own root filesystem is
-// `--read-only`). `--cap-drop=ALL --security-opt=no-new-privileges` plus
-// `--memory`/`--cpus`/`--pids-limit` caps (see config.ts's `container.*`)
-// bound what a compromised/malicious review run can do to the host. The
-// read-only Pi tool allowlist (`read,grep,find,ls,report_findings` — no
-// `bash`/`write`/`edit`) and the model/provider/system-prompt/extension flags
-// are now BAKED INTO the image (see docker/reviewer/Dockerfile,
-// docker/reviewer/entrypoint.sh) rather than passed by this module; the only
-// things this module supplies at `docker run` time are the two bind mounts,
-// the provider key, and `--provider`/`--model` as trailing container args.
+// explicit ALLOWLIST built one `-e NAME` at a time (`OPENROUTER_API_KEY` plus,
+// as of M4-C, `OPENAI_BASE_URL` — see below), the `/work` mount is read-only,
+// and `/tmp` inside the container is a throwaway tmpfs (the container's own
+// root filesystem is `--read-only`). `--cap-drop=ALL
+// --security-opt=no-new-privileges` plus `--memory`/`--cpus`/`--pids-limit`
+// caps (see config.ts's `container.*`) bound what a compromised/malicious
+// review run can do to the host. The read-only Pi tool allowlist
+// (`read,grep,find,ls,report_findings` — no `bash`/`write`/`edit`) and the
+// model/provider/system-prompt/extension flags are now BAKED INTO the image
+// (see docker/reviewer/Dockerfile, docker/reviewer/entrypoint.sh) rather than
+// passed by this module; the only things this module supplies at
+// `docker run` time are the two bind mounts, the provider credential, the
+// gateway proxy-plane base URL, and `--provider`/`--model` as trailing
+// container args.
+//
+// GATEWAY WIRING (M4-C): the container never holds the real OpenRouter key.
+// `OPENROUTER_API_KEY` is set to a per-job, budget-capped, short-lived
+// VIRTUAL key minted by pipeline.ts against packages/gateway's management
+// plane (see gateway.ts) — `RunReviewParams.gatewayApiKey` below, threaded
+// straight through with no host-side substitution. `OPENAI_BASE_URL` carries
+// `config.gateway.containerBaseUrl` (the gateway's PROXY/data plane, reachable
+// from `magpie-net` — NOT the loopback-only mgmt plane `config.gateway.baseUrl`
+// gateway.ts calls). Pi itself never reads `OPENAI_BASE_URL` directly: Pi
+// 0.80.3 has no generic OpenAI-compatible base-URL env override (empirically
+// verified against a stub HTTP server — a plain `OPENAI_BASE_URL` env var was
+// silently ignored and requests still went to the real api.openrouter.ai).
+// The mechanism that actually works is a `~/.pi/agent/models.json` provider
+// override (`{"providers":{"openrouter":{"baseUrl":...}}}`, see Pi's
+// docs/models.md "Overriding Built-in Providers") — docker/reviewer/
+// entrypoint.sh reads `OPENAI_BASE_URL` and writes that file before exec'ing
+// `pi`, so this module's job is only to deliver the value via env, same as
+// any other per-job input.
 //
 // SECURITY: the diff/PR title/body are untrusted, possibly-adversarial text
 // (see reviewer-prompt.md and PLAN.md's threat model) — this module never
 // evals or executes any of it; it only ever gets piped to the container's
-// stdin as data. The LLM API key is never logged, never written to disk, and
-// never placed on the command line — it is set only on the spawned `docker`
-// client process's environment and referenced in argv by NAME ONLY
+// stdin as data. The gateway virtual key is never logged, never written to
+// disk, and never placed on the command line — it is set only on the spawned
+// `docker` client process's environment and referenced in argv by NAME ONLY
 // (`-e OPENROUTER_API_KEY`, no `=value`), mirroring the same "secrets only
 // via env, never argv" pattern workspace.ts uses for the GitHub installation
-// token. The findings FILE that `report_findings` writes (read back from the
-// host-side `/out` mount after the container exits) is itself untrusted (LLM
-// tool-call output reasoning over adversarial PR content) and is
-// re-validated at the trust boundary via `parseFindings` (see findings.ts)
-// before this module ever returns it to a caller. On timeout or abort, this
-// module kills BOTH the `docker run` client process (SIGTERM, then SIGKILL
-// after a grace period) AND the container itself (`docker kill <name>`,
-// best-effort) — killing only the client does not reliably stop the
-// container (see `startKillSequence` below).
+// token. (`OPENAI_BASE_URL`'s VALUE is not secret — it's a fixed,
+// deployment-wide address, not a per-job credential — so it's passed inline
+// as `-e OPENAI_BASE_URL=<url>`, unlike the key.) The findings FILE that
+// `report_findings` writes (read back from the host-side `/out` mount after
+// the container exits) is itself untrusted (LLM tool-call output reasoning
+// over adversarial PR content) and is re-validated at the trust boundary via
+// `parseFindings` (see findings.ts) before this module ever returns it to a
+// caller. On timeout or abort, this module kills BOTH the `docker run` client
+// process (SIGTERM, then SIGKILL after a grace period) AND the container
+// itself (`docker kill <name>`, best-effort) — killing only the client does
+// not reliably stop the container (see `startKillSequence` below).
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -69,6 +91,16 @@ export interface RunReviewParams {
   prTitle: string;
   prBody: string;
   config: Config;
+  /**
+   * The per-job gateway VIRTUAL key (M4-B/gateway.ts's `GatewayKey.key`),
+   * minted fresh by pipeline.ts before every review and revoked on cleanup.
+   * Set verbatim as the container's `OPENROUTER_API_KEY` (see below) — this
+   * module never substitutes, caches, or falls back to any other key. There
+   * is no direct-to-OpenRouter path any more: `config.secrets` no longer
+   * carries a real provider key at all (M4-C — see config.ts), so a caller
+   * that can't mint a virtual key can't run a review, by construction.
+   */
+  gatewayApiKey: string;
   /**
    * TEST SEAM: overrides the docker (or docker-compatible) binary this
    * module spawns to run the review container. Defaults to
@@ -153,12 +185,18 @@ function buildContainerName(jobId: string): string {
  *   2. Spawn `<dockerBin> run --rm --name magpie-<jobId> --user <uid>:<gid>
  *      --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges
  *      --memory=<mem> --cpus=<cpus> --pids-limit=<n> --network <net>
- *      -v <mount>:/work:ro -v <out>:/out -e OPENROUTER_API_KEY -i <image>
- *      --provider openrouter --model <model>` with the provider key set only
- *      on the spawned process's `env` (never argv) and every `MAGPIE_*`
- *      secret stripped from that env first (belt-and-suspenders — the
- *      container itself inherits nothing from it beyond the one `-e` flag
+ *      -v <mount>:/work:ro -v <out>:/out -e OPENROUTER_API_KEY
+ *      -e OPENAI_BASE_URL=<gateway proxy URL> -i <image> --provider openrouter
+ *      --model <model>` with the gateway virtual key (`params.gatewayApiKey`)
+ *      set only on the spawned process's `env` (never argv) and every
+ *      `MAGPIE_*` secret stripped from that env first (belt-and-suspenders —
+ *      the container itself inherits nothing from it beyond the `-e` flags
  *      above, but the docker CLIENT process shouldn't carry them either).
+ *      `OPENAI_BASE_URL`'s value is not secret, so unlike the key it's passed
+ *      inline (`-e OPENAI_BASE_URL=...`, not name-only); entrypoint.sh
+ *      translates it into a `~/.pi/agent/models.json` provider override
+ *      before exec'ing `pi` (see this module's doc comment for why — Pi has
+ *      no direct env-var base-URL override).
  *   3. Pipe the PR title/body/changed-file list/diff to the container's
  *      stdin, clearly fenced as untrusted data (see `buildPromptPayload`).
  *   4. Parse Pi's NDJSON stdout stream (forwarded through by docker)
@@ -242,16 +280,16 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // belt-and-suspenders: nothing here should legitimately reach the docker
   // client's env, but deleting the whole `MAGPIE_` prefix costs nothing and
   // stays robust as new secrets are added. We THEN set the one credential
-  // the container legitimately needs — the provider key — on the SAME env
-  // object, referenced in argv by name only (`-e OPENROUTER_API_KEY`, never
-  // `-e OPENROUTER_API_KEY=<value>`), which a per-job, budget-capped gateway
-  // virtual key replaces in M4. Never log this object and never add the key
-  // to `args` below.
+  // the container legitimately needs — the per-job gateway VIRTUAL key (M4-C
+  // — see this module's doc comment and `RunReviewParams.gatewayApiKey`) —
+  // on the SAME env object, referenced in argv by name only
+  // (`-e OPENROUTER_API_KEY`, never `-e OPENROUTER_API_KEY=<value>`). Never
+  // log this object and never add the key to `args` below.
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith("MAGPIE_")) delete env[key];
   }
-  env.OPENROUTER_API_KEY = config.secrets.llmApiKey;
+  env.OPENROUTER_API_KEY = params.gatewayApiKey;
 
   // The hardened `docker run` invocation (mirrors PLAN.md §4 exactly — see
   // this module's doc comment above for the full flag-by-flag rationale).
@@ -283,6 +321,11 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     `${output.outDir}:/out`,
     "-e",
     "OPENROUTER_API_KEY",
+    // Non-secret (a fixed, deployment-wide gateway address, not a per-job
+    // credential — see this module's doc comment), so passed inline rather
+    // than name-only-via-env like OPENROUTER_API_KEY above.
+    "-e",
+    `OPENAI_BASE_URL=${config.gateway.containerBaseUrl}`,
     "-i",
     config.container.image,
     "--provider",

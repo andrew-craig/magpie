@@ -103,10 +103,16 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       dockerBin: "docker",
       network: "bridge",
     },
+    gateway: {
+      baseUrl: "http://127.0.0.1:4100",
+      containerBaseUrl: "http://172.31.99.1:4000/v1",
+      perJobBudgetUsd: 0.5,
+      ttlMarginSeconds: 120,
+    },
     secrets: {
       webhookSecret: "test-webhook-secret",
-      llmApiKey: "test-llm-api-key",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+      gatewayMasterKey: "test-gateway-master-key",
     },
   };
 }
@@ -120,6 +126,9 @@ function assistantMessage(text: string) {
   };
 }
 
+/** Default per-job gateway virtual key used by `baseParams` below (M4-C: this replaces the old real-provider-key fixture). */
+const TEST_GATEWAY_API_KEY = "test-gateway-virtual-key";
+
 function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
   return {
     workspaceDir: root,
@@ -128,6 +137,7 @@ function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
     prTitle: "Some PR",
     prBody: "Some body",
     config: testConfig(),
+    gatewayApiKey: TEST_GATEWAY_API_KEY,
     ...overrides,
   };
 }
@@ -269,6 +279,13 @@ describe("runReview", () => {
     // Image, then trailing provider/model as the last four tokens.
     expect(argv).toContain("magpie-reviewer:0.1.0");
     expect(argv.slice(-4)).toEqual(["--provider", "openrouter", "--model", "some/model"]);
+
+    // -e OPENAI_BASE_URL=<gateway proxy plane> (M4-C): non-secret, so passed
+    // inline (unlike OPENROUTER_API_KEY below) with the value baked into the
+    // argv token itself.
+    const baseUrlIdx = argv.indexOf("OPENAI_BASE_URL=http://172.31.99.1:4000/v1");
+    expect(baseUrlIdx).toBeGreaterThan(0);
+    expect(argv[baseUrlIdx - 1]).toBe("-e");
   });
 
   it("passes the provider key via env (bare -e OPENROUTER_API_KEY) and never as an argv token", async () => {
@@ -282,13 +299,13 @@ describe("runReview", () => {
 
     const { argv, openRouterKey } = readInvocation();
 
-    // The secret reaches the child via env...
-    expect(openRouterKey).toBe("test-llm-api-key");
+    // The gateway virtual key (M4-C) reaches the child via env...
+    expect(openRouterKey).toBe(TEST_GATEWAY_API_KEY);
 
     // ...and NEVER as an argv token — neither as a bare value nor as an
     // `-e NAME=value` pair (regression guard for the secrets-on-argv invariant).
-    expect(argv).not.toContain("test-llm-api-key");
-    expect(argv.some((a) => a.includes("test-llm-api-key"))).toBe(false);
+    expect(argv).not.toContain(TEST_GATEWAY_API_KEY);
+    expect(argv.some((a) => a.includes(TEST_GATEWAY_API_KEY))).toBe(false);
 
     // The key is referenced by NAME only: `-e OPENROUTER_API_KEY` (no `=value`).
     const eIdx = argv.indexOf("-e");
