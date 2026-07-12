@@ -30,3 +30,8 @@ review failed with `pi did not call report_findings`. `/work` was unaffected bec
 **Verification:** 192 orchestrator tests pass (incl. 2 new baseDir regression tests).
 `systemd-run --property=PrivateTmp=true` repro: `/tmp` source mounts EMPTY in-container,
 StateDirectory source is visible. Live end-to-end on PR #31 pending deploy.
+
+**LIVE CONFIRMED (2026-07-12):** deployed fixed dist to /opt/magpie, restarted
+magpie.service, re-triggered PR #31. First-ever `resultOk:true` — posted a structured
+review (pullrequestreview) with 3 inline comments correctly catching the off-by-one,
+non-positive maxLines, and the mislabeled docs-only PR. Root cause resolved.
