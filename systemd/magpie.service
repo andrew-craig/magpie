@@ -75,8 +75,11 @@ LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
 # AF_UNIX: the docker socket + git. AF_INET(6): the webhook server, the GitHub
-# API, and the gateway mgmt plane. No others.
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# API, and the gateway mgmt plane. AF_NETLINK: glibc's resolver (getaddrinfo)
+# opens an AF_NETLINK socket to enumerate interfaces for source-address/IPv6
+# selection — blocking it can make DNS lookups (e.g. github.com) slow or fail.
+# No others.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native

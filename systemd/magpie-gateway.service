@@ -67,8 +67,11 @@ LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
 # INET(6) for the listeners + the outbound call to OpenRouter; UNIX for Node's
-# internal use (e.g. DNS/threadpool signalling). No others.
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# internal use (e.g. DNS/threadpool signalling); NETLINK because glibc's
+# resolver (getaddrinfo) opens an AF_NETLINK socket to enumerate interfaces
+# for source-address/IPv6 selection — blocking it can make DNS lookups (e.g.
+# openrouter.ai) slow or fail. No others.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native

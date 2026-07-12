@@ -122,11 +122,22 @@ log "node interpreter for units' ExecStart: $NODE_BIN"
 
 ensure_system_user() {
   local user="$1"
+  # Create the matching primary group explicitly first: whether `useradd`
+  # auto-creates a same-named group is distro-/login.defs-dependent
+  # (USERGROUPS_ENAB), and the `install -g "$user"` calls below hard-depend on
+  # that group existing. Being explicit keeps this robust and idempotent
+  # everywhere.
+  if getent group "$user" >/dev/null 2>&1; then
+    log "group '$user' already exists"
+  else
+    log "creating system group '$user'"
+    groupadd --system "$user"
+  fi
   if id -u "$user" >/dev/null 2>&1; then
     log "user '$user' already exists"
   else
     log "creating system user '$user'"
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
+    useradd --system --no-create-home --gid "$user" --shell /usr/sbin/nologin "$user"
   fi
 }
 
@@ -228,9 +239,12 @@ install_unit() {
   local src="$REPO_ROOT/systemd/$unit"
   local dst="$SYSTEMD_DIR/$unit"
   # Rewrite the authored /opt/magpie prefix and /usr/bin/node interpreter to the
-  # actual install prefix and resolved node path.
+  # actual install prefix and resolved node path. The node path is replaced
+  # globally rather than anchored to a specific `ExecStart=<node> ` shape so the
+  # rewrite is robust to unit reformatting; the template node path only ever
+  # appears in ExecStart, so a global replace has no other effect.
   sed -e "s|$UNIT_TEMPLATE_PREFIX|$PREFIX|g" \
-      -e "s|ExecStart=$UNIT_TEMPLATE_NODE |ExecStart=$NODE_BIN |g" \
+      -e "s|$UNIT_TEMPLATE_NODE|$NODE_BIN|g" \
       "$src" > "$dst"
   chmod 0644 "$dst"
   log "installed $dst"
