@@ -101,8 +101,21 @@ export interface OutputDir {
  * so no extra chmod/chown is needed beyond `mkdtemp`'s default `0o700` —
  * the directory is already owned by, and writable only by, this process's
  * user, which is exactly the container's runtime uid too.
+ *
+ * `baseDir` must be absolute: the `-v <outDir>:/out` mount is resolved
+ * daemon-side (see above), and the `mkdir(..., { recursive: true })` below
+ * would otherwise create a stray tree under `process.cwd()`. As with
+ * {@link prepareReviewMount}, config-supplied paths (`config.workspace.workDir`)
+ * are already asserted absolute at config load and the default `tmpdir()` is
+ * absolute, so this only ever fires on a bad/relative caller — fail loudly
+ * before touching the filesystem rather than write to the wrong place.
  */
 export async function createOutputDir(baseDir: string = tmpdir()): Promise<OutputDir> {
+  if (!isAbsolute(baseDir)) {
+    throw new Error(
+      `createOutputDir requires an absolute baseDir path, got: "${baseDir}"`,
+    );
+  }
   await mkdir(baseDir, { recursive: true });
   const outDir = await mkdtemp(join(baseDir, "magpie-out-"));
   const findingsPath = join(outDir, "findings.json");

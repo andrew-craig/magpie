@@ -175,4 +175,13 @@ describe("createOutputDir", () => {
       await cleanup();
     }
   });
+
+  it("rejects a relative baseDir before touching the filesystem", async () => {
+    // A relative base would make the recursive mkdir resolve against
+    // process.cwd(); fail loudly instead (mirrors prepareReviewMount).
+    await expect(createOutputDir("relative/path")).rejects.toThrow(
+      /createOutputDir requires an absolute baseDir path/,
+    );
+    expect(existsSync(join(process.cwd(), "relative"))).toBe(false);
+  });
 });
