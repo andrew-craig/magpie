@@ -7,15 +7,23 @@ Cloudflare-Tunnel-via-`apt` ingress that assumes arm64 + a Cloudflare-managed do
 well, but a second organisation cannot adopt it without reverse-engineering the install.
 
 This document proposes how to make Magpie **distributable and easy for a new organisation to
-stand up**, and — critically — shows that we can do so **without weakening the per-run isolation
-of the (untrusted, prompt-injectable) Pi reviewer**, which is the whole point of the project.
+stand up** — *without weakening, and in fact strengthening,* the per-run isolation of the
+(untrusted, prompt-injectable) Pi reviewer, which is the whole point of the project.
 
-> **Scope of this proposal (per product decision):** primary target is a **containerised
-> `docker compose` stack**, *conditional on* preserving reviewer isolation (analysed in §2).
-> GitHub-App/secret onboarding is addressed with **documentation only** (no automated App
-> Manifest flow this round). LLM provider stays **OpenRouter-only** (multi-provider remains the
-> existing M6-D task). Host-native systemd remains supported as an **advanced / maximum-hardening**
-> path, not the default.
+> **Design decision (after two review rounds — see history at the end).** The distributable
+> architecture is **"Design D": host-service orchestrator + host-process gateway + a single
+> reviewer container that runs with `--network none` and reaches the gateway over a mounted unix
+> domain socket.** This gives *provable, daemon-config-independent* egress isolation, preserves
+> the gateway's file-based key custody, and needs **no** docker-socket-in-a-container (DooD) and
+> **no** host `iptables`/bridge apparatus at all. The earlier idea of shipping the whole stack as
+> a `docker compose` DooD deployment was **rejected**: it would ship a host-root-equivalent
+> pulled orchestrator image, which is off-brand for a capability-separation project. Packaging
+> effort goes into making the **host-service install excellent**, not into a one-command compose
+> that trades away isolation.
+>
+> **Scope also fixed:** GitHub-App/secret onboarding is **documentation-only** this round (no
+> automated App Manifest flow). LLM provider stays **OpenRouter-only** (multi-provider remains the
+> existing M6-D task).
 
 ---
 
@@ -23,25 +31,23 @@ of the (untrusted, prompt-injectable) Pi reviewer**, which is the whole point of
 
 | Area | Current state | Why it blocks distribution |
 |---|---|---|
-| **Deployment** | 3 host systemd units + 2 Unix users; `install.sh` `sed`-rewrites a hardcoded `/opt/magpie` prefix and `/usr/bin/node` path into the units. | Linux/systemd/root only; bespoke path handling; no portable artifact. |
-| **Reviewer egress** | Host `iptables` (`MAGPIE-EGRESS`/`MAGPIE-INPUT`) on a pinned `172.31.99.0/24` `--internal` bridge; gateway IP baked into config. | Requires root netfilter control on the host; pinned IPs; not portable to arbitrary Docker hosts / cloud VMs. |
+| **Reviewer egress** | Host `iptables` (`MAGPIE-EGRESS`/`MAGPIE-INPUT`) on a pinned `172.31.99.0/24` `--internal` bridge; gateway IP baked into config. | Requires **root netfilter control** on the host; pinned IPs; correctness depends on the adopter's `daemon.json` (`iptables:true`, `ip6tables`, Docker version). Not portable. |
 | **Reviewer image** | Built locally by `build-reviewer-image.sh`, Pi version pinned to match the *host's* `pi --version`. | Every adopter must build and re-pin; nothing published. |
+| **Deployment** | 3 host systemd units + 2 Unix users; `install.sh` `sed`-rewrites a hardcoded `/opt/magpie` prefix and `/usr/bin/node` path. | Bespoke path handling; no release artifact; assumes system node at a fixed path. |
 | **GitHub App** | Hand-registered: operator sets permissions/events/webhook, copies App ID, downloads `.pem`, invents webhook secret. | Highest onboarding friction (docs-only fix this round). |
 | **Secrets** | Spread across `magpie.env`, `gateway.env`, `config.toml`, and a `.pem`; a shared master key must be typed identically into two files. | Error-prone; no single source of truth. |
 | **Ingress** | `setup-cloudflared.sh` installs cloudflared via arm64 `apt` and assumes a Cloudflare-managed domain. | Vendor + arch locked; no option for orgs with a normal reverse proxy. |
 | **Framing** | README/PLAN/CLAUDE all say "personal Linux server"; roadmap has no distribution milestone. | Signals "not for you" to other orgs. |
 
+**Key insight:** the single biggest portability blocker is the **host-iptables egress lockdown**.
+Design D removes it entirely rather than porting it, so most of the rest becomes ordinary
+packaging work.
+
 ---
 
-## 2. Can we containerise the stack without weakening reviewer isolation? — **Yes.**
+## 2. Target architecture — "Design D": `--network none` reviewer + unix-socket gateway
 
-This is the load-bearing question. The security model (PLAN.md §"Threat model", CLAUDE.md
-"capability separation") assumes the reviewer is **fully prompt-injectable** and defends
-*structurally*: the reviewer holds no secret worth stealing, and its network egress is
-default-deny to everything except the gateway. Any containerised packaging must reproduce those
-guarantees exactly.
-
-### 2.1 The trust boundary that must not move
+### 2.1 The trust boundary (unchanged)
 
 - **Untrusted:** the reviewer (runs Pi over attacker-influenced PR content).
 - **Trusted:** the orchestrator (privileged git/GitHub/docker work) and the gateway (holds the
@@ -49,177 +55,194 @@ guarantees exactly.
 
 The reviewer must **never** hold the real provider key, reach the internet except via the
 gateway, reach GitHub, reach the gateway's *management* plane, or reach the orchestrator's
-secrets. Everything below is judged against keeping that true.
+secrets.
 
-### 2.2 The reviewer stays an ephemeral `docker run`, **not** a compose service
-
-The reviewer is **not** declared in `docker-compose.yml`. It stays exactly what it is today: an
-ephemeral, per-job container the **orchestrator launches** with its full hardening set —
-`--user`, `--read-only --tmpfs /tmp`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`,
-`--memory/--cpus/--pids-limit`, `.git`-stripped read-only `/work` mount, per-job virtual key
-only. **None of that changes** — it is applied by `reviewer.ts`'s `docker run`, which is
-orthogonal to how the orchestrator itself is packaged. Compose changes how the *long-lived*
-services run, not how the reviewer runs.
-
-### 2.3 Egress lockdown moves from host `iptables` to a Docker **internal network topology**
-
-Today: `--internal` bridge (no default route, no external DNS) **plus** host `iptables` as
-defense-in-depth, **plus** a host-process gateway on the bridge IP. The compose model reproduces
-the *primary* control declaratively and kernel-enforced:
+### 2.2 The topology
 
 ```
-                    ┌─────────────────────────────────────────────┐
-   GitHub ◀────────▶│ orchestrator  (DooD: host docker.sock)       │
-   (egress net)     │   • mints GitHub token, clones, publishes    │
-                    │   • calls gateway MGMT plane                 │
-                    └───────┬──────────────────────────┬───────────┘
-                            │ egress net               │ egress net
-                            ▼                          ▼
-   OpenRouter ◀────── ┌───────────── gateway ──────────────┐
-   (egress net)       │  MGMT plane  → egress net only      │  ← orchestrator reaches mgmt here
-                      │  PROXY plane → reviewers net only   │  ← reviewers reach proxy here
-                      │  holds the real OpenRouter key      │
-                      └───────────────────┬─────────────────┘
-                                          │ reviewers net (internal: true — NO internet)
-                                          ▼
-                    ┌─────────────────────────────────────────────┐
-                    │ reviewer container(s)  (ephemeral docker run)│
-                    │   • attached ONLY to reviewers net          │
-                    │   • per-job virtual key; no real key        │
-                    │   • can reach ONLY gateway:PROXY            │
-                    └─────────────────────────────────────────────┘
+┌─ Host ───────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  orchestrator (systemd service, `magpie` user, full sandbox)                 │
+│    • mints GitHub token, clones, publishes review        ──HTTPS──▶ GitHub    │
+│    • talks to LOCAL docker daemon (docker group) to run the reviewer         │
+│    • mints/revokes per-job virtual keys ──loopback──▶ gateway MGMT plane      │
+│                                                                              │
+│  gateway (systemd service, `magpie-gateway` user, own 0600 key file)         │
+│    • holds the real OpenRouter key (file, NOT container-inspectable)         │
+│    • MGMT plane  : 127.0.0.1:4100  (orchestrator mints/revokes keys)         │
+│    • PROXY plane : a UNIX SOCKET   /run/magpie/jobs/<id>.sock  ──HTTPS──▶ OpenRouter │
+│                                                                              │
+│      per job, the orchestrator `docker run`s:                                 │
+│  ┌─ reviewer container (ephemeral, hardened) ───────────────────────────┐    │
+│  │  --network none        ← NO interfaces except loopback               │    │
+│  │  --cap-drop=ALL --read-only --user <uid> --memory/--cpus/--pids      │    │
+│  │  -v <workspace>:/work:ro   (.git-stripped)                          │    │
+│  │  -v /run/magpie/jobs/<id>.sock:/run/gw.sock   (the ONLY channel out) │    │
+│  │  in-container forwarder: 127.0.0.1:4000  ─────▶ /run/gw.sock         │    │
+│  │  Pi → models.json baseUrl http://127.0.0.1:4000/v1 → forwarder → gw  │    │
+│  │  credential: per-job virtual key only (budget-capped, worthless)    │    │
+│  └──────────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Two compose networks:
+### 2.3 Why the egress isolation is *provable* and *config-independent*
 
-- **`magpie-egress`** — normal bridge with internet. Orchestrator (→ GitHub), gateway (→
-  OpenRouter), and the gateway's **management plane** live here.
-- **`magpie-reviewers`** — declared **`internal: true`**. This is the same `--internal` property
-  the current bridge already uses: **no route off the network, no external DNS.** The reviewer
-  attaches **only** here. The gateway's **proxy plane** listens here.
+A container run with `--network none` has **no network interfaces except its own loopback** — no
+veth, no bridge, no route to the host, to other containers, to the internet, to DNS, or to the
+cloud-metadata IP. This is a property of the container's network namespace, **not** of any
+iptables/nftables rule, so — unlike the current `--internal`-bridge model or the rejected compose
+model — it does **not** depend on the adopter's `daemon.json`, Docker version, IPv6 settings, or
+the embedded resolver. There is nothing to misconfigure.
 
-Mapping every current guarantee to its compose equivalent:
+The reviewer's *only* path off the container is the **mounted unix socket** to the gateway's proxy
+plane. Pi is pointed at it exactly as today (`reviewer.ts` documents that Pi 0.80.3 ignores
+`OPENAI_BASE_URL` and is steered via a `~/.pi/agent/models.json` `baseUrl`; the entrypoint keeps
+writing that file). The `baseUrl` becomes `http://127.0.0.1:4000/v1`, served by a **tiny
+in-container TCP→unix forwarder** (listening on the container's loopback, which `--network none`
+leaves intact) that relays to `/run/gw.sock`. The forwarder holds no secret, so it is safe to ship
+inside the untrusted image.
 
-| Guarantee (today) | Mechanism today | Mechanism under compose | Verdict |
+### 2.4 What this buys, versus today and versus the rejected compose model
+
+| Property | Today (host iptables) | Rejected compose/DooD | **Design D** |
 |---|---|---|---|
-| Reviewer has no internet egress | `--internal` + host `iptables` DROP | `magpie-reviewers` is `internal: true` (kernel/Docker-enforced) | **Equivalent** |
-| Reviewer's only reachable dest is the gateway | bridge → gateway host IP only (`MAGPIE-INPUT :4000`) | reviewer's only interface is `magpie-reviewers`; only the gateway proxy plane listens there | **Equivalent / cleaner** (no host in the path at all) |
-| Reviewer can't reach other host services | `MAGPIE-INPUT` allows only `:4000` on the bridge IP | there is no host IP on the reviewer's network; the host is unreachable by construction | **Stronger** |
-| Orchestrator↔gateway mgmt plane is reviewer-unreachable | mgmt bound to `127.0.0.1` | mgmt plane bound to `magpie-egress` only; reviewer isn't on that network | **Equivalent** |
-| Real provider key isolated from reviewer | separate `magpie-gateway` Unix user | separate gateway **container** (own image, own env, no docker socket) | **Equivalent** |
-| Reviewer can't reach GitHub | not on any GitHub route | not on `magpie-egress`; `magpie-reviewers` has no internet | **Equivalent** |
-| Reviewer hardening (caps, ro-rootfs, limits) | `docker run` flags | **unchanged** `docker run` flags | **Identical** |
+| Reviewer egress | strong, but root-netfilter + daemon-config dependent | daemon-config dependent (holes: host-IP INPUT path, IPv6, `iptables:false`) | **provable, config-independent** (`--network none`) |
+| OpenRouter key custody | preserved (0600 file, separate user) | **lost** (`docker inspect`/`exec` the gateway container) | **preserved** (gateway stays a host process) |
+| Orchestrator privilege | host `docker` group (as today) | **host-root-equivalent pulled image** (socket in container) | host `docker` group (as today); keeps full systemd cage |
+| Only pulled image | none (all local) | orchestrator (**worst** — secret-holding, socket-holding) | **the reviewer** (least-privileged: no secret, no socket, no network) |
+| Host `iptables`/bridge needed | yes (`setup-network.sh`) | yes-ish (INPUT rule still needed) | **none — deleted entirely** |
+| systemd sandbox on the socket-holder | yes | no | **yes** |
 
-### 2.4 The one genuine change: how the orchestrator launches containers (DooD)
+The gateway's **virtual-key** mechanism is retained: even though a leaked key can't reach anything
+but the gateway now, the key still enforces the **hard per-job spend cap** Pi lacks, and the mgmt
+plane stays loopback-only for mint/revoke. Only the proxy plane's *transport* changes (TCP-on-
+bridge → unix socket).
 
-A containerised orchestrator launches the reviewer via **Docker-out-of-Docker**: the host's
-`/var/run/docker.sock` is mounted into the orchestrator container, and it calls `docker run`
-against the host daemon (reviewer = sibling container on `magpie-reviewers`). Points to be
-explicit about:
+### 2.5 Reviewer hardening is unchanged
 
-- Mounting the docker socket grants the orchestrator container **host-root-equivalent** power.
-  This is **not a new grant** — today the `magpie` user is in the host `docker` group, which is
-  the same privilege. The socket is held only by **trusted** orchestrator code; the **reviewer
-  never sees it**. The untrusted boundary is unchanged.
-- **Docker-in-Docker (nested daemon) is explicitly rejected** — more complex, and its
-  `--privileged` requirement would *weaken* isolation. DooD is the right call.
-- The orchestrator attaches each reviewer to `magpie-reviewers` by its stable compose network
-  name (`docker run --network magpie-reviewers …`); this is already parameterised
-  (`config.container.network`).
+Every existing `docker run` flag stays: `--user`, `--read-only --tmpfs /tmp`, `--cap-drop=ALL`,
+`--security-opt=no-new-privileges`, `--memory/--cpus/--pids-limit`, `.git`-stripped read-only
+`/work`. The only changes are `--network bridge/magpie-net` → `--network none` and the added
+`-v …/<id>.sock:/run/gw.sock` mount.
 
-### 2.5 Residual differences to decide on (small, flagged honestly)
+### 2.6 Feasibility gate + residual details (flagged honestly)
 
-1. **Reviewer-to-reviewer isolation.** Today `enable_icc=false` blocks two concurrent reviewers
-   from talking. On a shared internal bridge with a *containerised* gateway, `enable_icc=false`
-   would also block reviewer→gateway (the gateway is now a container on that bridge), so it can't
-   be used as-is. Options: (a) **accept** reviewer↔reviewer reachability — low value to an
-   attacker: each reviewer holds only its own budget-capped virtual key and a read-only checkout
-   of another PR's already-public code; or (b) **per-job internal network** — the orchestrator
-   creates an ephemeral `internal` network per job, connects the gateway to it, and tears it down
-   on cleanup (full parity, more orchestration). Recommend **(a) for the default profile, (b)
-   available for max-hardening**.
-2. **Loss of the "auditable host `iptables`, survives a stray default route" defense-in-depth.**
-   For the **max-hardening profile** we keep `setup-network.sh` as an *optional extra* layer on
-   top of the internal network. For the portable default, the `internal` network is the boundary
-   (Docker itself enforces it with netfilter rules under the hood).
-3. **gVisor (M6-C)** remains an orthogonal add-on (`--runtime=runsc` on the reviewer `docker
-   run`) in either model.
-
-**Conclusion:** the containerised stack preserves every isolation guarantee that matters, and is
-*cleaner* on two of them (no host in the reviewer's network path). The only real trade is host-
-`iptables` defense-in-depth, which we retain as an opt-in hardening layer.
+1. **Feasibility spike first.** Confirm the in-container forwarder + `models.json baseUrl` path
+   works end-to-end against the gateway over a unix socket with the pinned Pi version. `reviewer.ts`
+   strongly implies it will (Pi already talks to an arbitrary HTTP `baseUrl`), but this gates the
+   architecture, so prove it before the rest of the epic proceeds. Fallback if Pi ever grows native
+   unix support: drop the forwarder; until then the forwarder removes the dependency.
+2. **Socket ownership.** The per-job socket must be connectable by the reviewer's `--user` uid
+   (the orchestrator's uid) and by nothing else; create it per job in a dir reachable only by the
+   right users, `0660`, correct group. Implementation detail, not a blocker.
+3. **Fail-closed runtime assertion (cheap belt-and-suspenders).** The reviewer entrypoint asserts
+   at startup that it has **no** external route (e.g. a connect to a public IP fails) and that the
+   gateway socket is present, and refuses to run otherwise — mirroring PLAN.md M4's "fail closed if
+   any host other than the gateway is reachable" idea. With `--network none` this should always
+   pass; the assertion catches a mis-launch (wrong `--network`) rather than a daemon-config drift.
+4. **Reviewer-to-reviewer isolation is now moot.** With `--network none` there is no shared L2
+   segment; concurrent reviewers are network-isolated from each other by construction.
+5. **Supply chain is minimised, not eliminated.** The only pulled image is the reviewer — the
+   least-privileged component (no secret, no socket, no network). Still pin it by digest and sign
+   it (cosign/provenance); a compromised reviewer image is far less catastrophic than a compromised
+   orchestrator image would have been under the rejected compose model.
 
 ---
 
-## 3. Proposed distribution architecture
+## 3. Distribution architecture (packaging around Design D)
 
-### 3.1 Published, multi-arch images (removes the local-build / version-match dance)
+### 3.1 Publish the reviewer image (multi-arch); package the host services well
 
-- Publish `magpie-orchestrator`, `magpie-gateway`, and `magpie-reviewer` to **GHCR**, built
-  **multi-arch (amd64 + arm64)** by CI on tagged releases, pinned by digest. Adopters `pull`
-  instead of `npm ci && build` + `build-reviewer-image.sh` + re-pinning Pi to their host.
-- The reviewer image keeps its existing pinned-version discipline; the orchestrator's default
-  `container.image` points at the published tag.
+- Publish **`magpie-reviewer`** to GHCR, **multi-arch (amd64 + arm64)**, pinned by digest and
+  signed, built by release CI. Adopters `pull` instead of running `build-reviewer-image.sh` and
+  re-pinning Pi to their host. This is the *only* container in the product.
+- The **orchestrator** and **gateway** are host Node services. Package them for a clean install:
+  a versioned release artifact (tarball or npm package with a committed lockfile and pinned deps),
+  the existing systemd units, and an install script that no longer assumes a single hardcoded
+  prefix or node path. Keep the graceful-drain `TimeoutStopSec` the units already have.
 
-### 3.2 The compose stack (the default adopter experience)
+### 3.2 Config portability
 
-- `docker-compose.yml`: `orchestrator` + `gateway` services, the two networks from §2.3, the DooD
-  socket mount on the orchestrator only, healthchecks, restart policies, and boot ordering
-  (gateway before orchestrator) expressed via `depends_on`.
-- **All config via a single `.env`** consumed by compose — collapses the current 4-file spread
-  for the container path. Gateway addressing becomes **service DNS** (`gateway:4000`) instead of
-  the pinned `172.31.99.1`, so nothing is IP-hardcoded.
-- Optional **cloudflared ingress** as a compose *profile* using the official
-  `cloudflare/cloudflared` image (drops the arm64/`apt` install and the Pi assumption entirely).
+- Delete the pinned `172.31.99.0/24` / `172.31.99.1` network contract and `setup-network.sh` — the
+  reviewer has no network, so there is no bridge or IP to pin. The gateway proxy plane's address
+  becomes a **unix socket path** (per-job or a fixed dir), not a bridge IP.
+- Consolidate config: one place for non-secret settings; document generating the shared gateway
+  master key with `openssl rand -hex 32`. (Keep the deliberate secret split — webhook secret,
+  master key, real OpenRouter key, and the GitHub PEM should not all be co-readable; do **not**
+  collapse all secrets into a single world-of-one file.)
 
 ### 3.3 Pluggable ingress (documented matrix)
 
 Magpie only needs *some* public HTTPS URL forwarded to the orchestrator's loopback webhook port.
 Document three supported options instead of one: (1) **reverse proxy + own TLS** (Caddy/nginx/
-Traefik) for orgs with a public server; (2) **Cloudflare Tunnel** (now as a container profile);
-(3) other outbound tunnels (tailscale funnel, ngrok). The HMAC verification makes the endpoint
-safe to expose regardless of which is chosen.
+Traefik) for orgs with a public server; (2) **Cloudflare Tunnel** (as a host service — drop the
+arm64/`apt`-only assumption; the official binary is multi-arch); (3) other outbound tunnels
+(tailscale funnel, ngrok). HMAC verification makes the endpoint safe to expose regardless. When a
+port is published to a host reverse proxy, document binding it to `127.0.0.1` explicitly.
 
-### 3.4 Config portability & the two supported profiles
+### 3.4 Onboarding UX (documentation-only this round)
 
-- **Default (portable):** compose + internal-network egress. No root netfilter, no pinned subnet,
-  runs on any Docker host or cloud VM, amd64 or arm64.
-- **Max-hardening (advanced):** the existing host-native systemd units + `setup-network.sh` host
-  `iptables`, documented as the extra-assurance path. Both profiles share **one config schema**
-  so switching is a deployment choice, not a rewrite.
-
-### 3.5 Onboarding UX (documentation-only this round)
-
-- A **`QUICKSTART.md`**: "clone → fill one `.env` → `docker compose up` → register the GitHub App
-  (clear step-by-step) → point its webhook at your ingress → open a PR."
-- Auto-generate the shared gateway master key with a documented `openssl rand -hex 32` and set it
-  once in the single `.env` (no more keeping two files in sync for the container path).
-- Reframe README/PLAN/CLAUDE from "personal server" to "self-hostable by any organisation," and
-  add a **supported-platform matrix**.
+- A **`QUICKSTART.md`**: install prerequisites → run the install script → fill secrets (with the
+  `openssl rand` master-key step) → register the GitHub App (clear step-by-step: `contents:read` +
+  `pull_requests:read/write`, subscribe `pull_request` events, webhook URL + secret, App ID,
+  download `.pem`) → point the webhook at your ingress → open a PR.
+- Reframe README/PLAN/CLAUDE from "a personal Linux server" to "self-hostable by any organisation,"
+  and add a **supported-platform matrix** (any Linux host with Docker, amd64 + arm64, cloud VM or
+  Pi).
 
 ---
 
-## 4. Roadmap (tracked as a chalk epic — "Distribution / M7")
+## 4. Roadmap (tracked as chalk epic — "Distribution / M7")
 
-Ordered so each builds on the last; the isolation-equivalence work (task 3) is the gate.
+The feasibility spike (task 0) gates everything; the Design-D isolation core (task 1) is the
+security deliverable.
 
-1. **Publish multi-arch images to GHCR** + release CI. Removes local build/re-pin.
-2. **Compose stack** — services, two networks, single `.env`, DooD socket, service-DNS addressing.
-3. **Reviewer isolation under compose** — two-plane gateway topology; reviewer on the `internal`
-   net with unchanged hardening; decide ICC/per-job-network; **add an egress-equivalence test**
-   proving the reviewer can reach *only* the gateway. (Security gate for the whole epic.)
-4. **Config portability** — service-DNS gateway addressing; demote `setup-network.sh`/pinned
-   subnet to the opt-in max-hardening profile; compose-friendly defaults.
-5. **Pluggable ingress** — cloudflared-as-container profile + reverse-proxy docs; keep systemd
-   cloudflared as advanced.
-6. **Onboarding docs** — `QUICKSTART.md`, single `.env`, generated master key, secret
-   consolidation for the container path.
-7. **Host-native systemd as the documented max-hardening path** — shared config schema; keep
-   `/opt/magpie` + node-path handling for that path only.
-8. **Framing & platform matrix** — reframe README/PLAN/CLAUDE; add the Distribution milestone to
-   PLAN.md.
+0. **Feasibility spike — Pi over a unix socket via the in-container forwarder.** Prove the
+   `models.json baseUrl` → loopback forwarder → unix socket → gateway path works end-to-end at the
+   pinned Pi version. Gate for the whole epic.
+1. **Design-D reviewer isolation (core).** `--network none` + per-job unix socket mount + the
+   in-container forwarder; gateway proxy plane served over the socket (mgmt plane stays loopback);
+   socket ownership; fail-closed startup assertion. Delete `setup-network.sh` and the pinned
+   network contract. Add a test proving the reviewer has zero egress and can reach only the gateway.
+2. **Publish `magpie-reviewer` to GHCR** — multi-arch (amd64+arm64), digest-pinned, signed;
+   release CI. Orchestrator default image points at the published tag.
+3. **Package the host services** — versioned release artifact for orchestrator + gateway; rework
+   `install.sh` to drop the single-hardcoded-prefix/node-path assumptions; keep the systemd units +
+   graceful drain.
+4. **Config portability** — remove pinned IPs/subnet; gateway address becomes a socket path;
+   consolidate non-secret config while keeping the secret split.
+5. **Pluggable ingress** — reverse-proxy + Cloudflare-Tunnel (multi-arch host binary) + other-tunnel
+   docs; drop the arm64/`apt`-only assumption in `setup-cloudflared.sh`.
+6. **Onboarding docs** — `QUICKSTART.md`, generated master key, secret consolidation.
+7. **Framing & platform matrix** — reframe README/PLAN/CLAUDE; add the Distribution milestone to
+   PLAN.md and cross-link this doc.
 
 Out of scope this round (existing tasks): GitHub App Manifest one-click flow; multi-provider
-gateway (M6-D); gVisor (M6-C).
+gateway (M6-D); gVisor (M6-C, orthogonal — still an available `--runtime=runsc` add-on on the
+reviewer `docker run`).
+
+---
+
+## Appendix — design history (why not the other topologies)
+
+Two review rounds with a second reviewer (fable) evaluated four topologies. The reviewer container
+is a non-negotiable isolation primitive, so the only axis was where the orchestrator and gateway
+run and how the reviewer reaches the gateway.
+
+- **Design B (all-compose, DooD):** everything containerised, orchestrator mounts the docker
+  socket. Rejected: ships a **host-root-equivalent pulled orchestrator image** (supply-chain), loses
+  the systemd sandbox on the internet-facing socket-holder, adds a `-v` host-path translation
+  landmine, and exposes the gateway key via `docker inspect`. Egress isolation also stays
+  daemon-config-dependent.
+- **Design C (host orchestrator + containerised gateway + reviewer on a Docker `internal` net):**
+  strictly better than B on security, but the gateway key custody still collapses to `docker
+  inspect`, egress isolation still depends on daemon config (host-IP INPUT path, IPv6,
+  `iptables:false`), and it still needs a host INPUT rule. A safe intermediate, not the target.
+- **Design D (chosen):** `--network none` reviewer + unix-socket gateway channel. The only option
+  that gives *provable, config-independent* egress **and** preserves file-based key custody **and**
+  needs no DooD **and** deletes the host-iptables apparatus. Dead ends also considered and rejected:
+  a docker-socket-proxy in front of a containerised orchestrator (endpoint allowlisting can't stop a
+  malicious `container create -v /:/host`), and a separate/rootless daemon for key custody (collapses
+  back into the host-iptables model). Feasibility hinges on Pi speaking to an HTTP `baseUrl` the
+  entrypoint controls, which the code already relies on — hence the task-0 spike.
 </content>
-</invoke>
