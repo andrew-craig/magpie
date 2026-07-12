@@ -65,4 +65,24 @@ describe("determineCost", () => {
     const result = determineCost(adversarial, true);
     expect(result.costUsd).toBeGreaterThan(0);
   });
+
+  it("charges the flat fallback (never $0) when usage reports present-but-zero token counts", () => {
+    // A body whose usage fields are present but zero (a malformed/errored/
+    // adversarial response) must not resolve to a $0 token-estimate — that
+    // would let an attacker make unlimited free requests within the key's TTL,
+    // defeating the budget cap. It must fall through to the flat charge.
+    const body = JSON.stringify({ usage: { prompt_tokens: 0, completion_tokens: 0 } });
+    expect(determineCost(body, false)).toEqual({
+      costUsd: FALLBACK_FLAT_CHARGE_USD,
+      source: "flat-fallback",
+    });
+  });
+
+  it("charges the flat fallback when only one token field is present and it is zero", () => {
+    const body = JSON.stringify({ usage: { completion_tokens: 0 } });
+    expect(determineCost(body, false)).toEqual({
+      costUsd: FALLBACK_FLAT_CHARGE_USD,
+      source: "flat-fallback",
+    });
+  });
 });

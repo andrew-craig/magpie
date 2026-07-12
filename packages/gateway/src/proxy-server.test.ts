@@ -1,6 +1,6 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayConfig } from "./config.js";
 import { createKeyStore, type KeyStore } from "./keystore.js";
 import { createProxyServer, type ProxyServer } from "./proxy-server.js";
@@ -208,6 +208,41 @@ describe("createProxyServer", () => {
     });
 
     expect((upstream.requests[0].body as { model?: string }).model).toBe("scoped/model");
+  });
+
+  it("aborts the upstream request and records no spend when the client disconnects mid-stream", async () => {
+    // Upstream streams one chunk then hangs forever (never sends the usage/
+    // [DONE] chunk). We track whether its connection is torn down — that only
+    // happens if the gateway propagates the client's disconnect upstream.
+    let upstreamTornDown = false;
+    const { baseUrl, keyStore } = await start((_body, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`);
+      res.on("close", () => {
+        upstreamTornDown = true;
+      });
+      // Deliberately never res.end() — the stream stays open until aborted.
+    });
+    const { key } = keyStore.mint({ budgetUsd: 1, ttlSeconds: 60 });
+
+    const ac = new AbortController();
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: "m", messages: [], stream: true }),
+      signal: ac.signal,
+    });
+    // Read the first streamed chunk so the proxy<->upstream pipe is live, then
+    // hang up like a container that died mid-review.
+    const reader = res.body!.getReader();
+    await reader.read();
+    ac.abort();
+    await reader.cancel().catch(() => {});
+
+    // The gateway must tear down the upstream call (stop burning budget) and,
+    // because no usage chunk ever arrived, must debit nothing.
+    await vi.waitFor(() => expect(upstreamTornDown).toBe(true), { timeout: 2000 });
+    expect(keyStore.findByKey(key)?.spentUsd).toBe(0);
   });
 
   it("does not charge the key when upstream returns an error status", async () => {

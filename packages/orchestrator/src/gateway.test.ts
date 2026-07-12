@@ -181,6 +181,20 @@ describe("mintGatewayKey", () => {
     );
   });
 
+  it("bounds the mint request with a 5s abort timeout so a hung gateway can't stall the queue worker", async () => {
+    // Confirms the AbortSignal.timeout is wired onto the fetch (the real signal
+    // still runs; we only assert the bound). Without it, a wedged gateway would
+    // block a worker until the far coarser per-job wall-clock backstop fired.
+    const fake = await startFakeGateway({ status: 201, json: { id: "id1", key: "sk-magpie-x" } });
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 });
+      expect(timeoutSpy).toHaveBeenCalledWith(5000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it("never puts the master key in a thrown error message", async () => {
     const fake = await startFakeGateway({ status: 500, raw: "boom" });
 
@@ -233,6 +247,17 @@ describe("revokeGatewayKey", () => {
     await expect(revokeGatewayKey(authConfig("http://127.0.0.1:1"), "abc123", logger)).resolves.toBeUndefined();
     expect(logger.errors).toHaveLength(1);
     expect(logger.errors[0]).toMatchObject({ event: "gateway-key-revoke-failed", id: "abc123" });
+  });
+
+  it("bounds the revoke request with a 5s abort timeout so cleanup isn't delayed by a hung gateway", async () => {
+    const fake = await startFakeGateway({ status: 204 });
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", recordingLogger());
+      expect(timeoutSpy).toHaveBeenCalledWith(5000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 
   it("never puts the master key in a logged revoke failure", async () => {

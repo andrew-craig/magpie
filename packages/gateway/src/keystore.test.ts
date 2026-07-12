@@ -73,6 +73,45 @@ describe("KeyStore", () => {
     expect(() => store.recordSpend("nope", 1)).not.toThrow();
   });
 
+  it("mint() sweeps entries whose TTL has already elapsed, so keys that are never looked up or revoked don't accumulate", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createKeyStore();
+      // Two short-lived keys that nobody ever looks up (findByKey) or revokes —
+      // e.g. the orchestrator is hard-killed after minting, or a review makes
+      // zero LLM calls. Without a mint-time sweep these linger forever.
+      store.mint({ budgetUsd: 1, ttlSeconds: 10 });
+      store.mint({ budgetUsd: 1, ttlSeconds: 10 });
+      expect(store.size).toBe(2);
+
+      vi.advanceTimersByTime(10_001);
+      // The next mint evicts the two dead entries before inserting the new one.
+      store.mint({ budgetUsd: 1, ttlSeconds: 10 });
+      expect(store.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mint()'s sweep leaves still-live entries untouched", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createKeyStore();
+      const longLived = store.mint({ budgetUsd: 1, ttlSeconds: 1000 });
+      store.mint({ budgetUsd: 1, ttlSeconds: 10 }); // expires soon, never looked up
+
+      vi.advanceTimersByTime(10_001);
+      store.mint({ budgetUsd: 1, ttlSeconds: 10 }); // triggers the sweep
+
+      // The expired middle key is gone; the long-lived one and the just-minted
+      // one both survive (size 2), and the long-lived key is still findable.
+      expect(store.size).toBe(2);
+      expect(store.findByKey(longLived.key)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("expires a key once its TTL elapses, and findByKey stops returning it", () => {
     vi.useFakeTimers();
     try {

@@ -62,6 +62,21 @@ describe("createAdminServer", () => {
     expect(res.status).toBe(401);
   });
 
+  it("rejects a wrong master key that is the SAME length as the real one", async () => {
+    // The constant-time comparison hashes both inputs to fixed-length digests
+    // before comparing, so a same-length-but-wrong key must still be rejected
+    // (guards against a comparison that only ever saw unequal-length inputs).
+    const sameLenWrong = "x".repeat(MASTER_KEY.length);
+    expect(sameLenWrong.length).toBe(MASTER_KEY.length);
+    const { baseUrl } = await start();
+    const res = await fetch(`${baseUrl}/admin/keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${sameLenWrong}` },
+      body: JSON.stringify({ budgetUsd: 1, ttlSeconds: 60 }),
+    });
+    expect(res.status).toBe(401);
+  });
+
   it("mints a key given the correct master key and a valid body", async () => {
     const { baseUrl, keyStore } = await start();
     const res = await fetch(`${baseUrl}/admin/keys`, {
