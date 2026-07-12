@@ -77,6 +77,24 @@ if [[ "$PREFIX" != "$UNIT_TEMPLATE_PREFIX" ]]; then
   log "units will be rewritten from $UNIT_TEMPLATE_PREFIX -> $PREFIX on install"
 fi
 
+# The gateway + orchestrator units set ProtectHome=true, which makes /home,
+# /root and /run/user INACCESSIBLE to the service. If the code lives under a
+# home directory the service can't read its own dist/ and fails to start — a
+# silent boot failure. Refuse rather than install units that can't work.
+# Deploy the checkout to /opt/magpie (the documented convention) instead. The
+# escape hatch is for operators who have deliberately relaxed ProtectHome.
+case "$PREFIX" in
+  /home/*|/root/*)
+    if [[ "${MAGPIE_ALLOW_HOME_PREFIX:-0}" != "1" ]]; then
+      die "install PREFIX ($PREFIX) is under a home directory, but the units set \
+ProtectHome=true — the services could not read their own code and would fail to \
+start. Deploy the checkout outside /home (e.g. /opt/magpie) and re-run, or set \
+MAGPIE_ALLOW_HOME_PREFIX=1 if you have relaxed ProtectHome in the units."
+    fi
+    warn "PREFIX is under a home directory and MAGPIE_ALLOW_HOME_PREFIX=1 — ensure the units' ProtectHome is relaxed or the services will fail to start."
+    ;;
+esac
+
 # Resolve the node interpreter for the units' ExecStart. Prefer an explicit
 # override, then the conventional system path, then whatever `node` resolves to
 # on PATH (may be absent under sudo if node is nvm-managed — hence the warning).
