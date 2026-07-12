@@ -252,7 +252,7 @@ export function createReviewPipeline(
         // review this is the WHOLE-PR changed-file list (task_a193), NOT just
         // the incremental range's files — so the reviewer still sees every file
         // the PR touches even though the diff is only the new range.
-        let reviewChangedFiles: string[];
+        let reviewChangedFiles: string[] = [];
         if (job.before && job.after) {
           const inc = await computeIncrementalDiff({
             octokit,
@@ -265,14 +265,20 @@ export function createReviewPipeline(
           if (inc.available) {
             prDiff = inc.result;
             incremental = true;
-            reviewChangedFiles = (
-              await listPrChangedFiles({
-                octokit,
-                owner: job.owner,
-                repo: job.repo,
-                prNumber: job.prNumber,
-              })
-            ).changedFiles;
+            // Only fetch the whole-PR file list when we'll actually review the
+            // range — an over-cap (tooLarge) incremental range takes the
+            // synthesized summary-only branch below and never reads
+            // reviewChangedFiles, so skip the extra paginated listFiles call.
+            if (!prDiff.tooLarge) {
+              reviewChangedFiles = (
+                await listPrChangedFiles({
+                  octokit,
+                  owner: job.owner,
+                  repo: job.repo,
+                  prNumber: job.prNumber,
+                })
+              ).changedFiles;
+            }
             logger.info({
               event: "incremental-diff",
               ...jobLogFields(job),

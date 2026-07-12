@@ -130,6 +130,8 @@ function fakeCompareOctokit(opts: {
   files?: FakeFile[];
   diffText?: string;
   compareError?: unknown;
+  /** When true, the metadata call resolves to `{ data: null }` (defensive-guard test). */
+  nullData?: boolean;
 }) {
   const compareCommitsWithBasehead = vi.fn(
     async (args: { basehead: string; mediaType?: { format: string } }) => {
@@ -138,6 +140,9 @@ function fakeCompareOctokit(opts: {
       }
       if (args?.mediaType?.format === "diff") {
         return { data: opts.diffText ?? "" };
+      }
+      if (opts.nullData) {
+        return { data: null };
       }
       return { data: { status: opts.status, files: opts.files } };
     },
@@ -304,6 +309,51 @@ describe("computeIncrementalDiff", () => {
     if (result.available) throw new Error("unreachable");
     expect(result.reason).toMatch(/identical/);
     expect(compareCommitsWithBasehead).not.toHaveBeenCalled();
+  });
+
+  it("falls back gracefully (no throw) when the compare body is null/undefined", async () => {
+    const { octokit } = fakeCompareOctokit({ nullData: true });
+
+    const result = await computeIncrementalDiff({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      base: BEFORE,
+      head: AFTER,
+      maxDiffLines: 4000,
+    });
+
+    // A null body must NOT throw a TypeError on `.status`; it degrades to the
+    // "not a fast-forward" fallback so the caller uses the full PR diff.
+    expect(result.available).toBe(false);
+    if (result.available) throw new Error("unreachable");
+    expect(result.reason).toMatch(/not a fast-forward/);
+  });
+
+  it("reports unavailable when the compare file list may be truncated (>= 300 files)", async () => {
+    // A fast-forward touching >= the compare endpoint's 300-file cap: the
+    // single unpaginated response may be truncated, so the size cap can't be
+    // trusted — fall back to the full (paginated-cap) PR diff. Line count here
+    // stays UNDER maxDiffLines, proving the guard trips on file COUNT, not size.
+    const files: FakeFile[] = Array.from({ length: 300 }, (_, i) => ({
+      filename: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const { octokit } = fakeCompareOctokit({ status: "ahead", files });
+
+    const result = await computeIncrementalDiff({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      base: BEFORE,
+      head: AFTER,
+      maxDiffLines: 4000,
+    });
+
+    expect(result.available).toBe(false);
+    if (result.available) throw new Error("unreachable");
+    expect(result.reason).toMatch(/may be truncated/);
   });
 });
 

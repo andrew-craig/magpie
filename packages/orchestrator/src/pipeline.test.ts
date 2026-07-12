@@ -1302,4 +1302,41 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
     expect(diffGets).toHaveLength(1);
     expect(readRecordedStdin()).not.toMatch(/INCREMENTAL update/);
   });
+
+  it("synchronize: an over-cap incremental range posts a summary-only skip and skips the whole-PR file fetch", async () => {
+    // testConfig()'s maxDiffLines is 100; a 150-line incremental range is over
+    // the cap, so the range is tooLarge -> summary-only, and the whole-PR file
+    // list (a paginated listFiles call) must NOT be fetched.
+    const { octokit, paginate, compareCommitsWithBasehead, createComment, createReview } = fakeOctokit({
+      title: "Big push",
+      body: "body",
+      files: [{ filename: "src/x.ts", additions: 1, deletions: 0 }],
+      diffText: "unused",
+      compare: { status: "ahead", files: [{ filename: "src/big.ts", additions: 150, deletions: 0 }] },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("should not run"));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    // Only the compare metadata call (no diff body fetch for an over-cap range).
+    expect(compareCommitsWithBasehead).toHaveBeenCalledTimes(1);
+    // Efficiency: the whole-PR file list (paginated listFiles) is skipped when
+    // the range is tooLarge — reviewChangedFiles is never read on that branch.
+    expect(paginate).not.toHaveBeenCalled();
+    // Pi never ran; a summary-only skip comment was posted (not a review).
+    expect(readRecordedStdin()).toBeUndefined();
+    expect(createReview).not.toHaveBeenCalled();
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(createComment.mock.calls[0][0].body).toMatch(/pushed since the last review/);
+  });
 });

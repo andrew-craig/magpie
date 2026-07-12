@@ -184,6 +184,14 @@ export type IncrementalDiffResult =
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
 /**
+ * GitHub's documented per-response file cap for the compare endpoint (it
+ * returns "a diff of up to 300 files"). A compare `files` array at this length
+ * may be truncated, so {@link computeIncrementalDiff} falls back to the full
+ * (paginated-cap) PR diff rather than risk undercounting the size cap.
+ */
+const COMPARE_FILES_LIMIT = 300;
+
+/**
  * Compute the incremental `base...head` diff for a `synchronize` re-review,
  * sourced from GitHub's compare API — see the module doc comment for the
  * conservative "fast-forward only" policy and why every other case falls back
@@ -229,7 +237,11 @@ export async function computeIncrementalDiff(
       repo,
       basehead,
     });
-    comparison = response.data;
+    // Default to `{}` if the API ever hands back a null/undefined body: the
+    // status/files checks below run OUTSIDE this try/catch, so a bare
+    // `comparison.status` on a null body would throw a TypeError and fail the
+    // whole job instead of falling through to the full-diff fallback.
+    comparison = response.data ?? {};
   } catch (err) {
     // A force-push can rewrite `before` out of existence; GitHub then 404s the
     // compare. Any other transient/API error lands here too — either way, fall
@@ -253,6 +265,23 @@ export async function computeIncrementalDiff(
   const files = comparison.files ?? [];
   if (files.length === 0) {
     return { available: false, reason: `compare ${basehead} has no changed files` };
+  }
+
+  // The compare endpoint returns files from a SINGLE response and caps them at
+  // COMPARE_FILES_LIMIT (GitHub's documented per-response limit) — unlike
+  // `computePrDiff`, which paginates `pulls.listFiles`. If the range touches
+  // that many files, `comparison.files` may be TRUNCATED, so summing it would
+  // undercount `changedLineCount` and let an over-cap range slip past the size
+  // cap (shipping an oversized untrusted diff to Pi — the very thing the cap
+  // exists to prevent). Rather than paginate the awkward compare response, stay
+  // consistent with this function's "when in any doubt, review everything"
+  // policy: treat a possibly-truncated list as unavailable and fall back to the
+  // full PR diff, whose cap is computed from a fully-paginated source.
+  if (files.length >= COMPARE_FILES_LIMIT) {
+    return {
+      available: false,
+      reason: `compare ${basehead} returned ${files.length} files (>= ${COMPARE_FILES_LIMIT} cap); file list may be truncated`,
+    };
   }
 
   const changedFiles = files.map((file) => file.filename);
