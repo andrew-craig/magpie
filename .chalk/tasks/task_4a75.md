@@ -75,4 +75,15 @@ Delegated to a sonnet subagent; implemented on branch `m5-rereview-dedup`, commi
 
 **Not done (out of scope / gated):** live 3-push e2e and live confirmation that `issues:write`+`pull_requests:write` cover `minimizeComment` — CTO-gated (real cost/comments). GitHub's docs indicate minimize is governed by parent-resource write access (no separate permission), so it should be covered, but recommend a live smoke before production reliance.
 
-Branch is local only — not pushed, no PR, task left open pending CTO call on PR + live smoke.
+## Live smoke (2026-07-13) — PASSED
+
+Deployed the branch to the live server (/opt/magpie, rebuilt, magpie.service restarted on M5-C) and drove a throwaway PR (#36) on andrew-craig/magpie:
+- **Reviewed-SHA marker**: review #1 body carried `<!-- magpie:reviewed:5335bfc… -->` (correct head SHA).
+- **Incremental re-review (M5-B+M5-C)**: commits 2 and 3 each ran `incremental-diff` with `base` = the prior/last-reviewed commit (changedLineCount=5), not the whole PR.
+- **Minimize-as-outdated**: magpie's own inline finding from review #2 → `isMinimized=true reason=outdated` after review #3. A co-installed `gemini-code-assist[bot]` inline comment was correctly LEFT UNTOUCHED, and review #3's own current comment stayed visible — live proof of the marker-scoped "only magpie's own comments" guarantee.
+- **Dedup no-op**: close+reopen at the already-reviewed head SHA → `reading-review-state` → `already-reviewed` → `finish` in 911ms with NO gateway-key mint, NO clone, NO new review (review count unchanged).
+- **App permissions**: `minimizeComment` succeeded with the installation token → confirms `issues:write`/`pull_requests:write` cover it (earlier open question resolved).
+
+Smoke PR #36 closed + branch deleted.
+
+Branch pushed; PR opened to main. Task closed.
