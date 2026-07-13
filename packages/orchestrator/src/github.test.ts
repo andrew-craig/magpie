@@ -28,7 +28,7 @@ vi.mock("@octokit/auth-app", () => ({
   createAppAuth: (...args: unknown[]) => createAppAuthMock(...args),
 }));
 
-const { mintInstallationToken } = await import("./github.js");
+const { mintInstallationToken, getAppBotLogin } = await import("./github.js");
 
 const CREDS = {
   appId: "123456",
@@ -102,5 +102,38 @@ describe("mintInstallationToken", () => {
     // Sanity check the token is in fact the secret value we're guarding.
     expect(result.token).toBe(FAKE_TOKEN);
     assertTokenNeverLogged();
+  });
+});
+
+describe("getAppBotLogin", () => {
+  // getAppBotLogin memoizes its result at MODULE scope (see github.ts's
+  // `cachedBotLogin` doc comment) — resolved at most once per process. That
+  // means this single test both proves the resolved value AND proves the
+  // memoization, by calling it twice and asserting the fake `GET /app` only
+  // fired once; a second `it()` block in this file calling getAppBotLogin
+  // again would just observe the same cached promise from this test rather
+  // than exercising anything new, so the two assertions are deliberately
+  // combined here instead of split across tests.
+  it("resolves `<slug>[bot]` from a fake app-JWT-authenticated octokit's GET /app, and memoizes across repeated calls", async () => {
+    const getAuthenticated = vi.fn(async () => ({ data: { slug: "my-magpie-app" } }));
+    const makeAppOctokit = vi.fn(() => ({
+      rest: { apps: { getAuthenticated } },
+    }));
+
+    const first = await getAppBotLogin(
+      { appId: CREDS.appId, privateKey: CREDS.privateKey },
+      { makeAppOctokit: makeAppOctokit as never },
+    );
+    const second = await getAppBotLogin(
+      { appId: CREDS.appId, privateKey: CREDS.privateKey },
+      { makeAppOctokit: makeAppOctokit as never },
+    );
+
+    expect(first).toBe("my-magpie-app[bot]");
+    expect(second).toBe("my-magpie-app[bot]");
+    // Memoized: the underlying octokit factory and the GET /app call each
+    // only ever fired once, even though getAppBotLogin was called twice.
+    expect(makeAppOctokit).toHaveBeenCalledTimes(1);
+    expect(getAuthenticated).toHaveBeenCalledTimes(1);
   });
 });

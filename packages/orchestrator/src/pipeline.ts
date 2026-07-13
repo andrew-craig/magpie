@@ -16,6 +16,26 @@
 //      (see github.ts): that helper re-derives its own token internally via
 //      `authStrategy`, which would mean two tokens minted per job instead of
 //      one.
+//   2z. RE-REVIEW DEDUP (M5-C, rereview.ts): read Magpie's own prior
+//      comments/reviews on the PR via `readReviewState` — stateless, sourced
+//      entirely from GitHub (see rereview.ts's module doc comment; no local
+//      DB). Deliberately placed here, BEFORE minting the gateway virtual key
+//      or cloning, so a redelivered webhook for an already-reviewed head SHA
+//      is a true no-op: no wasted gateway budget, no wasted clone. If
+//      `lastReviewedSha === job.headSha`, log `event:"already-reviewed"` and
+//      return without doing anything else. Before calling `readReviewState`
+//      this step first resolves Magpie's own bot login (github.ts's
+//      `getAppBotLogin`, via the `getBotLogin` dep) and passes it through —
+//      `readReviewState` needs it to verify a comment/review's AUTHOR
+//      identity, not just the forgeable `MAGPIE_REVIEW_MARKER` body literal
+//      (see rereview.ts's module doc comment SECURITY section: without this,
+//      a malicious PR author could spoof a "reviewed" marker for the current
+//      head SHA and silently DoS the bot into skipping their own PR). BOTH
+//      the bot-login resolution and the `readReviewState` call are wrapped in
+//      ONE try/catch: a failure at EITHER step is logged and treated as "not
+//      reviewed" (best-effort, never fails the job, never wrongly skips a
+//      review) — see the try/catch below. The returned `minimizableNodeIds`
+//      snapshot is threaded through to step 7's post-publish minimize call.
 //   2a. Mint ONE fresh gateway virtual key (gateway.ts's
 //      `mintGatewayKeyFromConfig`, M4-B) scoped to `config.llm.model`, with a
 //      budget/TTL from `config.gateway`. From here on the rest of the job
@@ -71,6 +91,16 @@
 //          result as ONE PR review with inline comments plus a summary body
 //          (`publishReviewWithFindings`), so diff-anchored findings surface as
 //          inline comments instead of being flattened into plain text.
+//      Whichever branch runs, `result.ok ? job.headSha : undefined` is passed
+//      as `reviewedSha` (publisher.ts, M5-C) so a definitive outcome (real
+//      success or tooLarge skip) — but never a failure — embeds the hidden
+//      "reviewed" marker `readReviewState` looks for on the next delivery.
+//   7a. MINIMIZE OUTDATED (M5-C, rereview.ts): when `result.ok`, call
+//      `minimizeOutdated` on the `minimizableNodeIds` snapshot captured in
+//      step 2z — BEFORE this publish, not after — so the comment/review just
+//      posted in step 7 is never in that list and can't self-minimize.
+//      Best-effort: `minimizeOutdated` never throws (see rereview.ts); a
+//      per-node minimize failure is only logged.
 //
 // SECURITY: the installation token minted in step 2 is a live GitHub
 // credential. It is only ever passed to `new Octokit({ auth: token })` and to
@@ -93,9 +123,11 @@ import type { PrDiffResult } from "./diff.js";
 import { computeIncrementalDiff, computePrDiff, listPrChangedFiles } from "./diff.js";
 import type { GatewayKey } from "./gateway.js";
 import { mintGatewayKeyFromConfig, revokeGatewayKeyFromConfig } from "./gateway.js";
-import { mintInstallationTokenFromConfig } from "./github.js";
+import { getAppBotLoginFromConfig, mintInstallationTokenFromConfig } from "./github.js";
 import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
+import type { ReviewState } from "./rereview.js";
+import { minimizeOutdated, readReviewState } from "./rereview.js";
 import type { ReviewResult } from "./reviewer.js";
 import { runReview } from "./reviewer.js";
 import { createWorkspace } from "./workspace.js";
@@ -148,6 +180,17 @@ export interface PipelineDeps {
   mintToken?: (config: Config, installationId: number) => Promise<{ token: string }>;
   /** Defaults to `(token) => new Octokit({ auth: token })`. */
   makeOctokit?: (token: string) => Octokit;
+  /**
+   * Resolve Magpie's own GitHub App bot login (e.g. `"my-magpie-app[bot]"`),
+   * threaded into rereview.ts's `readReviewState` so it can verify a prior
+   * comment/review's AUTHOR identity instead of trusting the forgeable
+   * `MAGPIE_REVIEW_MARKER` body literal alone (see rereview.ts's module doc
+   * comment SECURITY section and step 2z above). Defaults to
+   * {@link getAppBotLoginFromConfig}. Overridable so pipeline.test.ts can
+   * supply a fixed bot login without a real GitHub App or network call —
+   * production callers (index.ts) leave it undefined.
+   */
+  getBotLogin?: (config: Config) => Promise<string>;
   /** Forwarded to `runReview` as its `piBinary` test seam; see reviewer.ts. */
   piBinary?: string;
   /** Defaults to {@link createWorkspace}. Overridable so tests can skip real git. */
@@ -188,6 +231,7 @@ export function createReviewPipeline(
   const logger = deps.logger ?? consoleLogger;
   const mintToken = deps.mintToken ?? mintInstallationTokenFromConfig;
   const makeOctokit = deps.makeOctokit ?? ((token: string) => new Octokit({ auth: token }));
+  const getBotLogin = deps.getBotLogin ?? getAppBotLoginFromConfig;
   const makeWorkspace = deps.createWorkspace ?? createWorkspace;
   const mintGatewayKey = deps.mintGatewayKey ?? mintGatewayKeyFromConfig;
   const revokeGatewayKey =
@@ -209,6 +253,51 @@ export function createReviewPipeline(
     logger.info({ event: "minting-token", ...jobLogFields(job) });
     const { token } = await mintToken(config, job.installationId);
     const octokit = makeOctokit(token);
+
+    if (signal.aborted) return;
+
+    // Step 2z: re-review dedup (M5-C, see module doc comment). Read Magpie's
+    // own prior review state for this PR BEFORE spending anything else on
+    // this job (gateway budget, a clone) — a redelivered webhook for a head
+    // SHA already definitively reviewed is a no-op from here. Resolving the
+    // bot login and calling `readReviewState` are both plain GitHub reads
+    // with no side effects, so a failure at EITHER step is swallowed and
+    // treated as "not reviewed yet" rather than failing the job — losing the
+    // dedup optimization for one job is far cheaper than failing (or, worse,
+    // WRONGLY SKIPPING) a review over a transient API hiccup or an
+    // unresolvable identity. See rereview.ts's module doc comment SECURITY
+    // section for why `readReviewState` needs `botLogin` at all: the old
+    // marker-only check was forgeable by any PR commenter.
+    logger.info({ event: "reading-review-state", ...jobLogFields(job) });
+    let reviewState: ReviewState = {
+      lastReviewedSha: undefined,
+      minimizableNodeIds: [],
+    };
+    try {
+      const botLogin = await getBotLogin(config);
+      reviewState = await readReviewState({
+        octokit,
+        owner: job.owner,
+        repo: job.repo,
+        prNumber: job.prNumber,
+        botLogin,
+      });
+    } catch (err) {
+      logger.error({
+        event: "review-state-read-failed",
+        ...jobLogFields(job),
+        error: serializeError(err),
+      });
+    }
+
+    if (reviewState.lastReviewedSha === job.headSha) {
+      logger.info({
+        event: "already-reviewed",
+        ...jobLogFields(job),
+        lastReviewedSha: reviewState.lastReviewedSha,
+      });
+      return;
+    }
 
     if (signal.aborted) return;
 
@@ -246,6 +335,21 @@ export function createReviewPipeline(
         // empty range, any compare error) whenever it isn't a clean
         // fast-forward, in which case we fall back to the full PR diff (see
         // diff.ts). The size cap applies to whichever range we end up using.
+        //
+        // BASE PREFERENCE (M5-C): prefer `reviewState.lastReviewedSha` (step
+        // 2z) over the webhook's own `job.before` when both are available —
+        // it's the more RELIABLE base: `job.before` is whatever the webhook
+        // payload happened to carry for this one delivery, whereas
+        // `lastReviewedSha` is what Magpie actually last posted a definitive
+        // review for, straight from GitHub's own state. If Magpie skipped a
+        // delivery (e.g. a transient failure between two pushes) `job.before`
+        // could point at a commit Magpie never reviewed, silently dropping
+        // that range from the diff; `lastReviewedSha` doesn't have that gap.
+        // Falls back to `job.before` when there's no prior definitive review
+        // (`lastReviewedSha` undefined) — same as before this change. A stale
+        // or unreachable `lastReviewedSha` is safe either way:
+        // `computeIncrementalDiff` itself falls back to the full PR diff on
+        // any bad/GC'd/diverged base (see diff.ts's module doc comment).
         let prDiff: PrDiffResult;
         let incremental = false;
         // The file list handed to the reviewer as context. For an incremental
@@ -258,7 +362,7 @@ export function createReviewPipeline(
             octokit,
             owner: job.owner,
             repo: job.repo,
-            base: job.before,
+            base: reviewState.lastReviewedSha ?? job.before,
             head: job.after,
             maxDiffLines: config.limits.maxDiffLines,
           });
@@ -423,6 +527,12 @@ export function createReviewPipeline(
         // no real findings to anchor in either case); only a genuine
         // `{ ok: true }` result from `runReview` has findings worth anchoring
         // against the diff and publishing as inline PR review comments.
+        // M5-C: `reviewedSha` is only ever set on a definitive `result.ok`
+        // outcome (a real success or the tooLarge-skip synthesized result) —
+        // never on `{ok:false}` — so a redelivered webhook for a head SHA
+        // whose only prior attempt failed still retries. See publisher.ts's
+        // `buildReviewedShaMarker` doc comment and this module's doc comment
+        // (step 7).
         let published: { id: number; url: string };
         if (!result.ok || prDiff.tooLarge) {
           published = await publishReview({
@@ -431,6 +541,7 @@ export function createReviewPipeline(
             repo: job.repo,
             prNumber: job.prNumber,
             result,
+            reviewedSha: result.ok ? job.headSha : undefined,
           });
         } else {
           const { inline, other } = anchorFindings(prDiff.diff as string, {
@@ -448,6 +559,7 @@ export function createReviewPipeline(
             other,
             usage: result.usage,
             verdict: result.verdict,
+            reviewedSha: job.headSha,
           });
         }
 
@@ -457,6 +569,24 @@ export function createReviewPipeline(
           commentId: published.id,
           commentUrl: published.url,
         });
+
+        // Step 7a (M5-C): minimize Magpie's prior minimizable comments as
+        // OUTDATED now that a fresh, definitive review has been posted for
+        // this head SHA — but only on a definitive outcome (`result.ok`,
+        // covering both a real success and a tooLarge skip), mirroring the
+        // `reviewedSha` gating just above: a `{ok:false}` failure doesn't
+        // supersede anything, so prior comments (which may still describe the
+        // PR's actual current state) are left alone. `minimizableNodeIds` is
+        // the PRE-publish snapshot from step 2z, so the artifact just
+        // published above is never included. Best-effort — never fails the
+        // job (see rereview.ts's `minimizeOutdated` doc comment).
+        if (result.ok) {
+          await minimizeOutdated({
+            octokit,
+            nodeIds: reviewState.minimizableNodeIds,
+            logger,
+          });
+        }
       } finally {
         await workspace.cleanup();
         logger.info({ event: "workspace-cleaned", ...jobLogFields(job) });

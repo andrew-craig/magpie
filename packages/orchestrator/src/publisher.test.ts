@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReviewResult, ReviewUsage } from "./reviewer.js";
 import type { Finding, InlineComment } from "./anchor.js";
 import {
+  buildReviewedShaMarker,
   fenceReason,
   MAGPIE_REVIEW_MARKER,
+  parseReviewedSha,
   publishReview,
   publishReviewWithFindings,
   type MinimalIssuesClient,
@@ -195,6 +197,68 @@ describe("publishReview", () => {
       .body as string;
     expect(okBody).toContain(MAGPIE_REVIEW_MARKER);
     expect(failBody).toContain(MAGPIE_REVIEW_MARKER);
+  });
+});
+
+describe("publishReview — reviewedSha marker (M5-C)", () => {
+  it("embeds the reviewed-sha marker when reviewedSha is passed on the ok:true path", async () => {
+    const { client, createComment } = fakeClient();
+    const result: ReviewResult = { ok: true, summary: "No issues found in this diff." };
+
+    await publishReview({ ...BASE_PARAMS, octokit: client, result, reviewedSha: "abc123" });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).toContain(buildReviewedShaMarker("abc123"));
+    expect(parseReviewedSha(body)).toBe("abc123");
+  });
+
+  it("omits the reviewed-sha marker on the ok:true path when reviewedSha is not passed", async () => {
+    const { client, createComment } = fakeClient();
+    const result: ReviewResult = { ok: true, summary: "No issues found in this diff." };
+
+    await publishReview({ ...BASE_PARAMS, octokit: client, result });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).not.toContain("magpie:reviewed:");
+    expect(parseReviewedSha(body)).toBeUndefined();
+  });
+
+  it("NEVER embeds the reviewed-sha marker on the ok:false (failure) path, even if reviewedSha is passed", async () => {
+    const { client, createComment } = fakeClient();
+    const result: ReviewResult = { ok: false, reason: "pi exited with code 1" };
+
+    // publishReview's own params type only accepts reviewedSha for the shape
+    // above, but pipeline.ts's real call site can only ever pass
+    // `result.ok ? job.headSha : undefined` — defense in depth: even if a
+    // caller mistakenly threaded a sha through here, buildFailureBody never
+    // reads a reviewedSha param at all (see publisher.ts).
+    await publishReview({
+      ...BASE_PARAMS,
+      octokit: client,
+      result,
+      reviewedSha: "should-never-appear-sha",
+    });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).not.toContain("magpie:reviewed:");
+    expect(body).not.toContain("should-never-appear-sha");
+    expect(parseReviewedSha(body)).toBeUndefined();
+  });
+});
+
+describe("buildReviewedShaMarker / parseReviewedSha", () => {
+  it("round-trips a sha through the marker", () => {
+    const marker = buildReviewedShaMarker("0123456789abcdef0123456789abcdef01234567");
+    expect(marker).toBe("<!-- magpie:reviewed:0123456789abcdef0123456789abcdef01234567 -->");
+    expect(parseReviewedSha(`${MAGPIE_REVIEW_MARKER}${marker}\nsome body`)).toBe(
+      "0123456789abcdef0123456789abcdef01234567",
+    );
+  });
+
+  it("returns undefined for a body with no marker, null, or undefined", () => {
+    expect(parseReviewedSha("plain body with no marker")).toBeUndefined();
+    expect(parseReviewedSha(null)).toBeUndefined();
+    expect(parseReviewedSha(undefined)).toBeUndefined();
   });
 });
 
@@ -399,6 +463,55 @@ describe("publishReviewWithFindings", () => {
       expect(comment.body).not.toContain(FAKE_TOKEN);
       expect(comment.body).not.toMatch(/ghs_/);
     }
+  });
+
+  it("embeds the reviewed-sha marker when reviewedSha is passed", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [],
+      other: [],
+      reviewedSha: "def456",
+    });
+
+    const body = createReview.mock.calls[0][0].body as string;
+    expect(body).toContain(buildReviewedShaMarker("def456"));
+  });
+
+  it("omits the reviewed-sha marker when reviewedSha is not passed", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [],
+      other: [],
+    });
+
+    const body = createReview.mock.calls[0][0].body as string;
+    expect(body).not.toContain("magpie:reviewed:");
+  });
+
+  it("preserves the reviewed-sha marker on the 422-fallback retry body", async () => {
+    const { client, createReview } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    createReview.mockRejectedValueOnce(conflictError);
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [],
+      reviewedSha: "ghi789",
+    });
+
+    const retryCall = createReview.mock.calls[1][0];
+    expect(retryCall.body).toContain(buildReviewedShaMarker("ghi789"));
   });
 });
 
