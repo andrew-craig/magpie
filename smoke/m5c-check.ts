@@ -7,3 +7,8 @@ export function addTax(price: number): number {
 export function averageOfTwo(a: number, b: number): number {
   return a + b / 2; // BUG: operator precedence — should be (a + b) / 2
 }
+
+// commit 3: another obvious bug to elicit a fresh inline finding.
+export function discount(price: number, pct: number): number {
+  return price - pct; // BUG: pct is a percentage, not an absolute amount
+}
