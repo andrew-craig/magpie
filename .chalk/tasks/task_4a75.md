@@ -54,3 +54,25 @@ Branch `m5-rereview-dedup` off main. Delegated to a sonnet subagent.
 
 ### Verification
 - Unit/integration (fake octokit) is the bar for this task. Live 3-push e2e against a real PR is CTO-gated (real cost + real comments) — I'll schedule separately if wanted.
+
+---
+
+## Review (tech-lead, 2026-07-13) — ACCEPTED
+
+Delegated to a sonnet subagent; implemented on branch `m5-rereview-dedup`, commit `d79e0b2`. Reviewed the diff (not just the summary) + re-ran the suite independently.
+
+**Delivered:** `rereview.ts` (`readReviewState` + `minimizeOutdated`), publisher `reviewedSha` marker (build/parse), pipeline wiring (dedup skip before gateway/clone; incremental base = `lastReviewedSha ?? job.before`; minimize on pre-publish snapshot, only on `result.ok`). +29 tests.
+
+**Independently verified:** `npm test` 306/306 (orch 240, review-ext 11, gateway 55); `npm run build` (tsc) clean; `biome check` on changed files exit 0.
+
+**Confirmed the correct handling of the key constraints:**
+- `PullRequestReview` node_ids are excluded from the minimizable set (explicit test) — GitHub's `Minimizable` interface doesn't include them. Matches CTO decision "minimize only what's allowed."
+- Reviewed marker on definitive outcomes only (success + too-large), never on `{ok:false}` failure — so a redelivered webhook retries a transient failure.
+- Dedup skip is a true no-op (before gateway-key mint + clone); state-read errors fail open (proceed, never fail the job).
+- Minimize uses the pre-publish node_id snapshot → never self-minimizes the just-posted artifact; per-node GraphQL errors swallowed.
+
+**Accepted deviation:** dropped the optional `isMinimized` pre-check — the field is GraphQL-only, so pre-checking would cost as many calls as it saves; re-minimizing is a harmless no-op. Agreed.
+
+**Not done (out of scope / gated):** live 3-push e2e and live confirmation that `issues:write`+`pull_requests:write` cover `minimizeComment` — CTO-gated (real cost/comments). GitHub's docs indicate minimize is governed by parent-resource write access (no separate permission), so it should be covered, but recommend a live smoke before production reliance.
+
+Branch is local only — not pushed, no PR, task left open pending CTO call on PR + live smoke.
