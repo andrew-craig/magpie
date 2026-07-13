@@ -9,8 +9,8 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_8844** · P1 · open · M7-1: Design-D reviewer isolation (core) — --network none + unix-socket gateway channel + forwarder; delete setup-network.sh; zero-egress test  (parent: epic_0162)
 - **task_d54c** · P1 · open · M7-3: Package the host services (orchestrator + gateway) — release artifact; rework install.sh  (parent: epic_0162)
 - **task_e365** · P1 · open · M7-0: Feasibility spike — Pi reaches the gateway over a unix socket via an in-container forwarder  (parent: epic_0162)
+- **task_4a75** · P2 · in_progress · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
-- **task_4a75** · P2 · open · M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)  (parent: epic_d6c1)
 - **task_624f** · P2 · open · M7-5: Pluggable ingress — reverse-proxy + Cloudflare-Tunnel (multi-arch host binary) + tunnel docs  (parent: epic_0162)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **task_d8b1** · P2 · open · M7-6: Onboarding docs — QUICKSTART.md, generated master key, secret consolidation  (parent: epic_0162)

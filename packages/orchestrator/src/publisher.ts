@@ -37,6 +37,39 @@ export const MAGPIE_REVIEW_MARKER = "<!-- magpie-review -->";
 const COMMENT_HEADER = "## \u{1F426} Magpie review";
 
 /**
+ * Build the hidden "reviewed-sha" marker (M5-C) embedded, in addition to
+ * {@link MAGPIE_REVIEW_MARKER}, in every DEFINITIVE-outcome publish: a real
+ * successful review ({@link publishReviewWithFindings}) or a too-large skip
+ * ({@link publishReview}'s `{ok:true}` path). Deliberately NEVER embedded in
+ * a `{ok:false}` failure note (see `buildFailureBody`, which never threads a
+ * `reviewedSha` through at all) — a redelivered webhook for a head SHA whose
+ * only prior attempt failed must still retry, not be treated as
+ * already-reviewed.
+ *
+ * rereview.ts's `readReviewState` is this marker's sole reader (via
+ * {@link parseReviewedSha}); the two are kept in the same module so the
+ * marker's exact text format has one source of truth instead of two copies
+ * (a build-side and a parse-side regex) drifting apart.
+ */
+export function buildReviewedShaMarker(sha: string): string {
+  return `<!-- magpie:reviewed:${sha} -->`;
+}
+
+const REVIEWED_SHA_MARKER_RE = /<!-- magpie:reviewed:([^\s>]+) -->/;
+
+/**
+ * Parse the `magpie:reviewed:<sha>` marker (if any) out of a comment/review
+ * body — the inverse of {@link buildReviewedShaMarker}. Returns `undefined`
+ * when the body carries no marker at all (e.g. a `{ok:false}` failure note,
+ * or a comment/review that isn't Magpie's — see rereview.ts's
+ * `readReviewState`, the only caller).
+ */
+export function parseReviewedSha(body: string | null | undefined): string | undefined {
+  if (!body) return undefined;
+  return body.match(REVIEWED_SHA_MARKER_RE)?.[1];
+}
+
+/**
  * The exact slice of an authenticated Octokit client this module calls.
  * Deliberately NOT `Octokit` itself — narrowing to a minimal structural
  * interface means production code can hand this module the real client from
@@ -90,6 +123,17 @@ export interface PublishReviewParams {
   prNumber: number;
   /** The outcome of reviewer.ts's `runReview` — either branch is always published, never dropped. */
   result: ReviewResult;
+  /**
+   * M5-C: when set, embeds {@link buildReviewedShaMarker}'s hidden marker in
+   * the comment body IN ADDITION TO `result.ok`'s own success/failure body —
+   * see that function's doc comment for the "definitive outcome only" rule.
+   * Callers (pipeline.ts) should only ever pass this on the `result.ok`
+   * branch (`result.ok ? job.headSha : undefined`); `buildFailureBody` below
+   * doesn't even accept a `reviewedSha` param, so passing one here has no
+   * effect at all on the `{ok:false}` path — defense in depth against a
+   * caller mistake threading a SHA into a failure note.
+   */
+  reviewedSha?: string;
 }
 
 /** The created comment's identity, as returned by the GitHub API. */
@@ -116,10 +160,10 @@ export interface PublishedComment {
 export async function publishReview(
   params: PublishReviewParams,
 ): Promise<PublishedComment> {
-  const { octokit, owner, repo, prNumber, result } = params;
+  const { octokit, owner, repo, prNumber, result, reviewedSha } = params;
 
   const body = result.ok
-    ? buildSuccessBody(result)
+    ? buildSuccessBody(result, reviewedSha)
     : buildFailureBody(result);
 
   const response = await octokit.issues.createComment({
@@ -132,8 +176,16 @@ export async function publishReview(
   return { id: response.data.id, url: response.data.html_url };
 }
 
-function buildSuccessBody(result: { ok: true; summary: string; usage?: ReviewUsage }): string {
-  const parts = [MAGPIE_REVIEW_MARKER, COMMENT_HEADER, "", result.summary.trim()];
+function buildSuccessBody(
+  result: { ok: true; summary: string; usage?: ReviewUsage },
+  reviewedSha?: string,
+): string {
+  const parts = [MAGPIE_REVIEW_MARKER];
+  // See buildReviewedShaMarker's doc comment: only ever set on a definitive
+  // outcome, which this function's `{ok:true}` result always is (either a
+  // real review or the tooLarge-skip synthesized result — see pipeline.ts).
+  if (reviewedSha) parts.push(buildReviewedShaMarker(reviewedSha));
+  parts.push(COMMENT_HEADER, "", result.summary.trim());
   const footer = formatUsageFooter(result.usage);
   if (footer) parts.push("", footer);
   return parts.join("\n");
@@ -234,6 +286,15 @@ export interface PublishReviewWithFindingsParams {
    * don't need to strip it before calling this function.
    */
   verdict?: "approve" | "comment";
+  /**
+   * M5-C: embeds {@link buildReviewedShaMarker}'s hidden marker in the review
+   * body. This function is only ever called by pipeline.ts on the genuine
+   * `result.ok` success path (never for a failure), so — unlike
+   * `PublishReviewParams.reviewedSha` — this is effectively always set by the
+   * one production caller; it stays optional here so tests that don't care
+   * about dedup can omit it.
+   */
+  reviewedSha?: string;
 }
 
 /**
@@ -258,9 +319,9 @@ export interface PublishReviewWithFindingsParams {
 export async function publishReviewWithFindings(
   params: PublishReviewWithFindingsParams,
 ): Promise<PublishedComment> {
-  const { octokit, owner, repo, prNumber, summary, inline, other, usage } = params;
+  const { octokit, owner, repo, prNumber, summary, inline, other, usage, reviewedSha } = params;
 
-  const body = buildFindingsBody({ summary, other, usage });
+  const body = buildFindingsBody({ summary, other, usage, reviewedSha });
   const comments = inline.map(toReviewComment);
 
   try {
@@ -278,7 +339,7 @@ export async function publishReviewWithFindings(
     // line GitHub rejects — see module doc comment above). Retry once with
     // no inline comments at all, folding what would have been inline
     // findings into the body as text instead of losing them.
-    const fallbackBody = buildFindingsBody({ summary, other, usage, foldedInline: inline });
+    const fallbackBody = buildFindingsBody({ summary, other, usage, foldedInline: inline, reviewedSha });
     try {
       const response = await octokit.pulls.createReview({
         owner,
@@ -345,15 +406,22 @@ function toReviewComment(comment: InlineComment): {
  * have been `comments[]` entries into the same "Other observations" section
  * as `other` — see `renderOtherObservations`'s doc comment for why they can
  * share one section/renderer instead of needing two.
+ *
+ * `reviewedSha`, when provided, embeds {@link buildReviewedShaMarker}'s
+ * hidden marker right after the identity marker (M5-C) — see that function's
+ * doc comment.
  */
 function buildFindingsBody(params: {
   summary: string;
   other: Finding[];
   usage?: ReviewUsage;
   foldedInline?: InlineComment[];
+  reviewedSha?: string;
 }): string {
-  const { summary, other, usage, foldedInline } = params;
-  const parts = [MAGPIE_REVIEW_MARKER, COMMENT_HEADER, "", summary.trim()];
+  const { summary, other, usage, foldedInline, reviewedSha } = params;
+  const parts = [MAGPIE_REVIEW_MARKER];
+  if (reviewedSha) parts.push(buildReviewedShaMarker(reviewedSha));
+  parts.push(COMMENT_HEADER, "", summary.trim());
 
   const observations = renderOtherObservations(other, foldedInline ?? []);
   if (observations) parts.push("", observations);

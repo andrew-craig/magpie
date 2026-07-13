@@ -6,7 +6,7 @@ import type { Octokit } from "@octokit/rest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "./config.js";
 import { createReviewPipeline } from "./pipeline.js";
-import { MAGPIE_REVIEW_MARKER } from "./publisher.js";
+import { buildReviewedShaMarker, MAGPIE_REVIEW_MARKER } from "./publisher.js";
 import type { JobDescriptor } from "./queue.js";
 import type { CreateWorkspaceParams, Workspace } from "./workspace.js";
 
@@ -233,18 +233,45 @@ interface FakeFile {
   deletions: number;
 }
 
+/** Fixture shape for M5-C's `rest.issues.listComments` surface. */
+interface FakeIssueComment {
+  node_id: string;
+  body?: string | null;
+  created_at: string;
+}
+/** Fixture shape for M5-C's `rest.pulls.listReviews` surface. */
+interface FakeReview {
+  id: number;
+  node_id: string;
+  body?: string | null;
+  submitted_at?: string | null;
+}
+/** Fixture shape for M5-C's `rest.pulls.listReviewComments` surface. */
+interface FakeReviewComment {
+  node_id: string;
+  pull_request_review_id?: number | null;
+  created_at?: string;
+}
+
 /**
  * Builds a fake Octokit exposing exactly the surface the pipeline touches:
  * `rest.pulls.get` (called twice with different args — once for PR metadata
  * (now also carrying `head.sha`, used by the HEAD VERIFY race check — see
  * pipeline.ts), once by diff.ts with `mediaType: { format: "diff" }`),
- * `rest.pulls.listFiles` + `paginate` (diff.ts's file listing), and
- * `issues.createComment` (publisher.ts). Mirrors diff.test.ts's /
- * publisher.test.ts's fake-Octokit pattern.
+ * `rest.pulls.listFiles` + `paginate` (diff.ts's file listing),
+ * `issues.createComment` (publisher.ts), and — for M5-C's `readReviewState`/
+ * `minimizeOutdated` (rereview.ts) — `rest.issues.listComments`,
+ * `rest.pulls.listReviews`, `rest.pulls.listReviewComments`, and `graphql`.
+ * Mirrors diff.test.ts's / publisher.test.ts's fake-Octokit pattern.
  *
  * `head.sha` defaults to `"deadbeef"` — the same default `testJob()` uses for
  * `headSha` — so every existing test gets a MATCHING head unless it opts into
  * a mismatch via `opts.head`.
+ *
+ * `paginate` dispatches on the FUNCTION IDENTITY of its first argument
+ * (exactly like the real `octokit.paginate(fn, params)` API — see diff.ts's
+ * `listPrChangedFiles`), so a single fake `paginate` can serve `listFiles`,
+ * `listComments`, `listReviews`, and `listReviewComments` distinctly.
  */
 function fakeOctokit(opts: {
   title: string;
@@ -259,9 +286,32 @@ function fakeOctokit(opts: {
    * throws `compareError` to simulate a 404/API failure.
    */
   compare?: { status?: string; files?: FakeFile[]; compareDiffText?: string; compareError?: unknown };
+  /**
+   * Optional prior-review-state fixture for M5-C's dedup/minimize tests.
+   * Defaults to no prior magpie activity at all (empty everything).
+   */
+  reviewState?: {
+    issueComments?: FakeIssueComment[];
+    reviews?: FakeReview[];
+    reviewComments?: FakeReviewComment[];
+  };
+  /**
+   * Override the fake `graphql`'s behavior (e.g. to simulate a minimize
+   * failure). Defaults to resolving every call.
+   */
+  graphqlImpl?: (query: string, vars?: Record<string, unknown>) => Promise<unknown>;
 }) {
   const listFiles = vi.fn();
-  const paginate = vi.fn(async () => opts.files);
+  const listComments = vi.fn();
+  const listReviews = vi.fn();
+  const listReviewComments = vi.fn();
+  const paginate = vi.fn(async (fn: unknown) => {
+    if (fn === listFiles) return opts.files;
+    if (fn === listComments) return opts.reviewState?.issueComments ?? [];
+    if (fn === listReviews) return opts.reviewState?.reviews ?? [];
+    if (fn === listReviewComments) return opts.reviewState?.reviewComments ?? [];
+    return [];
+  });
   const head = opts.head ?? { sha: "deadbeef" };
   const get = vi.fn(async (args: { mediaType?: { format: string } }) => {
     if (args?.mediaType?.format === "diff") {
@@ -285,15 +335,33 @@ function fakeOctokit(opts: {
   const createReview = vi.fn(async (_args: unknown) => ({
     data: { id: 43, html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-43" },
   }));
+  const graphql = vi.fn(opts.graphqlImpl ?? (async () => ({})));
 
   const octokit = {
     paginate,
-    rest: { pulls: { get, listFiles }, repos: { compareCommitsWithBasehead } },
+    rest: {
+      pulls: { get, listFiles, listReviews, listReviewComments },
+      repos: { compareCommitsWithBasehead },
+      issues: { listComments },
+    },
     issues: { createComment },
     pulls: { createReview },
+    graphql,
   };
 
-  return { octokit, get, listFiles, paginate, compareCommitsWithBasehead, createComment, createReview };
+  return {
+    octokit,
+    get,
+    listFiles,
+    paginate,
+    compareCommitsWithBasehead,
+    createComment,
+    createReview,
+    listComments,
+    listReviews,
+    listReviewComments,
+    graphql,
+  };
 }
 
 /** Fake `createWorkspace`: a real throwaway temp dir, no git involved. */
@@ -1307,7 +1375,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
     // testConfig()'s maxDiffLines is 100; a 150-line incremental range is over
     // the cap, so the range is tooLarge -> summary-only, and the whole-PR file
     // list (a paginated listFiles call) must NOT be fetched.
-    const { octokit, paginate, compareCommitsWithBasehead, createComment, createReview } = fakeOctokit({
+    const { octokit, listFiles, compareCommitsWithBasehead, createComment, createReview } = fakeOctokit({
       title: "Big push",
       body: "body",
       files: [{ filename: "src/x.ts", additions: 1, deletions: 0 }],
@@ -1332,11 +1400,458 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
     expect(compareCommitsWithBasehead).toHaveBeenCalledTimes(1);
     // Efficiency: the whole-PR file list (paginated listFiles) is skipped when
     // the range is tooLarge — reviewChangedFiles is never read on that branch.
-    expect(paginate).not.toHaveBeenCalled();
+    // (`paginate` itself IS still called for M5-C's readReviewState — see the
+    // dedicated dedup/minimize describe block below — so assert on the
+    // specific `listFiles` fetcher, not on `paginate` having never run at all.)
+    expect(listFiles).not.toHaveBeenCalled();
     // Pi never ran; a summary-only skip comment was posted (not a review).
     expect(readRecordedStdin()).toBeUndefined();
     expect(createReview).not.toHaveBeenCalled();
     expect(createComment).toHaveBeenCalledTimes(1);
     expect(createComment.mock.calls[0][0].body).toMatch(/pushed since the last review/);
+  });
+});
+
+/** Fixture builder for a magpie-authored `issues.listComments` entry (M5-C). */
+function magpieIssueComment(overrides: Partial<{
+  node_id: string;
+  body: string;
+  created_at: string;
+}> = {}) {
+  return {
+    node_id: "IC_default",
+    body: `${MAGPIE_REVIEW_MARKER}\nMagpie could not complete a review of this PR.`,
+    created_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/** Fixture builder for a magpie-authored `pulls.listReviews` entry (M5-C). */
+function magpieReview(overrides: Partial<{
+  id: number;
+  node_id: string;
+  body: string;
+  submitted_at: string;
+}> = {}) {
+  return {
+    id: 1,
+    node_id: "PRR_default",
+    body: `${MAGPIE_REVIEW_MARKER}\nAll good.`,
+    submitted_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("createReviewPipeline / runJob — re-review dedup + comment minimization (M5-C)", () => {
+  it("dedup skip: a redelivered webhook for an already-reviewed head SHA is a complete no-op (no gateway key, no clone, no publish)", async () => {
+    // testJob()'s headSha defaults to "deadbeef" — the prior magpie review's
+    // reviewed-sha marker matches it exactly, so this delivery must be a
+    // true no-op: not just "skip publishing" but "skip everything after the
+    // token mint", per the module doc comment's placement of the dedup check
+    // before the gateway key mint / workspace clone.
+    const { octokit, createComment, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 1,
+            node_id: "PRR_1",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker("deadbeef")}\nAll good.`,
+          }),
+        ],
+      },
+    });
+    const { factory, createCalls } = fakeWorkspaceFactory();
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+    const mintGatewayKey = vi.fn(fakeMintGatewayKey);
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(mintGatewayKey).not.toHaveBeenCalled();
+    expect(createCalls).toHaveLength(0);
+    expect(createComment).not.toHaveBeenCalled();
+    expect(createReview).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "already-reviewed", lastReviewedSha: "deadbeef" }),
+    );
+  });
+
+  it("proceeds normally when the last-reviewed SHA differs from the current head SHA", async () => {
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 1,
+            node_id: "PRR_1",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker("some-older-sha")}\nAll good.`,
+          }),
+        ],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal); // headSha "deadbeef" != "some-older-sha"
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(events).not.toContainEqual(expect.objectContaining({ event: "already-reviewed" }));
+  });
+
+  it("proceeds normally (no dedup skip) when there is no prior magpie activity at all", async () => {
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("a review-state-read error is swallowed: the job proceeds (no skip) and does not crash", async () => {
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    // Break just the review-state read surface, independent of the diff.ts
+    // `listFiles` paginate call — simulates a transient GitHub API error
+    // while reading Magpie's prior comments/reviews.
+    const brokenPaginate = vi.fn(async (fn: unknown, params: unknown) => {
+      if (
+        fn === octokit.rest.issues.listComments ||
+        fn === octokit.rest.pulls.listReviews ||
+        fn === octokit.rest.pulls.listReviewComments
+      ) {
+        throw new Error("GitHub API unavailable");
+      }
+      return octokit.paginate(fn as never, params as never);
+    });
+    const brokenOctokit = { ...octokit, paginate: brokenPaginate };
+
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => brokenOctokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).resolves.toBeUndefined();
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual(expect.objectContaining({ event: "review-state-read-failed" }));
+    expect(events).not.toContainEqual(expect.objectContaining({ event: "already-reviewed" }));
+  });
+
+  it("embeds the reviewed-sha marker on a successful review", async () => {
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const body = createReview.mock.calls[0][0].body as string;
+    expect(body).toContain(buildReviewedShaMarker("deadbeef"));
+  });
+
+  it("embeds the reviewed-sha marker on a too-large skip", async () => {
+    const { octokit, createComment } = fakeOctokit({
+      title: "Huge PR",
+      body: null,
+      files: [{ filename: "big.ts", additions: 500, deletions: 500 }],
+      diffText: "should never be fetched",
+    });
+    const { factory } = fakeWorkspaceFactory();
+
+    const { runJob } = createReviewPipeline(testConfig({ maxDiffLines: 100 }), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).toContain(buildReviewedShaMarker("deadbeef"));
+  });
+
+  it("does NOT embed the reviewed-sha marker on a failed review", async () => {
+    const { octokit, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptFailing());
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).not.toContain("magpie:reviewed:");
+  });
+
+  it("minimizes prior minimizable nodes as OUTDATED after a successful publish, using the pre-publish snapshot (never the just-posted review)", async () => {
+    // Prior state: a magpie review (id 5) whose OWN node_id must NEVER be
+    // minimized (PullRequestReview isn't Minimizable), plus an inline review
+    // comment attached to that review, which MUST be minimized.
+    const { octokit, createReview, graphql } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 5,
+            node_id: "PRR_OLD",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker("older-sha")}\nOlder review.`,
+          }),
+        ],
+        reviewComments: [{ node_id: "PRRC_OLD", pull_request_review_id: 5, created_at: "2026-01-01T00:00:00Z" }],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal); // headSha "deadbeef" != "older-sha" -> proceeds
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(graphql).toHaveBeenCalledTimes(1);
+    const [query, vars] = graphql.mock.calls[0] as [string, { subjectId: string }];
+    expect(query).toContain("OUTDATED");
+    expect(vars.subjectId).toBe("PRRC_OLD");
+    // The prior review's OWN node_id is never targeted (not Minimizable).
+    expect(graphql.mock.calls.map((c) => (c[1] as { subjectId: string }).subjectId)).not.toContain("PRR_OLD");
+  });
+
+  it("does NOT minimize anything when the review fails", async () => {
+    const { octokit, createComment, graphql } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        issueComments: [magpieIssueComment({ node_id: "IC_OLD" })],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptFailing());
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(graphql).not.toHaveBeenCalled();
+  });
+
+  it("a GraphQL minimize error is swallowed — the job still reports a successful publish", async () => {
+    const { octokit, createReview, graphql } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        issueComments: [magpieIssueComment({ node_id: "IC_OLD" })],
+      },
+      graphqlImpl: async () => {
+        throw new Error("minimizeComment failed: insufficient permissions");
+      },
+    });
+    const { factory, cleanupCalls } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).resolves.toBeUndefined();
+
+    // The review itself still published successfully...
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(graphql).toHaveBeenCalledTimes(1);
+    // ...and the minimize failure was only logged, never thrown.
+    expect(events).toContainEqual(expect.objectContaining({ event: "minimize-outdated-failed", nodeId: "IC_OLD" }));
+    expect(cleanupCalls).toHaveLength(1);
+  });
+
+  it("incremental base preference: uses lastReviewedSha instead of job.before when available", async () => {
+    const LAST_REVIEWED = "c".repeat(40);
+    const BEFORE = "b".repeat(40);
+    const AFTER = "deadbeef"; // matches testJob().headSha, so HEAD VERIFY passes
+    const incrementalDiff = "diff --git a/src/new.ts b/src/new.ts\n+brand new line\n";
+
+    const { octokit, compareCommitsWithBasehead } = fakeOctokit({
+      title: "Add feature",
+      body: "body",
+      files: [{ filename: "src/new.ts", additions: 1, deletions: 0 }],
+      diffText: "diff --git a/WHOLE b/WHOLE\n+should NOT be sent\n",
+      compare: {
+        status: "ahead",
+        files: [{ filename: "src/new.ts", additions: 1, deletions: 0 }],
+        compareDiffText: incrementalDiff,
+      },
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 1,
+            node_id: "PRR_1",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker(LAST_REVIEWED)}\nAll good.`,
+          }),
+        ],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("Reviewed the new changes."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    // The compare range used lastReviewedSha, NOT job.before.
+    expect(compareCommitsWithBasehead).toHaveBeenCalledWith(
+      expect.objectContaining({ basehead: `${LAST_REVIEWED}...${AFTER}` }),
+    );
+    expect(compareCommitsWithBasehead).not.toHaveBeenCalledWith(
+      expect.objectContaining({ basehead: `${BEFORE}...${AFTER}` }),
+    );
+  });
+
+  it("incremental base falls back to job.before when there is no lastReviewedSha", async () => {
+    const BEFORE = "b".repeat(40);
+    const AFTER = "deadbeef";
+    const { octokit, compareCommitsWithBasehead } = fakeOctokit({
+      title: "Add feature",
+      body: "body",
+      files: [{ filename: "src/new.ts", additions: 1, deletions: 0 }],
+      diffText: "diff --git a/WHOLE b/WHOLE\n+should NOT be sent\n",
+      compare: {
+        status: "ahead",
+        files: [{ filename: "src/new.ts", additions: 1, deletions: 0 }],
+        compareDiffText: "diff --git a/src/new.ts b/src/new.ts\n+brand new line\n",
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("Reviewed."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob({ before: BEFORE, after: AFTER }), new AbortController().signal);
+
+    expect(compareCommitsWithBasehead).toHaveBeenCalledWith(
+      expect.objectContaining({ basehead: `${BEFORE}...${AFTER}` }),
+    );
   });
 });
