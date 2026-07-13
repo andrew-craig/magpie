@@ -2,14 +2,14 @@
 id: task_948f
 title: M5-C review fix: verify bot author in readReviewState (marker-spoof dedup DoS)
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_d6c1
 remote_task_url: null
 created_at: 2026-07-13T07:42:20Z
-updated_at: 2026-07-13T07:42:24Z
+updated_at: 2026-07-13T08:10:06Z
 ---
 
 ## Bug
@@ -62,3 +62,6 @@ Files touched: `packages/orchestrator/src/github.ts`,
 and their three `*.test.ts` files. Committed to `m5-rereview-dedup`; not
 pushed, PR untouched, task left `in_progress` per the brief — tech lead to
 review, close, and handle the live deploy/PR.
+
+## Tech-lead review (2026-07-13) — ACCEPTED
+Diff reviewed (github.ts + rereview.ts + pipeline.ts) + suite re-run independently: 311 tests (gw 55 / orch 245 / rev-ext 11), tsc clean, biome exit 0. `isMagpieAuthored` requires `user.type==="Bot" && user.login===botLogin` + marker, applied to BOTH issue-comment and review filters (hardens minimize path too); empty botLogin short-circuits to empty state; getAppBotLogin uses app-JWT (separate Octokit), memoizes success only, no unhandled rejection. pipeline resolves botLogin + readReviewState under one try/catch → fails toward doing-the-review. Closes the marker-spoof dedup DoS magpie's own PR#37 review found.
