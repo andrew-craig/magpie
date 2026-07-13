@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_e365** · P1 · in_progress · M7-0: Feasibility spike — Pi reaches the gateway over a unix socket via an in-container forwarder  (parent: epic_0162)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **task_00d0** · P1 · open · M7-2: Publish magpie-reviewer image to GHCR — multi-arch, digest-pinned, signed + release CI  (parent: epic_0162)
