@@ -33,6 +33,20 @@ async function fakeMintGatewayKey(): Promise<{ id: string; key: string }> {
 }
 async function fakeRevokeGatewayKey(): Promise<void> {}
 
+// Default fake bot-login resolver (M5-C hardening / task_948f): a fixed
+// value so `readReviewState` (rereview.ts) always sees a real, non-empty
+// `botLogin` to author-match against, and so runJob never reaches for the
+// real GitHub App JWT auth flow / network (see github.ts's `getAppBotLogin`)
+// during a test run — every `createReviewPipeline` call in this file injects
+// this in place of the real default (`getAppBotLoginFromConfig`). The M5-C
+// dedup/minimize fixtures below (`magpieIssueComment`/`magpieReview`) default
+// their `user.login` to this exact value so they're recognized as Magpie's
+// own by the new author-identity check.
+const FAKE_BOT_LOGIN = "magpie-app[bot]";
+async function fakeGetBotLogin(): Promise<string> {
+  return FAKE_BOT_LOGIN;
+}
+
 let root: string;
 
 beforeEach(() => {
@@ -233,11 +247,17 @@ interface FakeFile {
   deletions: number;
 }
 
+/** Author fields the M5-C author-identity check reads (task_948f). */
+interface FakeAuthor {
+  login?: string | null;
+  type?: string | null;
+}
 /** Fixture shape for M5-C's `rest.issues.listComments` surface. */
 interface FakeIssueComment {
   node_id: string;
   body?: string | null;
   created_at: string;
+  user?: FakeAuthor | null;
 }
 /** Fixture shape for M5-C's `rest.pulls.listReviews` surface. */
 interface FakeReview {
@@ -245,6 +265,7 @@ interface FakeReview {
   node_id: string;
   body?: string | null;
   submitted_at?: string | null;
+  user?: FakeAuthor | null;
 }
 /** Fixture shape for M5-C's `rest.pulls.listReviewComments` surface. */
 interface FakeReviewComment {
@@ -403,6 +424,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -463,6 +485,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -525,6 +548,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -575,6 +599,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -607,6 +632,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -633,6 +659,7 @@ describe("createReviewPipeline / runJob", () => {
       mintToken,
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -676,6 +703,7 @@ describe("createReviewPipeline / runJob", () => {
         mintToken,
         mintGatewayKey: fakeMintGatewayKey,
         revokeGatewayKey: fakeRevokeGatewayKey,
+        getBotLogin: fakeGetBotLogin,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -718,6 +746,7 @@ describe("createReviewPipeline / runJob", () => {
         mintToken,
         mintGatewayKey: fakeMintGatewayKey,
         revokeGatewayKey: fakeRevokeGatewayKey,
+        getBotLogin: fakeGetBotLogin,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
         piBinary,
@@ -752,6 +781,7 @@ describe("createReviewPipeline / runJob", () => {
         mintToken,
         mintGatewayKey: fakeMintGatewayKey,
         revokeGatewayKey: fakeRevokeGatewayKey,
+        getBotLogin: fakeGetBotLogin,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -786,6 +816,7 @@ describe("createReviewPipeline / runJob", () => {
         mintToken,
         mintGatewayKey: fakeMintGatewayKey,
         revokeGatewayKey: fakeRevokeGatewayKey,
+        getBotLogin: fakeGetBotLogin,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
       });
@@ -828,6 +859,7 @@ describe("createReviewPipeline / runJob", () => {
         mintToken,
         mintGatewayKey: fakeMintGatewayKey,
         revokeGatewayKey: fakeRevokeGatewayKey,
+        getBotLogin: fakeGetBotLogin,
         makeOctokit: () => octokit as unknown as Octokit,
         createWorkspace: factory,
         piBinary,
@@ -897,6 +929,7 @@ describe("createReviewPipeline / runJob", () => {
           mintToken,
           mintGatewayKey: fakeMintGatewayKey,
           revokeGatewayKey: fakeRevokeGatewayKey,
+          getBotLogin: fakeGetBotLogin,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -947,6 +980,7 @@ describe("createReviewPipeline / runJob", () => {
           mintToken,
           mintGatewayKey: fakeMintGatewayKey,
           revokeGatewayKey: fakeRevokeGatewayKey,
+          getBotLogin: fakeGetBotLogin,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -994,6 +1028,7 @@ describe("createReviewPipeline / runJob", () => {
           mintToken,
           mintGatewayKey: fakeMintGatewayKey,
           revokeGatewayKey: fakeRevokeGatewayKey,
+          getBotLogin: fakeGetBotLogin,
           makeOctokit: () => octokit as unknown as Octokit,
           createWorkspace: factory,
         });
@@ -1050,6 +1085,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1082,6 +1118,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1108,6 +1145,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1137,6 +1175,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: throwingWorkspace,
     });
@@ -1172,6 +1211,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1197,6 +1237,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -1220,6 +1261,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
       mintToken,
       mintGatewayKey,
       revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -1273,6 +1315,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1320,6 +1363,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1358,6 +1402,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1389,6 +1434,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1417,11 +1463,15 @@ function magpieIssueComment(overrides: Partial<{
   node_id: string;
   body: string;
   created_at: string;
+  user: FakeAuthor | null;
 }> = {}) {
   return {
     node_id: "IC_default",
     body: `${MAGPIE_REVIEW_MARKER}\nMagpie could not complete a review of this PR.`,
     created_at: "2026-01-01T00:00:00Z",
+    // Matches fakeGetBotLogin()'s FAKE_BOT_LOGIN — this fixture represents a
+    // GENUINE Magpie comment (see task_948f's author-identity check).
+    user: { login: FAKE_BOT_LOGIN, type: "Bot" },
     ...overrides,
   };
 }
@@ -1432,12 +1482,14 @@ function magpieReview(overrides: Partial<{
   node_id: string;
   body: string;
   submitted_at: string;
+  user: FakeAuthor | null;
 }> = {}) {
   return {
     id: 1,
     node_id: "PRR_default",
     body: `${MAGPIE_REVIEW_MARKER}\nAll good.`,
     submitted_at: "2026-01-01T00:00:00Z",
+    user: { login: FAKE_BOT_LOGIN, type: "Bot" },
     ...overrides,
   };
 }
@@ -1473,6 +1525,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken,
       mintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       logger,
@@ -1513,6 +1566,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1539,6 +1593,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1579,6 +1634,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => brokenOctokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1606,6 +1662,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1630,6 +1687,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
     });
@@ -1654,6 +1712,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1692,6 +1751,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1725,6 +1785,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1757,6 +1818,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1806,6 +1868,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
@@ -1843,6 +1906,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
       mintToken: async () => ({ token: FAKE_TOKEN }),
       mintGatewayKey: fakeMintGatewayKey,
       revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,

@@ -23,9 +23,18 @@
 //      or cloning, so a redelivered webhook for an already-reviewed head SHA
 //      is a true no-op: no wasted gateway budget, no wasted clone. If
 //      `lastReviewedSha === job.headSha`, log `event:"already-reviewed"` and
-//      return without doing anything else. A failure reading state is
-//      logged and treated as "not reviewed" (best-effort, never fails the
-//      job) — see the try/catch below. The returned `minimizableNodeIds`
+//      return without doing anything else. Before calling `readReviewState`
+//      this step first resolves Magpie's own bot login (github.ts's
+//      `getAppBotLogin`, via the `getBotLogin` dep) and passes it through —
+//      `readReviewState` needs it to verify a comment/review's AUTHOR
+//      identity, not just the forgeable `MAGPIE_REVIEW_MARKER` body literal
+//      (see rereview.ts's module doc comment SECURITY section: without this,
+//      a malicious PR author could spoof a "reviewed" marker for the current
+//      head SHA and silently DoS the bot into skipping their own PR). BOTH
+//      the bot-login resolution and the `readReviewState` call are wrapped in
+//      ONE try/catch: a failure at EITHER step is logged and treated as "not
+//      reviewed" (best-effort, never fails the job, never wrongly skips a
+//      review) — see the try/catch below. The returned `minimizableNodeIds`
 //      snapshot is threaded through to step 7's post-publish minimize call.
 //   2a. Mint ONE fresh gateway virtual key (gateway.ts's
 //      `mintGatewayKeyFromConfig`, M4-B) scoped to `config.llm.model`, with a
@@ -114,7 +123,7 @@ import type { PrDiffResult } from "./diff.js";
 import { computeIncrementalDiff, computePrDiff, listPrChangedFiles } from "./diff.js";
 import type { GatewayKey } from "./gateway.js";
 import { mintGatewayKeyFromConfig, revokeGatewayKeyFromConfig } from "./gateway.js";
-import { mintInstallationTokenFromConfig } from "./github.js";
+import { getAppBotLoginFromConfig, mintInstallationTokenFromConfig } from "./github.js";
 import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
 import type { ReviewState } from "./rereview.js";
@@ -171,6 +180,17 @@ export interface PipelineDeps {
   mintToken?: (config: Config, installationId: number) => Promise<{ token: string }>;
   /** Defaults to `(token) => new Octokit({ auth: token })`. */
   makeOctokit?: (token: string) => Octokit;
+  /**
+   * Resolve Magpie's own GitHub App bot login (e.g. `"my-magpie-app[bot]"`),
+   * threaded into rereview.ts's `readReviewState` so it can verify a prior
+   * comment/review's AUTHOR identity instead of trusting the forgeable
+   * `MAGPIE_REVIEW_MARKER` body literal alone (see rereview.ts's module doc
+   * comment SECURITY section and step 2z above). Defaults to
+   * {@link getAppBotLoginFromConfig}. Overridable so pipeline.test.ts can
+   * supply a fixed bot login without a real GitHub App or network call —
+   * production callers (index.ts) leave it undefined.
+   */
+  getBotLogin?: (config: Config) => Promise<string>;
   /** Forwarded to `runReview` as its `piBinary` test seam; see reviewer.ts. */
   piBinary?: string;
   /** Defaults to {@link createWorkspace}. Overridable so tests can skip real git. */
@@ -211,6 +231,7 @@ export function createReviewPipeline(
   const logger = deps.logger ?? consoleLogger;
   const mintToken = deps.mintToken ?? mintInstallationTokenFromConfig;
   const makeOctokit = deps.makeOctokit ?? ((token: string) => new Octokit({ auth: token }));
+  const getBotLogin = deps.getBotLogin ?? getAppBotLoginFromConfig;
   const makeWorkspace = deps.createWorkspace ?? createWorkspace;
   const mintGatewayKey = deps.mintGatewayKey ?? mintGatewayKeyFromConfig;
   const revokeGatewayKey =
@@ -238,22 +259,28 @@ export function createReviewPipeline(
     // Step 2z: re-review dedup (M5-C, see module doc comment). Read Magpie's
     // own prior review state for this PR BEFORE spending anything else on
     // this job (gateway budget, a clone) — a redelivered webhook for a head
-    // SHA already definitively reviewed is a no-op from here. `readReviewState`
-    // is a plain GitHub read with no side effects, so a failure here is
-    // swallowed and treated as "not reviewed yet" rather than failing the
-    // job — losing the dedup optimization for one job is far cheaper than
-    // failing (or wrongly skipping) a review over a transient API hiccup.
+    // SHA already definitively reviewed is a no-op from here. Resolving the
+    // bot login and calling `readReviewState` are both plain GitHub reads
+    // with no side effects, so a failure at EITHER step is swallowed and
+    // treated as "not reviewed yet" rather than failing the job — losing the
+    // dedup optimization for one job is far cheaper than failing (or, worse,
+    // WRONGLY SKIPPING) a review over a transient API hiccup or an
+    // unresolvable identity. See rereview.ts's module doc comment SECURITY
+    // section for why `readReviewState` needs `botLogin` at all: the old
+    // marker-only check was forgeable by any PR commenter.
     logger.info({ event: "reading-review-state", ...jobLogFields(job) });
     let reviewState: ReviewState = {
       lastReviewedSha: undefined,
       minimizableNodeIds: [],
     };
     try {
+      const botLogin = await getBotLogin(config);
       reviewState = await readReviewState({
         octokit,
         owner: job.owner,
         repo: job.repo,
         prNumber: job.prNumber,
+        botLogin,
       });
     } catch (err) {
       logger.error({

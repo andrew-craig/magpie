@@ -28,15 +28,56 @@
 // comments are minimizable. Superseded review summary bodies simply stay
 // visible on the PR — an accepted trade-off, not a bug.
 //
-// Every "is this comment/review mine?" check below keys off
-// `MAGPIE_REVIEW_MARKER` (publisher.ts) being present in the body — the same
-// identity marker every Magpie-authored comment or review body has carried
-// since M1. Inline review comments never carry their own marker (GitHub
-// renders `pulls.createReview`'s `comments[]` as plain review-comment bodies,
-// with no room to prepend an HTML-comment marker without it showing up next
-// to the finding text), so an inline comment is instead attributed to Magpie
-// by its `pull_request_review_id` belonging to one of Magpie's OWN review ids
-// (i.e. reviews whose body carries the marker).
+// Every "is this comment/review mine?" check below requires BOTH of:
+//
+//   1. AUTHOR IDENTITY — `user.type === "Bot"` AND `user.login === botLogin`,
+//      where `botLogin` is Magpie's own GitHub App bot login as resolved by
+//      github.ts's `getAppBotLogin` (e.g. `"my-magpie-app[bot]"`), passed in
+//      by the caller (pipeline.ts).
+//   2. `MAGPIE_REVIEW_MARKER` (publisher.ts) present in the body — the same
+//      identity marker every Magpie-authored comment or review body has
+//      carried since M1.
+//
+// SECURITY: the marker alone is NOT sufficient — it's a public HTML-comment
+// literal (`<!-- magpie-review -->`) that appears verbatim in this repo's
+// source, so ANY PR commenter (including the PR's own, possibly malicious,
+// author) can post an issue comment or review whose body contains
+// `<!-- magpie-review --><!-- magpie:reviewed:<current-head-sha> -->` and
+// spoof a "Magpie already reviewed this head SHA" marker. Before this
+// author-identity check was added, that spoofed marker would flow straight
+// into `lastReviewedSha`, and pipeline.ts's dedup check
+// (`lastReviewedSha === job.headSha`) would silently skip reviewing that
+// head SHA entirely — a denial-of-service against the bot, triggerable by
+// exactly the adversarial PR-author input Magpie exists to defend against.
+// Requiring `user.type === "Bot"` AND `user.login === botLogin` closes that:
+// GitHub does not let a non-App account set either field to Magpie's own
+// values, so a forged body alone can no longer pass this check. The marker
+// check is KEPT (not dropped) as defense-in-depth and because it's still how
+// the reviewed-sha payload itself is located in the body.
+//
+// Inline review comments never carry their own marker (GitHub renders
+// `pulls.createReview`'s `comments[]` as plain review-comment bodies, with no
+// room to prepend an HTML-comment marker without it showing up next to the
+// finding text), so an inline comment is instead attributed to Magpie by its
+// `pull_request_review_id` belonging to one of Magpie's OWN review ids (i.e.
+// reviews that pass the author-identity + marker check above). Hardening the
+// review filter therefore also hardens this inline-comment/minimize
+// attribution path against a spoofed review object — a forged review would
+// need real Bot-App credentials to pass the author check, not just a copied
+// marker string.
+//
+// GRACEFUL DEGRADATION: if the caller could not resolve its own bot login
+// (github.ts's `getAppBotLogin` failed) it cannot safely pass a real value
+// here. `botLogin` is a REQUIRED param specifically so callers can't
+// accidentally omit it, but a caller unable to resolve it should pass `""`
+// (empty string) — see `isMagpieAuthored` below, which treats an empty/falsy
+// `botLogin` as "trust NOTHING as Magpie's own", returning an empty
+// `ReviewState`. This fails toward DOING the review (never wrongly skipping
+// one) and skipping minimize — the safe direction. pipeline.ts additionally
+// wraps its whole botLogin-resolve + `readReviewState` call in a try/catch
+// that treats a thrown resolution failure the same way (falls back to the
+// same empty default state), so an unresolved identity can never cause a
+// dedup skip either way.
 
 import type { Octokit } from "@octokit/rest";
 import { MAGPIE_REVIEW_MARKER, parseReviewedSha } from "./publisher.js";
@@ -61,6 +102,17 @@ export interface ReadReviewStateParams {
   owner: string;
   repo: string;
   prNumber: number;
+  /**
+   * Magpie's own GitHub App bot login (e.g. `"my-magpie-app[bot]"`), as
+   * resolved by github.ts's `getAppBotLogin`. REQUIRED — every "is this
+   * mine?" check below is gated on `user.type === "Bot" && user.login ===
+   * botLogin` in addition to the `MAGPIE_REVIEW_MARKER` body check (see the
+   * module doc comment's SECURITY section for why the marker alone isn't
+   * enough). Pass `""` if the caller could not resolve its own bot login —
+   * see the module doc comment's GRACEFUL DEGRADATION section for why that's
+   * the safe way to call this, not an error.
+   */
+  botLogin: string;
 }
 
 /** Result of {@link readReviewState} — see module doc comment. */
@@ -83,6 +135,18 @@ export interface ReviewState {
   minimizableNodeIds: string[];
 }
 
+/**
+ * The author fields this module reads off a comment/review entry to verify
+ * identity — see the module doc comment's SECURITY section. GitHub sets
+ * `type: "Bot"` and `login: "<slug>[bot]"` on every comment/review posted by
+ * a GitHub App installation token; no non-App account can produce either
+ * value for Magpie's own login.
+ */
+interface AuthorLike {
+  login?: string | null;
+  type?: string | null;
+}
+
 /** Just the fields this module reads off a `pulls.listReviews` entry. */
 interface ReviewLike {
   id: number;
@@ -90,6 +154,7 @@ interface ReviewLike {
   body?: string | null;
   /** PullRequestReview's timestamp field — note this is NOT `created_at`. */
   submitted_at?: string | null;
+  user?: AuthorLike | null;
 }
 
 /** Just the fields this module reads off an `issues.listComments` entry. */
@@ -97,6 +162,7 @@ interface IssueCommentLike {
   node_id: string;
   body?: string | null;
   created_at: string;
+  user?: AuthorLike | null;
 }
 
 /** Just the fields this module reads off a `pulls.listReviewComments` entry. */
@@ -116,10 +182,15 @@ interface TimestampedMagpieBody {
  * GitHub (see module doc comment — no local persistence).
  *
  * Flow:
+ *   0. If `botLogin` is empty (caller couldn't resolve its own identity),
+ *      short-circuit to an empty `ReviewState` — see GRACEFUL DEGRADATION in
+ *      the module doc comment.
  *   1. Paginate all three comment/review surfaces in parallel:
  *      `issues.listComments`, `pulls.listReviews`, `pulls.listReviewComments`.
- *   2. Filter each to Magpie's own: issue comments/reviews by
- *      `MAGPIE_REVIEW_MARKER` in the body; inline review comments by
+ *   2. Filter each to Magpie's own: issue comments/reviews by AUTHOR IDENTITY
+ *      (`user.type === "Bot" && user.login === botLogin`) PLUS
+ *      `MAGPIE_REVIEW_MARKER` in the body (see module doc comment's SECURITY
+ *      section for why both checks are required); inline review comments by
  *      `pull_request_review_id` belonging to one of Magpie's own review ids
  *      (collected from step 2's review filter).
  *   3. `lastReviewedSha`: among Magpie's own issue comments + reviews (the
@@ -138,7 +209,15 @@ interface TimestampedMagpieBody {
  * comment) so a transient GitHub API error here never fails the job.
  */
 export async function readReviewState(params: ReadReviewStateParams): Promise<ReviewState> {
-  const { octokit, owner, repo, prNumber } = params;
+  const { octokit, owner, repo, prNumber, botLogin } = params;
+
+  // GRACEFUL DEGRADATION (see module doc comment): an empty botLogin means
+  // the caller couldn't resolve Magpie's own identity, so nothing can be
+  // safely trusted as Magpie's own. Short-circuit BEFORE even paginating —
+  // there's no point reading state we're going to discard.
+  if (!botLogin) {
+    return { lastReviewedSha: undefined, minimizableNodeIds: [] };
+  }
 
   const [issueComments, reviews, reviewComments] = await Promise.all([
     octokit.paginate(octokit.rest.issues.listComments, {
@@ -161,8 +240,8 @@ export async function readReviewState(params: ReadReviewStateParams): Promise<Re
     }) as Promise<ReviewCommentLike[]>,
   ]);
 
-  const magpieIssueComments = issueComments.filter((c) => isMagpieBody(c.body));
-  const magpieReviews = reviews.filter((r) => isMagpieBody(r.body));
+  const magpieIssueComments = issueComments.filter((c) => isMagpieAuthored(c.user, c.body, botLogin));
+  const magpieReviews = reviews.filter((r) => isMagpieAuthored(r.user, r.body, botLogin));
   const magpieReviewIds = new Set(magpieReviews.map((r) => r.id));
   const magpieReviewComments = reviewComments.filter(
     (rc) => rc.pull_request_review_id != null && magpieReviewIds.has(rc.pull_request_review_id),
@@ -183,6 +262,24 @@ export async function readReviewState(params: ReadReviewStateParams): Promise<Re
   ];
 
   return { lastReviewedSha, minimizableNodeIds };
+}
+
+/**
+ * A comment/review counts as Magpie's own only when ALL of: it's authored by
+ * a Bot account, that account's login is exactly Magpie's own `botLogin`, and
+ * its body carries `MAGPIE_REVIEW_MARKER`. See the module doc comment's
+ * SECURITY section for why the marker alone (the old M5-C behavior) is
+ * forgeable by any PR commenter, and GRACEFUL DEGRADATION for why an
+ * empty/falsy `botLogin` unconditionally returns `false` here (belt-and-braces
+ * alongside `readReviewState`'s own early-return short-circuit above).
+ */
+function isMagpieAuthored(
+  user: AuthorLike | null | undefined,
+  body: string | null | undefined,
+  botLogin: string,
+): boolean {
+  if (!botLogin) return false;
+  return user?.type === "Bot" && user?.login === botLogin && isMagpieBody(body);
 }
 
 function isMagpieBody(body: string | null | undefined): boolean {

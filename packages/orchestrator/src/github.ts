@@ -119,3 +119,112 @@ export async function mintInstallationTokenFromConfig(
     installationId,
   });
 }
+
+/** Credentials needed to resolve Magpie's own GitHub App bot login (see {@link getAppBotLogin}). */
+export interface AppBotLoginCreds {
+  /** The GitHub App's numeric ID (as a string; GitHub accepts either). */
+  appId: string;
+  /** PEM contents of the GitHub App's private key. */
+  privateKey: string;
+}
+
+/**
+ * Injectable seam for {@link getAppBotLogin}'s Octokit construction, so tests
+ * can supply a fake `apps.getAuthenticated()` without real credentials or
+ * network access — mirrors the rest of this file's "take injected creds"
+ * style, and pipeline.ts's `PipelineDeps` pattern.
+ */
+export interface GetAppBotLoginDeps {
+  /** Defaults to a real `new Octokit({ authStrategy: createAppAuth, ... })` client. */
+  makeAppOctokit?: (creds: AppBotLoginCreds) => Octokit;
+}
+
+/**
+ * Module-scope cache for {@link getAppBotLogin}'s result. A GitHub App's own
+ * identity (and therefore its bot login) never changes for the lifetime of a
+ * process, so this is resolved AT MOST ONCE per process and every subsequent
+ * call reuses the same in-flight/resolved promise. A FAILED resolution is
+ * deliberately NOT cached (see the `.catch` below) so a transient failure
+ * (e.g. GitHub API hiccup) doesn't permanently wedge every later call — only
+ * a genuine success is memoized forever.
+ */
+let cachedBotLogin: Promise<string> | undefined;
+
+/**
+ * Resolve Magpie's own GitHub App bot login — the exact `user.login` GitHub
+ * attaches to every comment/review this App posts (always `"<slug>[bot]"`).
+ *
+ * SECURITY: this is the identity rereview.ts's `readReviewState` verifies a
+ * comment/review's `user.login`/`user.type` against before trusting its body
+ * as Magpie's own. The body-only `MAGPIE_REVIEW_MARKER` check it used to rely
+ * on is a public HTML-comment literal any PR commenter can forge in their own
+ * issue comment or review — without this author check, a malicious PR author
+ * could spoof a "reviewed" marker for the current head SHA and silently make
+ * Magpie skip reviewing their own PR (a DoS against the bot, not a leak).
+ *
+ * NOTE: `GET /app` (`apps.getAuthenticated`) requires APP-JWT auth, not an
+ * installation access token — that's why this builds its OWN
+ * `createAppAuth`-strategy Octokit (no `installationId`) rather than reusing
+ * the per-job installation Octokit the rest of the pipeline uses. When
+ * `@octokit/auth-app` is configured without an `installationId`, its request
+ * hook automatically signs `GET /app` with the App JWT instead of an
+ * installation token — the same auth-selection behavior
+ * `createInstallationOctokit` above relies on for installation-scoped calls.
+ *
+ * Memoized at module scope — see {@link cachedBotLogin}'s doc comment; this
+ * function is safe to call once per job without re-hitting the GitHub API
+ * every time.
+ */
+export async function getAppBotLogin(
+  creds: AppBotLoginCreds,
+  deps: GetAppBotLoginDeps = {},
+): Promise<string> {
+  if (cachedBotLogin === undefined) {
+    const makeAppOctokit =
+      deps.makeAppOctokit ??
+      ((c: AppBotLoginCreds) =>
+        new Octokit({
+          authStrategy: createAppAuth,
+          auth: { appId: c.appId, privateKey: c.privateKey },
+        }));
+
+    cachedBotLogin = (async () => {
+      const octokit = makeAppOctokit(creds);
+      const { data } = await octokit.rest.apps.getAuthenticated();
+      const slug = data?.slug;
+      if (!slug) {
+        throw new Error("GET /app returned no `slug` — cannot resolve Magpie's own bot login");
+      }
+      return `${slug}[bot]`;
+    })();
+
+    // Don't memoize a rejection — let the NEXT call retry from scratch
+    // instead of permanently wedging every future call on one transient
+    // failure. Attached synchronously so this rejection is always observed
+    // (no unhandled-rejection warning) regardless of whether the caller awaits.
+    cachedBotLogin.catch(() => {
+      cachedBotLogin = undefined;
+    });
+  }
+  return cachedBotLogin;
+}
+
+/**
+ * Convenience adapter: resolve Magpie's own bot login using credentials
+ * pulled from the loaded {@link Config}, mirroring
+ * {@link mintInstallationTokenFromConfig}. `getAppBotLogin` still takes
+ * injected credentials directly so it stays unit-testable without a config
+ * file.
+ */
+export async function getAppBotLoginFromConfig(
+  config: GithubAuthConfig,
+  deps: GetAppBotLoginDeps = {},
+): Promise<string> {
+  return getAppBotLogin(
+    {
+      appId: config.github.appId,
+      privateKey: config.secrets.githubPrivateKey,
+    },
+    deps,
+  );
+}
