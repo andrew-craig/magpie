@@ -2,14 +2,14 @@
 id: task_4a75
 title: M5-C: re-review dedup + comment minimization — reviewed-SHA marker, minimizeComment(OUTDATED)
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_d6c1
 remote_task_url: null
 created_at: 2026-07-10T21:52:22Z
-updated_at: 2026-07-12T23:07:28Z
+updated_at: 2026-07-13T07:37:45Z
 ---
 Wave 2 (builds on M5-B's synchronize handling). PLAN.md §7 re-review dedup, so the PR doesn't fill with stale bot reviews.
 
