@@ -29,7 +29,9 @@
 #                             secret known to both processes. It is NOT the real
 #                             OpenRouter key (that is the gateway's
 #                             MAGPIE_GATEWAY_OPENROUTER_KEY, which this
-#                             orchestrator never has or needs).
+#                             orchestrator never has or needs). Generate it
+#                             once with `openssl rand -hex 32` and use the
+#                             SAME value for both env files.
 # ---------------------------------------------------------------------------
 #
 # NOTE (M4-C): there is deliberately no MAGPIE_LLM_API_KEY here. The real

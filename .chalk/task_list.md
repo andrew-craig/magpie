@@ -9,7 +9,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_624f** · P2 · open · M7-5: Pluggable ingress — reverse-proxy + Cloudflare-Tunnel (multi-arch host binary) + tunnel docs  (parent: epic_0162)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **task_d8b1** · P2 · open · M7-6: Onboarding docs — QUICKSTART.md, generated master key, secret consolidation  (parent: epic_0162)
-- **task_ecbf** · P2 · open · M7-4: Config portability — delete pinned IPs/subnet; gateway address becomes a socket path; keep secret split  (parent: epic_0162)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
 - **task_624d** · P3 · open · M6-C: gVisor (runsc) runtime for the reviewer container  (parent: epic_3c41)

@@ -213,6 +213,7 @@ MAGPIE_CONFIG=$ETC_MAGPIE/config.toml
 MAGPIE_WEBHOOK_SECRET=
 # Shared bearer token for the gateway management plane. REQUIRED and MUST be
 # the SAME value as MAGPIE_GATEWAY_MASTER_KEY in $ETC_GATEWAY/gateway.env.
+# Generate it once with: openssl rand -hex 32
 MAGPIE_GATEWAY_MASTER_KEY=
 EOF
 
@@ -223,6 +224,7 @@ seed_file "$ETC_GATEWAY/gateway.env" magpie-gateway 0600 <<'EOF'
 MAGPIE_GATEWAY_OPENROUTER_KEY=
 # Management-plane bearer token. REQUIRED and MUST equal the orchestrator's
 # MAGPIE_GATEWAY_MASTER_KEY (one shared secret known to both processes).
+# Generate it once with: openssl rand -hex 32
 MAGPIE_GATEWAY_MASTER_KEY=
 # No proxy-plane host/port to set: as of M7-1 (Design D) the proxy plane is a
 # per-job UNIX SOCKET under systemd's RuntimeDirectory (see
@@ -307,7 +309,8 @@ cat <<NOTES
   1. Fill in secrets (the templates were seeded empty):
        sudoedit $ETC_GATEWAY/gateway.env     # OpenRouter key + shared master key
        sudoedit $ETC_MAGPIE/magpie.env       # webhook secret + SAME master key
-     The master key MUST match in both files.
+     The master key MUST match in both files. Generate the shared master key
+     once with:  openssl rand -hex 32
 
   2. Edit $ETC_MAGPIE/config.toml (app id, private_key_path, repo_allowlist,
      model). No network/firewall config needed — every review container runs
