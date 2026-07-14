@@ -115,13 +115,15 @@ work_dir = "/var/lib/magpie/work"
 # orchestrator + gateway are host services). As of M7-2 this is PUBLISHED to
 # GHCR — built multi-arch (amd64+arm64) and cosign-signed with SLSA provenance
 # by .github/workflows/release-reviewer.yml on `reviewer-v*` tags — so adopters
-# `docker pull` it rather than building locally. In PRODUCTION, PIN BY DIGEST
-# (e.g. "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:<digest>") so a
-# re-tagged upstream image can't silently swap the untrusted-content runtime
-# under you; the plain tag below is the floor. `scripts/build-reviewer-image.sh`
-# is now for LOCAL DEVELOPMENT ONLY (it builds a `magpie-reviewer:*` image).
-# Default: "ghcr.io/andrew-craig/magpie/reviewer:0.2.0"
-image = "ghcr.io/andrew-craig/magpie/reviewer:0.2.0"
+# `docker pull` it rather than building locally. The value below is PINNED BY
+# DIGEST (the `@sha256:` is the multi-arch image-index digest, so a re-tagged
+# upstream image can't silently swap the untrusted-content runtime under you);
+# the `:0.2.0` tag is human-readable provenance only. Verify the signature
+# before trusting a new digest (see docker/reviewer/README.md, "Published
+# image"). `scripts/build-reviewer-image.sh` is now for LOCAL DEVELOPMENT ONLY
+# (it builds a `magpie-reviewer:*` image you'd point this at instead).
+# Default: "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed"
+image = "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed"
 
 # Memory limit passed to `docker run --memory` for the review container.
 # Bounds how much host memory a single (possibly prompt-injected) review job
