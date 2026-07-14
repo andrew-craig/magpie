@@ -13,9 +13,19 @@
 # none`, so there is no bridge/iptables apparatus to provision at boot
 # (magpie-firewall.service and scripts/setup-network.sh are deleted).
 #
-# It does NOT build the code and does NOT start the services — building runs as
-# the operator (not root), and enabling is a deliberate final step once secrets
-# are filled in. Both are printed as clear next steps at the end.
+# It does NOT install dependencies or build the code, and does NOT start the
+# services — that runs as the operator (not root), and enabling is a
+# deliberate final step once secrets are filled in. Both are printed as clear
+# next steps at the end.
+#
+# PRIMARY FLOW (M7-3): download a release tarball (built by
+# scripts/pack-host.sh / .github/workflows/release-host.yml — see
+# INSTALL.md), unpack it to /opt/magpie (or MAGPIE_PREFIX), then:
+#   sudo ./scripts/install.sh
+#   npm ci --omit=dev            # dist/ ships prebuilt in the tarball; no build step
+# A raw git checkout (no dist/ yet) instead needs the full
+# `npm ci && npm run build && npm run gateway:build` — this script detects
+# which case applies and prints the right next step.
 #
 # Usage:
 #   sudo ./scripts/install.sh            # install units + scaffolding
@@ -48,7 +58,7 @@ ENABLE_UNITS=0
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE_UNITS=1 ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -275,6 +285,21 @@ fi
 DIST_ORCH="$PREFIX/packages/orchestrator/dist/index.js"
 DIST_GW="$PREFIX/packages/gateway/dist/index.js"
 
+# A release tarball (scripts/pack-host.sh) ships prebuilt dist/ for both
+# services, so the only remaining step is `npm ci --omit=dev` to materialize
+# node_modules — there is no TypeScript build on the adopter host. A raw git
+# checkout has no dist/ yet, so it still needs the full build.
+if [[ -f "$DIST_ORCH" && -f "$DIST_GW" ]]; then
+  STEP4="  4. Install production dependencies (as your normal user, from $PREFIX):
+       npm ci --omit=dev
+     dist/ is already prebuilt (this looks like a release tarball) — no
+     TypeScript build needed on this host."
+else
+  STEP4="  4. Build the code (as your normal user, from $PREFIX):
+       npm ci
+       npm run build && npm run gateway:build"
+fi
+
 cat <<NOTES
 
 [install] Done. Remaining manual steps:
@@ -293,9 +318,7 @@ cat <<NOTES
      by 'magpie' only, e.g.:
        install -o magpie -g magpie -m 0600 app.pem /etc/magpie/github-app.private-key.pem
 
-  4. Build the code (as your normal user, from $PREFIX):
-       npm ci
-       npm run build && npm run gateway:build
+$STEP4
 NOTES
 
 if [[ -f "$DIST_ORCH" && -f "$DIST_GW" ]]; then

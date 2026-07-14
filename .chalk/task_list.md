@@ -3,9 +3,9 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_d54c** · P1 · in_progress · M7-3: Package the host services (orchestrator + gateway) — release artifact; rework install.sh  (parent: epic_0162)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
-- **task_d54c** · P1 · open · M7-3: Package the host services (orchestrator + gateway) — release artifact; rework install.sh  (parent: epic_0162)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_624f** · P2 · open · M7-5: Pluggable ingress — reverse-proxy + Cloudflare-Tunnel (multi-arch host binary) + tunnel docs  (parent: epic_0162)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
