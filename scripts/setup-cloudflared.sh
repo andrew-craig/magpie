@@ -130,23 +130,32 @@ log "cloudflared dir: $CLOUDFLARED_HOME"
 [[ "$DRY_RUN" -eq 1 ]] && log "DRY RUN — no changes will be made"
 
 # ---------------------------------------------------------------------------
-# 1. Install cloudflared from Cloudflare's official apt repo (arm64/aarch64).
-#    Idempotent: skip entirely if the binary is already present.
+# 1. Install cloudflared. Works across architectures and distros:
+#      - Debian-family hosts (dpkg + apt-get present): Cloudflare's official
+#        apt repo, which already selects the right package for whatever
+#        architecture `dpkg --print-architecture` reports (amd64, arm64,
+#        armhf, ...) — not just arm64/Raspberry Pi.
+#      - Everywhere else: the official static `cloudflared` binary from
+#        Cloudflare's GitHub releases, matched to `uname -m` and installed
+#        only after its SHA256 checksum is verified against the release's
+#        published SHA256SUMS.
+#    Idempotent: skip entirely if the binary is already present. Fails
+#    closed (non-zero exit, no install) on an unrecognized architecture or a
+#    checksum mismatch rather than guessing.
 # ---------------------------------------------------------------------------
 
 if command -v cloudflared >/dev/null 2>&1; then
   log "cloudflared already installed: $(cloudflared --version 2>&1 | head -n1)"
-else
-  log "cloudflared not found; installing from Cloudflare's apt repo"
+elif command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+  log "cloudflared not found; installing from Cloudflare's apt repo (Debian-family host)"
 
-  ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  ARCH="$(dpkg --print-architecture)"
   case "$ARCH" in
-    arm64|aarch64) : ;; # expected on this host (Raspberry Pi, aarch64)
+    amd64|arm64|armhf|armel|i386) : ;; # packages Cloudflare's apt repo publishes
     *)
-      log "WARNING: detected architecture '$ARCH', expected arm64/aarch64."
-      log "Continuing anyway — Cloudflare's apt repo selects the right"
-      log "package per-arch via 'dpkg --print-architecture', but double"
-      log "check if this host isn't the Pi you expect."
+      log "WARNING: detected apt architecture '$ARCH'. Cloudflare's apt repo"
+      log "selects the right package per-arch via 'dpkg --print-architecture';"
+      log "continuing, but verify the install below actually succeeded."
       ;;
   esac
 
@@ -166,12 +175,64 @@ else
   else
     # jammy is used as the stable component name across Debian/Raspberry Pi
     # OS releases per Cloudflare's published instructions; the repo serves
-    # arch-appropriate (incl. arm64) packages regardless of the codename.
+    # arch-appropriate (amd64, arm64, armhf, ...) packages regardless of the
+    # codename.
     run bash -c "echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared jammy main' | sudo tee '$CF_APT_LIST' >/dev/null"
   fi
 
   run sudo apt-get update
   run sudo apt-get install -y cloudflared
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    log "installed: $(cloudflared --version 2>&1 | head -n1)"
+  fi
+else
+  log "cloudflared not found and no apt/dpkg on this host; installing the"
+  log "official static binary from Cloudflare's GitHub releases"
+
+  UNAME_M="$(uname -m)"
+  case "$UNAME_M" in
+    x86_64) CF_ARCH=amd64 ;;
+    aarch64|arm64) CF_ARCH=arm64 ;;
+    armv7l) CF_ARCH=arm ;;
+    *)
+      log "ERROR: unsupported architecture '$UNAME_M' for the static"
+      log "cloudflared binary. Supported: x86_64, aarch64/arm64, armv7l."
+      log "Install cloudflared manually (see docs/ingress.md) and re-run."
+      exit 1
+      ;;
+  esac
+
+  CF_RELEASE_BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
+  CF_BINARY_NAME="cloudflared-linux-${CF_ARCH}"
+  CF_TMPDIR="$(mktemp -d)"
+  # shellcheck disable=SC2064 # intentionally expand CF_TMPDIR now, not at trap time
+  trap "rm -rf '$CF_TMPDIR'" EXIT
+
+  log "downloading $CF_BINARY_NAME and SHA256SUMS from Cloudflare's GitHub releases"
+  run curl -fsSL -o "$CF_TMPDIR/$CF_BINARY_NAME" "$CF_RELEASE_BASE/$CF_BINARY_NAME"
+  run curl -fsSL -o "$CF_TMPDIR/SHA256SUMS" "$CF_RELEASE_BASE/SHA256SUMS"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "DRY-RUN: nothing was downloaded; skipping checksum verification and install"
+  else
+    EXPECTED_SUM="$(awk -v f="$CF_BINARY_NAME" '$2 == f {print $1}' "$CF_TMPDIR/SHA256SUMS")"
+    if [[ -z "$EXPECTED_SUM" ]]; then
+      log "ERROR: $CF_BINARY_NAME not listed in the release's SHA256SUMS;"
+      log "refusing to install an unverifiable binary."
+      exit 1
+    fi
+    ACTUAL_SUM="$(sha256sum "$CF_TMPDIR/$CF_BINARY_NAME" | cut -d' ' -f1)"
+    if [[ "$ACTUAL_SUM" != "$EXPECTED_SUM" ]]; then
+      log "ERROR: checksum mismatch for $CF_BINARY_NAME — refusing to install."
+      log "  expected: $EXPECTED_SUM"
+      log "  actual:   $ACTUAL_SUM"
+      exit 1
+    fi
+    log "checksum verified ($ACTUAL_SUM) — installing to /usr/local/bin/cloudflared"
+  fi
+
+  run sudo install -m 0755 "$CF_TMPDIR/$CF_BINARY_NAME" /usr/local/bin/cloudflared
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
     log "installed: $(cloudflared --version 2>&1 | head -n1)"
