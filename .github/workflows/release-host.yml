@@ -51,6 +51,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Pin npm to the version pack-host.sh's lockfile pruning is validated
+      # against. `npm install --package-lock-only` garbage-collects the
+      # now-unreferenced review-extension dependency subtree only on npm >= 11;
+      # the npm 10 that ships with Node 22 leaves @earendil-works/* entries in
+      # the pruned lockfile, which pack-host.sh's leakage guard (correctly)
+      # rejects. Pinning here makes CI reproduce the version the release is
+      # built + verified with locally.
+      - name: Pin npm
+        run: npm install -g npm@11.17.0
+
       - name: Install dependencies
         run: npm ci
 
