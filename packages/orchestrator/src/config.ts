@@ -80,7 +80,6 @@ const rawConfigSchema = z
         cpus: z.string().min(1).default("2"),
         pids_limit: z.number().int().positive().default(256),
         docker_bin: z.string().min(1).default("docker"),
-        network: z.string().min(1).default("bridge"),
       })
       .strict()
       .prefault({}),
@@ -98,17 +97,20 @@ const rawConfigSchema = z
         // CONTAINER itself sends chat-completions requests (M4-C). This is a
         // SEPARATE address from `base_url` above on purpose: `base_url` is
         // the loopback-only mgmt plane this orchestrator process calls to
-        // mint/revoke keys, while this one must be reachable from inside the
-        // review container on `magpie-net` (an `--internal` docker network —
-        // loopback inside the container is the container itself, not the
-        // host). Default matches M4-D's fixed magpie-net gateway IP
-        // (172.31.99.1, the network's gateway address) and the gateway's own
-        // default GATEWAY_PROXY_PORT=4000, with the `/v1` suffix `pi`'s
-        // OpenAI-compatible provider config expects (see reviewer.ts's
-        // module doc comment on how this reaches Pi — a `~/.pi/agent/
-        // models.json` provider-baseUrl override written by
-        // docker/reviewer/entrypoint.sh, NOT an env var Pi itself reads).
-        container_base_url: z.string().min(1).default("http://172.31.99.1:4000/v1"),
+        // mint/revoke keys, while this one is what the review container
+        // itself is pointed at. As of M7-1 (Design D — see DISTRIBUTION.md
+        // §2) the reviewer runs `--network none` and has no bridge/host
+        // route at all; this address is served by a tiny in-container
+        // TCP->unix forwarder listening on the container's OWN loopback
+        // (which `--network none` leaves intact) that relays to the per-job
+        // unix socket bind-mounted at `/run/gw/gw.sock` (see reviewer.ts's
+        // `gatewaySocketDir` mount). Default matches the gateway's own
+        // default GATEWAY_PROXY_PORT=4000 on that in-container loopback,
+        // with the `/v1` suffix `pi`'s OpenAI-compatible provider config
+        // expects (see reviewer.ts's module doc comment on how this reaches
+        // Pi — a `~/.pi/agent/models.json` provider-baseUrl override written
+        // by docker/reviewer/entrypoint.sh, NOT an env var Pi itself reads).
+        container_base_url: z.string().min(1).default("http://127.0.0.1:4000/v1"),
         // Per-job USD spend cap passed as `budgetUsd` when minting a virtual
         // key (see gateway.ts's mintGatewayKeyFromConfig). This is the HARD
         // cost cap Pi itself lacks (no --max-turns/budget flag): the
@@ -165,8 +167,6 @@ export interface Config {
     pidsLimit: number;
     /** Path to the docker (or docker-compatible, e.g. podman) CLI binary. */
     dockerBin: string;
-    /** `docker run --network`. "bridge" until M4 introduces `magpie-net`. */
-    network: string;
   };
   gateway: {
     /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see PLAN.md §5. */
@@ -179,8 +179,11 @@ export interface Config {
      * mechanism that actually redirects Pi's traffic (Pi 0.80.3 has no
      * generic env-var base-URL override — see reviewer.ts's module doc
      * comment). Deliberately a SEPARATE value from `baseUrl` above: that one
-     * is loopback-only and unreachable from `magpie-net`; this one is the
-     * only address a review container can reach on that network.
+     * is this orchestrator's loopback-only mgmt-plane address; this one is
+     * an address inside the review container's OWN network namespace (M7-1:
+     * the container runs `--network none`, so this resolves to the
+     * container's own loopback, served by the in-container forwarder that
+     * relays to the mounted gateway unix socket — see DISTRIBUTION.md §2.2).
      */
     containerBaseUrl: string;
     /** Per-job USD spend cap passed to the gateway when minting a virtual key. The hard cost cap Pi itself lacks. */
@@ -446,7 +449,6 @@ export function loadConfig(configPath?: string): Config {
       cpus: data.container.cpus,
       pidsLimit: data.container.pids_limit,
       dockerBin: data.container.docker_bin,
-      network: data.container.network,
     },
     gateway: {
       baseUrl: data.gateway.base_url,

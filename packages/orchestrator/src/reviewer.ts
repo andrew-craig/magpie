@@ -22,23 +22,37 @@
 // gateway proxy-plane base URL, and `--provider`/`--model` as trailing
 // container args.
 //
-// GATEWAY WIRING (M4-C): the container never holds the real OpenRouter key.
-// `OPENROUTER_API_KEY` is set to a per-job, budget-capped, short-lived
-// VIRTUAL key minted by pipeline.ts against packages/gateway's management
-// plane (see gateway.ts) — `RunReviewParams.gatewayApiKey` below, threaded
-// straight through with no host-side substitution. `OPENAI_BASE_URL` carries
-// `config.gateway.containerBaseUrl` (the gateway's PROXY/data plane, reachable
-// from `magpie-net` — NOT the loopback-only mgmt plane `config.gateway.baseUrl`
-// gateway.ts calls). Pi itself never reads `OPENAI_BASE_URL` directly: Pi
-// 0.80.3 has no generic OpenAI-compatible base-URL env override (empirically
-// verified against a stub HTTP server — a plain `OPENAI_BASE_URL` env var was
-// silently ignored and requests still went to the real api.openrouter.ai).
-// The mechanism that actually works is a `~/.pi/agent/models.json` provider
-// override (`{"providers":{"openrouter":{"baseUrl":...}}}`, see Pi's
-// docs/models.md "Overriding Built-in Providers") — docker/reviewer/
-// entrypoint.sh reads `OPENAI_BASE_URL` and writes that file before exec'ing
-// `pi`, so this module's job is only to deliver the value via env, same as
-// any other per-job input.
+// GATEWAY WIRING (M4-C, transport replaced by M7-1): the container never
+// holds the real OpenRouter key. `OPENROUTER_API_KEY` is set to a per-job,
+// budget-capped, short-lived VIRTUAL key minted by pipeline.ts against
+// packages/gateway's management plane (see gateway.ts) —
+// `RunReviewParams.gatewayApiKey` below, threaded straight through with no
+// host-side substitution. `OPENAI_BASE_URL` carries
+// `config.gateway.containerBaseUrl`. Pi itself never reads `OPENAI_BASE_URL`
+// directly: Pi 0.80.3 has no generic OpenAI-compatible base-URL env override
+// (empirically verified against a stub HTTP server — a plain
+// `OPENAI_BASE_URL` env var was silently ignored and requests still went to
+// the real api.openrouter.ai). The mechanism that actually works is a
+// `~/.pi/agent/models.json` provider override
+// (`{"providers":{"openrouter":{"baseUrl":...}}}`, see Pi's docs/models.md
+// "Overriding Built-in Providers") — docker/reviewer/entrypoint.sh reads
+// `OPENAI_BASE_URL` and writes that file before exec'ing `pi`, so this
+// module's job is only to deliver the value via env, same as any other
+// per-job input.
+//
+// NETWORK TRANSPORT (M7-1, Design D — see DISTRIBUTION.md §2): the review
+// container runs `--network none` (no bridge, no `magpie-net`, no route to
+// the host or the internet at all — a property of the network namespace, not
+// an iptables rule) and reaches the gateway ONLY through a per-job unix
+// domain socket bind-mounted read-only at `/run/gw` (see
+// `RunReviewParams.gatewaySocketDir` below). `config.gateway.containerBaseUrl`
+// now points at the container's OWN loopback (`--network none` leaves
+// loopback intact), where a tiny in-container TCP->unix forwarder (baked
+// into the image, holds no secret) relays to `/run/gw/gw.sock`. This module
+// never talks to the socket directly — it only supplies the mount and the
+// (non-secret) base-URL env value; the forwarder and the gateway's socket
+// `bind()` are the other half of this contract, owned by the image/gateway
+// waves.
 //
 // SECURITY: the diff/PR title/body are untrusted, possibly-adversarial text
 // (see reviewer-prompt.md and PLAN.md's threat model) — this module never
@@ -110,6 +124,20 @@ export interface RunReviewParams {
    * that can't mint a virtual key can't run a review, by construction.
    */
   gatewayApiKey: string;
+  /**
+   * Absolute HOST path to the per-job gateway socket directory (M7-1,
+   * Design D — see gateway.ts's `GatewayKey.socketDir` and
+   * DISTRIBUTION.md §2.6). Minted alongside {@link gatewayApiKey} and
+   * bind-mounted READ-ONLY at `/run/gw` in the review container (`-v
+   * <gatewaySocketDir>:/run/gw:ro`), which contains the gateway's
+   * already-bound `gw.sock` — the container's ONLY channel off its own
+   * `--network none` network namespace. The directory is bind-mounted
+   * read-only (not the socket file specifically): per DISTRIBUTION.md §2.6,
+   * the kernel's read-only-mount check only fires on filesystem mutations,
+   * not on `connect()`, so the socket still works while the container can't
+   * `unlink`/replace it. Required — there is no fallback transport.
+   */
+  gatewaySocketDir: string;
   /**
    * TEST SEAM: overrides the docker (or docker-compatible) binary this
    * module spawns to run the review container. Defaults to
@@ -188,24 +216,30 @@ function buildContainerName(jobId: string): string {
  * `report_findings` tool call.
  *
  * Flow:
- *   1. Bind-mount the (`.git`-stripped) workspace read-only at `/work` and a
- *      fresh per-job host temp dir read-write at `/out` (see
- *      container-mounts.ts's `prepareReviewMount`/`createOutputDir`).
+ *   1. Bind-mount the (`.git`-stripped) workspace read-only at `/work`, a
+ *      fresh per-job host temp dir read-write at `/out`, and (M7-1) the
+ *      per-job gateway socket directory read-only at `/run/gw` (see
+ *      container-mounts.ts's `prepareReviewMount`/`createOutputDir` for the
+ *      first two; `params.gatewaySocketDir` for the third).
  *   2. Spawn `<dockerBin> run --rm --name magpie-<jobId> --user <uid>:<gid>
  *      --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges
- *      --memory=<mem> --cpus=<cpus> --pids-limit=<n> --network <net>
- *      -v <mount>:/work:ro -v <out>:/out -e OPENROUTER_API_KEY
- *      -e OPENAI_BASE_URL=<gateway proxy URL> -i <image> --provider openrouter
- *      --model <model>` with the gateway virtual key (`params.gatewayApiKey`)
- *      set only on the spawned process's `env` (never argv) and every
- *      `MAGPIE_*` secret stripped from that env first (belt-and-suspenders —
- *      the container itself inherits nothing from it beyond the `-e` flags
- *      above, but the docker CLIENT process shouldn't carry them either).
- *      `OPENAI_BASE_URL`'s value is not secret, so unlike the key it's passed
- *      inline (`-e OPENAI_BASE_URL=...`, not name-only); entrypoint.sh
- *      translates it into a `~/.pi/agent/models.json` provider override
- *      before exec'ing `pi` (see this module's doc comment for why — Pi has
- *      no direct env-var base-URL override).
+ *      --memory=<mem> --cpus=<cpus> --pids-limit=<n> --network none
+ *      -v <mount>:/work:ro -v <out>:/out -v <gatewaySocketDir>:/run/gw:ro
+ *      -e OPENROUTER_API_KEY -e OPENAI_BASE_URL=<in-container forwarder URL>
+ *      -i <image> --provider openrouter --model <model>` with the gateway
+ *      virtual key (`params.gatewayApiKey`) set only on the spawned process's
+ *      `env` (never argv) and every `MAGPIE_*` secret stripped from that env
+ *      first (belt-and-suspenders — the container itself inherits nothing
+ *      from it beyond the `-e` flags above, but the docker CLIENT process
+ *      shouldn't carry them either). `OPENAI_BASE_URL`'s value is not secret,
+ *      so unlike the key it's passed inline (`-e OPENAI_BASE_URL=...`, not
+ *      name-only); entrypoint.sh translates it into a `~/.pi/agent/
+ *      models.json` provider override before exec'ing `pi` (see this
+ *      module's doc comment for why — Pi has no direct env-var base-URL
+ *      override). `--network none` (M7-1, Design D — DISTRIBUTION.md §2)
+ *      means the ONLY way that base URL resolves to anything is the
+ *      in-container forwarder relaying to the mounted `/run/gw/gw.sock`;
+ *      there is no bridge network or `magpie-net` any more.
  *   3. Pipe the PR title/body/changed-file list/diff to the container's
  *      stdin, clearly fenced as untrusted data (see `buildPromptPayload`).
  *   4. Parse Pi's NDJSON stdout stream (forwarded through by docker)
@@ -315,6 +349,13 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // docker/reviewer/entrypoint.sh's `"$@"` onto the baked `pi` invocation —
   // everything else Pi needs (tools, extension, system prompt) is baked into
   // the image itself, not passed here.
+  //
+  // `--network none` (M7-1, Design D — DISTRIBUTION.md §2.3) replaces the old
+  // `--network <config.container.network>` bridge/`magpie-net` attachment:
+  // the container gets no network interfaces at all except its own loopback,
+  // a property of the network namespace rather than any daemon-config-
+  // dependent iptables rule. The mounted `/run/gw` directory (below) is
+  // therefore the container's ONLY remaining path off itself.
   const dockerArgs: string[] = [
     "run",
     "--rm",
@@ -331,11 +372,19 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     `--cpus=${config.container.cpus}`,
     `--pids-limit=${config.container.pidsLimit}`,
     "--network",
-    config.container.network,
+    "none",
     "-v",
     `${mountDir}:/work:ro`,
     "-v",
     `${output.outDir}:/out`,
+    // The per-job gateway socket directory (M7-1 — see
+    // `RunReviewParams.gatewaySocketDir`'s doc comment), mounted READ-ONLY:
+    // the container can reach the already-bound `gw.sock` inside it via
+    // `connect()` (unaffected by a read-only mount) but can't unlink/replace
+    // it. This is the container's only channel to the gateway now that it
+    // runs `--network none`.
+    "-v",
+    `${params.gatewaySocketDir}:/run/gw:ro`,
     "-e",
     "OPENROUTER_API_KEY",
     // Non-secret (a fixed, deployment-wide gateway address, not a per-job

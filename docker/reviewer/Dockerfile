@@ -63,6 +63,14 @@ RUN groupadd --gid 10001 reviewer \
 COPY docker/reviewer/entrypoint.sh /opt/magpie/entrypoint.sh
 RUN chmod +x /opt/magpie/entrypoint.sh
 
+# In-container TCP->unix forwarder (M7-1, Design D -- see DISTRIBUTION.md
+# §2.2/§2.3). The reviewer runs `--network none`; this is what makes
+# `http://127.0.0.1:4000/v1` (the address entrypoint.sh points Pi at) real by
+# relaying to the per-job unix socket bind-mounted read-only at `/run/gw`.
+# Holds no secret, so shipping it into this untrusted image is safe. Runs
+# under the `node` already on PATH in this base image -- no new dependency.
+COPY docker/reviewer/forwarder.mjs /opt/magpie/forwarder.mjs
+
 # Findings output path is part of the image contract, not per-job config: the
 # baked-in report_findings extension (packages/review-extension) reads
 # MAGPIE_FINDINGS_PATH from its env, and in-container that is ALWAYS

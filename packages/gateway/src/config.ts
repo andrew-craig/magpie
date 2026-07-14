@@ -21,11 +21,13 @@ import { z } from "zod";
 /** Loopback-only guard: the mgmt plane bind host is hardcoded, not configurable — see {@link GatewayConfig.mgmt}. */
 const LOOPBACK_HOST = "127.0.0.1";
 
+/** Default root for per-job proxy-plane socket directories — see {@link GatewayConfig.socketDirRoot} and job-sockets.ts. */
+const DEFAULT_SOCKET_DIR_ROOT = "/run/magpie-gateway/jobs";
+
 const envSchema = z.object({
   MAGPIE_GATEWAY_OPENROUTER_KEY: z.string().min(1, "required (real OpenRouter API key)"),
   MAGPIE_GATEWAY_MASTER_KEY: z.string().min(1, "required (management-plane bearer auth)"),
-  GATEWAY_PROXY_HOST: z.string().min(1).default(LOOPBACK_HOST),
-  GATEWAY_PROXY_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+  GATEWAY_SOCKET_DIR: z.string().min(1).default(DEFAULT_SOCKET_DIR_ROOT),
   GATEWAY_MGMT_PORT: z.coerce.number().int().min(1).max(65535).default(4100),
   GATEWAY_UPSTREAM_BASE_URL: z.string().min(1).default("https://openrouter.ai/api/v1"),
   GATEWAY_DEFAULT_MODEL: z.string().min(1).optional(),
@@ -33,11 +35,17 @@ const envSchema = z.object({
 
 /** Shape of the config once parsed, defaulted, and validated. */
 export interface GatewayConfig {
-  proxy: {
-    /** Bind address for the data plane (`POST /v1/chat/completions`, `GET /healthz`). NEVER "0.0.0.0" — see {@link loadGatewayConfig}. */
-    host: string;
-    port: number;
-  };
+  /**
+   * Root directory under which each job gets its own `<sanitized-jobId>/`
+   * subdirectory (mode 0711) holding that job's proxy-plane unix socket
+   * (`gw.sock`, chmod 0666 after bind) — see job-sockets.ts's
+   * `JobSocketManager`. Design D (DISTRIBUTION.md §2.6) replaced the old
+   * single TCP proxy listener with one unix socket per job; there is no
+   * longer a proxy host/port to configure. This directory is NOT chmod'd by
+   * this process at startup — see index.ts's doc comment on why the parent
+   * `RuntimeDirectory` is systemd's to own.
+   */
+  socketDirRoot: string;
   mgmt: {
     /** Bind address for the control plane (`/admin/*`). Hardcoded to loopback — not configurable, so the "mgmt never reachable from magpie-net" guarantee can't be misconfigured away. */
     host: string;
@@ -95,21 +103,8 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
   }
   const data = parsed.data;
 
-  const problems: string[] = [];
-  if (data.GATEWAY_PROXY_HOST === "0.0.0.0") {
-    problems.push(
-      "GATEWAY_PROXY_HOST must not be 0.0.0.0 — bind a specific interface (127.0.0.1 for dev, the magpie-net gateway IP in production; see PLAN.md §5)",
-    );
-  }
-  if (problems.length > 0) {
-    throw new GatewayConfigError(problems);
-  }
-
   return {
-    proxy: {
-      host: data.GATEWAY_PROXY_HOST,
-      port: data.GATEWAY_PROXY_PORT,
-    },
+    socketDirRoot: data.GATEWAY_SOCKET_DIR,
     mgmt: {
       host: LOOPBACK_HOST,
       port: data.GATEWAY_MGMT_PORT,

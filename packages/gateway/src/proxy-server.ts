@@ -1,8 +1,10 @@
 // Proxy plane (data) for the magpie gateway: the OpenAI-compatible surface
 // the review container's Pi process actually talks to (via `OPENAI_BASE_URL`
-// pointed at this server — see docker/reviewer/entrypoint.sh's contract
-// notes and M4-B/M4-D, which wire that up; this module only builds the
-// gateway side).
+// pointed at the in-container TCP->unix forwarder, which relays to this
+// server's per-job unix socket — see DISTRIBUTION.md §2.6 and
+// job-sockets.ts's `JobSocketManager`, which binds one instance of the
+// server built here per job; this module only builds the request-handling
+// logic, not the per-job listen/bind lifecycle).
 //
 // Per request: authenticate the virtual key -> check its budget -> strip the
 // client's Authorization and inject the REAL OpenRouter key -> forward to
@@ -35,10 +37,26 @@ export interface ProxyServerDeps {
   fetchImpl?: FetchLike;
 }
 
-/** A running (or ready-to-run) proxy server. Mirrors server.ts's `WebhookServer` shape/lifecycle. */
+/**
+ * A running (or ready-to-run) proxy server. Mirrors server.ts's
+ * `WebhookServer` shape/lifecycle, except {@link listen} takes an explicit
+ * bind target rather than reading one off `config` — Design D moved the
+ * proxy plane to per-job unix sockets, so there is no longer a single
+ * config-wide host/port to bind (see config.ts's `GatewayConfig` doc
+ * comment). `job-sockets.ts`'s `JobSocketManager` is the production caller,
+ * `listen()`ing each instance on that job's `gw.sock` path; tests may
+ * instead `listen()` on an ephemeral TCP port for convenience (nothing in
+ * the handler itself is transport-specific).
+ */
 export interface ProxyServer {
   readonly server: http.Server;
-  listen(): Promise<void>;
+  /**
+   * Bind and start accepting connections. Pass a filesystem path (unix
+   * socket — production usage) or a TCP `{ port, host }` pair (defaults to
+   * an OS-assigned loopback port — test usage only; production never binds
+   * TCP for this plane).
+   */
+  listen(target?: string | { port: number; host?: string }): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -55,21 +73,25 @@ function upstreamChatCompletionsUrl(baseUrl: string): string {
 }
 
 /**
- * Build the proxy-plane HTTP server.
+ * Build the proxy-plane request listener (routing only — no `listen`/bind).
+ * Exported separately from {@link createProxyServer} so `job-sockets.ts`'s
+ * `JobSocketManager` can mount the exact same handler on however many
+ * per-job `http.Server`s it needs, rather than being forced through
+ * `ProxyServer`'s single-server lifecycle.
  *
  * Routes:
- *  - `GET  /healthz`             — unauthenticated, always 200 "ok" (M4-E's gateway-reachable probe).
+ *  - `GET  /healthz`             — unauthenticated, always 200 "ok" (M4-E's gateway-reachable probe; the reviewer entrypoint health-probes this THROUGH the per-job socket before starting Pi).
  *  - `POST /v1/chat/completions` — OpenAI-compatible; requires `Authorization: Bearer <virtual key>`.
  *  - anything else               — 404.
- *
- * The returned server is not listening yet; call {@link ProxyServer.listen}.
- * Binding uses `config.proxy.host`/`config.proxy.port` (never "0.0.0.0" —
- * enforced by config.ts's loader).
  */
-export function createProxyServer(config: GatewayConfig, keyStore: KeyStore, deps: ProxyServerDeps = {}): ProxyServer {
+export function createProxyRequestListener(
+  config: GatewayConfig,
+  keyStore: KeyStore,
+  deps: ProxyServerDeps = {},
+): http.RequestListener {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
-  const server = http.createServer((req, res) => {
+  return (req, res) => {
     if (req.method === "GET" && req.url === HEALTHZ_PATH) {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("ok");
@@ -82,21 +104,34 @@ export function createProxyServer(config: GatewayConfig, keyStore: KeyStore, dep
     }
 
     sendJsonError(res, 404, "not found", "not_found");
-  });
+  };
+}
+
+/**
+ * Thin `http.Server` factory wrapping {@link createProxyRequestListener} —
+ * kept for reuse by both `job-sockets.ts` (which calls `listen()` with a
+ * unix socket path per job) and this package's own tests (which call
+ * `listen()` with no argument / a `{ port }` for a plain TCP loopback
+ * listener, since the handler logic itself doesn't care about transport).
+ */
+export function createProxyServer(config: GatewayConfig, keyStore: KeyStore, deps: ProxyServerDeps = {}): ProxyServer {
+  const server = http.createServer(createProxyRequestListener(config, keyStore, deps));
 
   return {
     server,
-    listen(): Promise<void> {
+    listen(target?: string | { port: number; host?: string }): Promise<void> {
       return new Promise((resolve, reject) => {
         const onError = (err: Error): void => reject(err);
         server.once("error", onError);
-        server.listen(config.proxy.port, config.proxy.host, () => {
+        const onListening = (): void => {
           server.removeListener("error", onError);
-          const address = server.address();
-          const port = address && typeof address === "object" ? address.port : config.proxy.port;
-          console.log(`[magpie-gateway] proxy (data) plane listening on http://${config.proxy.host}:${port}`);
           resolve();
-        });
+        };
+        if (typeof target === "string") {
+          server.listen(target, onListening);
+        } else {
+          server.listen(target?.port ?? 0, target?.host ?? "127.0.0.1", onListening);
+        }
       });
     },
     close(): Promise<void> {

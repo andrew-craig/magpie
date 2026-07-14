@@ -24,10 +24,16 @@ import * as http from "node:http";
 import { z } from "zod";
 import type { GatewayConfig } from "./config.js";
 import { extractBearerToken, isLoopbackRequest, readBody, sendJson, sendJsonError } from "./http-util.js";
+import type { JobSocketManager } from "./job-sockets.js";
 import type { KeyStore } from "./keystore.js";
 
 const mintKeyBodySchema = z
   .object({
+    // The orchestrator's job id — REQUIRED as of Design D (M7-1): every
+    // minted key gets its own proxy-plane unix socket keyed by this value
+    // (see job-sockets.ts's `JobSocketManager.bind`), so there is no longer
+    // a mint request that doesn't need one.
+    jobId: z.string().min(1),
     model: z.string().min(1).optional(),
     budgetUsd: z.number().positive(),
     ttlSeconds: z.number().int().positive(),
@@ -63,8 +69,8 @@ function isAuthorized(req: http.IncomingMessage, masterKey: string): boolean {
  * Build the management-plane HTTP server.
  *
  * Routes:
- *  - `POST   /admin/keys`     — mint a virtual key. Body: `{ model?, budgetUsd, ttlSeconds }`. 201 `{ id, key }`.
- *  - `DELETE /admin/keys/:id` — revoke a virtual key. 204, idempotent (unknown/already-revoked id is still 204).
+ *  - `POST   /admin/keys`     — mint a virtual key AND bind its per-job proxy socket. Body: `{ jobId, model?, budgetUsd, ttlSeconds }`. 201 `{ id, key, socketDir }` (`socketDir` is the directory the orchestrator bind-mounts — see job-sockets.ts).
+ *  - `DELETE /admin/keys/:id` — revoke a virtual key AND tear down its per-job socket. 204, idempotent (unknown/already-revoked id is still 204).
  *  - anything else            — 404.
  *
  * Every route requires `Authorization: Bearer <config.secrets.masterKey>`
@@ -72,9 +78,9 @@ function isAuthorized(req: http.IncomingMessage, masterKey: string): boolean {
  * doc comment). The returned server is not listening yet; call
  * {@link AdminServer.listen}. Binding uses `config.mgmt.host`/`config.mgmt.port`.
  */
-export function createAdminServer(config: GatewayConfig, keyStore: KeyStore): AdminServer {
+export function createAdminServer(config: GatewayConfig, keyStore: KeyStore, jobSockets: JobSocketManager): AdminServer {
   const server = http.createServer((req, res) => {
-    void handleRequest(req, res, config, keyStore);
+    void handleRequest(req, res, config, keyStore, jobSockets);
   });
 
   return {
@@ -105,6 +111,7 @@ async function handleRequest(
   res: http.ServerResponse,
   config: GatewayConfig,
   keyStore: KeyStore,
+  jobSockets: JobSocketManager,
 ): Promise<void> {
   try {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -124,7 +131,7 @@ async function handleRequest(
     }
 
     if (req.method === "POST" && url.pathname === "/admin/keys") {
-      await handleMintKey(req, res, keyStore);
+      await handleMintKey(req, res, keyStore, jobSockets);
       return;
     }
 
@@ -132,6 +139,7 @@ async function handleRequest(
     if (req.method === "DELETE" && revokeMatch) {
       const id = decodeURIComponent(revokeMatch[1]);
       keyStore.revoke(id); // idempotent by contract — no existence check needed.
+      await jobSockets.teardown(id); // also idempotent by contract — see job-sockets.ts.
       res.writeHead(204);
       res.end();
       return;
@@ -147,7 +155,12 @@ async function handleRequest(
   }
 }
 
-async function handleMintKey(req: http.IncomingMessage, res: http.ServerResponse, keyStore: KeyStore): Promise<void> {
+async function handleMintKey(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  keyStore: KeyStore,
+  jobSockets: JobSocketManager,
+): Promise<void> {
   let raw: unknown;
   try {
     const buf = await readBody(req);
@@ -164,6 +177,21 @@ async function handleMintKey(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
-  const { id, key } = keyStore.mint(parsed.data);
-  sendJson(res, 201, { id, key });
+  const { jobId, model, budgetUsd, ttlSeconds } = parsed.data;
+  const { id, key } = keyStore.mint({ model, budgetUsd, ttlSeconds });
+
+  // The key and its socket must be provisioned together: a key with no
+  // reachable socket is useless to the reviewer, and a socket for a key we
+  // failed to hand out would leak. If binding fails, revoke the just-minted
+  // key before reporting the failure — never respond 201 with a key whose
+  // socket doesn't exist.
+  try {
+    const { socketDir } = await jobSockets.bind({ id, jobId });
+    sendJson(res, 201, { id, key, socketDir });
+  } catch (err) {
+    keyStore.revoke(id);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[magpie-gateway] failed to bind per-job proxy socket for key id=${id}: ${message}`);
+    sendJsonError(res, 500, "failed to provision per-job proxy socket", "socket_bind_failed");
+  }
 }

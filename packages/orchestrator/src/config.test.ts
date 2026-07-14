@@ -79,9 +79,9 @@ describe("loadConfig", () => {
     expect(config.container.cpus).toBe("2");
     expect(config.container.pidsLimit).toBe(256);
     expect(config.container.dockerBin).toBe("docker");
-    expect(config.container.network).toBe("bridge");
+    expect(config.container).not.toHaveProperty("network");
     expect(config.gateway.baseUrl).toBe("http://127.0.0.1:4100");
-    expect(config.gateway.containerBaseUrl).toBe("http://172.31.99.1:4000/v1");
+    expect(config.gateway.containerBaseUrl).toBe("http://127.0.0.1:4000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(0.5);
     expect(config.gateway.ttlMarginSeconds).toBe(120);
     expect(config.secrets.webhookSecret).toBe("test-webhook-secret");
@@ -124,7 +124,6 @@ memory = "8g"
 cpus = "4"
 pids_limit = 512
 docker_bin = "/usr/local/bin/podman"
-network = "magpie-net"
 
 [gateway]
 base_url = "http://10.0.0.1:9100"
@@ -150,7 +149,6 @@ ttl_margin_seconds = 300
     expect(config.container.cpus).toBe("4");
     expect(config.container.pidsLimit).toBe(512);
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
-    expect(config.container.network).toBe("magpie-net");
     expect(config.gateway.baseUrl).toBe("http://10.0.0.1:9100");
     expect(config.gateway.containerBaseUrl).toBe("http://10.0.0.2:9000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(1.25);

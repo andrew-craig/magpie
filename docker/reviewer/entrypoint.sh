@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # magpie-reviewer entrypoint (M3-A; gateway wiring added M4-C; fail-closed
-# startup confinement assertions added M4-E).
+# startup confinement assertions added M4-E; Design D `--network none` +
+# in-container forwarder added M7-1 -- see DISTRIBUTION.md §2).
 #
 # Runs Pi headless over the mounted /work worktree using the extension +
 # system prompt baked into the image at /opt/magpie (see
@@ -40,9 +41,14 @@ set -euo pipefail
 #     at all (see config.ts: `secrets.llmApiKey` was removed). Never echoed to
 #     logs/stdout/stderr here.
 #   OPENAI_BASE_URL (env, `-e OPENAI_BASE_URL=<url>`, inline since it's not a
-#     secret): the gateway's container-facing PROXY/data plane
-#     (config.gateway.containerBaseUrl, default
-#     http://172.31.99.1:4000/v1 -- magpie-net's fixed gateway IP, M4-D).
+#     secret): the container-facing PROXY/data plane
+#     (config.gateway.containerBaseUrl). As of M7-1 (Design D) this is ALWAYS
+#     `http://127.0.0.1:4000/v1` -- an address INSIDE this container's own
+#     `--network none` network namespace, served by the in-container
+#     forwarder started below, which relays to the gateway's real unix socket
+#     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP any
+#     more (the pre-M7-1 magpie-net design pointed this at a fixed bridge
+#     address instead; that apparatus is deleted -- see DISTRIBUTION.md §2.4).
 #     Required as of M4-C -- there is no direct-to-OpenRouter fallback any
 #     more. IMPORTANT: Pi 0.80.3 does NOT read this env var itself (verified
 #     empirically against a stub HTTP server during M4-C: a plain
@@ -94,7 +100,8 @@ set -euo pipefail
 #      key, not merely be non-empty. Keep this prefix in sync with
 #      packages/gateway/src/keystore.ts's KEY_PREFIX if that ever changes.
 #   2. "no host but the gateway is reachable" is unchanged from the task
-#      text and is implemented as a set of cheap reachability probes below.
+#      text (now sharpened by `--network none`, M7-1) and is implemented as
+#      a set of cheap reachability probes below.
 # ---------------------------------------------------------------------------
 
 # --- 1. Virtual-key-only assertion -----------------------------------------
@@ -102,7 +109,8 @@ set -euo pipefail
 # Deliberately does NOT print (or substring-match-log) the key value itself
 # -- only ever the fact that its shape was wrong -- so a real key accidentally
 # injected here never ends up echoed into container logs by the very check
-# meant to catch it.
+# meant to catch it. Runs before the forwarder/network work below since it's
+# a pure string check with no dependency on the gateway being reachable yet.
 case "${OPENROUTER_API_KEY}" in
   sk-magpie-*)
     ;;
@@ -112,14 +120,71 @@ case "${OPENROUTER_API_KEY}" in
     ;;
 esac
 
+# ---------------------------------------------------------------------------
+# M7-1: start the in-container TCP->unix forwarder (Design D --
+# DISTRIBUTION.md §2.2/§2.3). This container runs `--network none`: the ONLY
+# way off it is the per-job unix socket the orchestrator bind-mounts
+# read-only at `/run/gw` (`/run/gw/gw.sock`). `forwarder.mjs` (baked into the
+# image, docker/reviewer/Dockerfile) listens on this container's OWN loopback
+# at 127.0.0.1:4000 -- which `--network none` leaves intact, since loopback
+# is not an external interface -- and relays each connection to that socket.
+# `OPENAI_BASE_URL` (and, transitively, the `~/.pi/agent/models.json`
+# baseUrl override below) points Pi at the forwarder's address, so Pi's own
+# invocation is unaffected by any of this.
+#
+# Backgrounded, then bounded-waited-for: nothing downstream (the gateway
+# /healthz probe just below, then Pi itself) may attempt 127.0.0.1:4000
+# before the forwarder is actually listening. Mirrors the wait loop proven in
+# the M7-0 feasibility spike (spike/m7-0/spike-entrypoint.sh).
+# ---------------------------------------------------------------------------
+
+echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
+node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
+MAGPIE_FORWARDER_PID=$!
+
+readonly MAGPIE_FORWARDER_WAIT_ATTEMPTS=50
+readonly MAGPIE_FORWARDER_WAIT_SLEEP=0.2
+
+magpie_forwarder_ready=""
+for _ in $(seq 1 "${MAGPIE_FORWARDER_WAIT_ATTEMPTS}"); do
+  if timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/4000' 2>/dev/null; then
+    magpie_forwarder_ready=1
+    break
+  fi
+  # Also bail early if the forwarder process itself has already died, rather
+  # than burning the full wait budget on a listener that will never appear.
+  if ! kill -0 "${MAGPIE_FORWARDER_PID}" 2>/dev/null; then
+    break
+  fi
+  sleep "${MAGPIE_FORWARDER_WAIT_SLEEP}"
+done
+
+if [ -z "${magpie_forwarder_ready}" ]; then
+  echo "magpie-reviewer: refusing to run: the in-container forwarder never came up on 127.0.0.1:4000 -- this container's only permitted egress path is unavailable, so no review can be attempted. Aborting before Pi starts." >&2
+  kill "${MAGPIE_FORWARDER_PID}" 2>/dev/null || true
+  exit 1
+fi
+echo "magpie-reviewer: forwarder is up" >&2
+
 # --- 2. Network confinement assertion ---------------------------------------
 #
-# This container's only permitted egress is the gateway's proxy plane (see
-# scripts/setup-network.sh / M4-D: magpie-net is an `--internal` docker
-# bridge, so there is no DNS and no route to anything but the gateway's fixed
-# IP). Probe a couple of canaries that MUST be unreachable and the gateway
-# that MUST be reachable; abort if either comes out wrong, since that means
-# this container's actual confinement doesn't match what it's trusting.
+# This container runs `--network none` (M7-1, Design D): it has NO network
+# interfaces except its own loopback -- no veth, no bridge, no route to the
+# host, to other containers, to the internet, to DNS, or to the cloud-
+# metadata IP. That is a property of the network namespace itself, not of any
+# iptables/nftables rule (see DISTRIBUTION.md §2.3), so unlike the deleted
+# magpie-net/setup-network.sh bridge model it does not depend on the host's
+# daemon.json, Docker version, or IPv6 settings. The canaries below therefore
+# MUST be unreachable unconditionally; this probe is a cheap belt-and-
+# suspenders assertion that catches a mis-launch (e.g. the orchestrator
+# accidentally passing `--network bridge`) rather than a daemon-config drift
+# there is no longer any config to drift.
+#
+# The gateway reachability probe, in contrast, now transits the forwarder
+# started above -> the mounted `/run/gw/gw.sock` -> the real gateway process,
+# so it doubles as confirmation that BOTH the forwarder came up AND the
+# gateway's per-job socket is present and bound (DISTRIBUTION.md §2.6 point
+# 3's "the gateway socket is present" half of the fail-closed assertion).
 #
 # Implementation notes:
 #   - Uses bash's built-in `/dev/tcp/<host>/<port>` pseudo-device for a raw
@@ -128,9 +193,10 @@ esac
 #     M4-E). `timeout` (coreutils, already in the base image) bounds each
 #     probe so a filtered/blackholed connection attempt can't hang the job.
 #   - `/dev/tcp` name resolution failures (expected for the DNS-based canary
-#     below, since magpie-net has no resolver at all) exit non-zero from the
-#     inner bash, same as a refused/timed-out connection -- both count as
-#     "unreachable", which is exactly the property being asserted.
+#     below, since `--network none` has no resolver -- no interfaces at all,
+#     let alone a DNS one) exit non-zero from the inner bash, same as a
+#     refused/timed-out connection -- both count as "unreachable", which is
+#     exactly the property being asserted.
 #   - Every probe is read-only against the network and writes nothing to
 #     disk, so it's safe under the `--read-only` root filesystem regardless
 #     of HOME/tmp state at this point in the script.
@@ -171,11 +237,13 @@ magpie_http_get_200() {
 
 # Canaries that MUST be unreachable from this container. A raw public IP
 # (not just a hostname) is included deliberately -- it tests actual routing
-# on the bridge, not merely the (already-absent) DNS resolver; a name-based
-# canary is included too since it's still a meaningful signal (failing at
-# resolution counts as unreachable, per the note above).
+# (or rather, the total absence of any route -- `--network none` gives this
+# container no interfaces to route out of at all), not merely the (already-
+# absent) DNS resolver; a name-based canary is included too since it's still
+# a meaningful signal (failing at resolution counts as unreachable, per the
+# note above).
 readonly MAGPIE_NETWORK_CANARIES=(
-  "1.1.1.1:443"     # raw public IP -- must be unroutable on magpie-net
+  "1.1.1.1:443"     # raw public IP -- must be unroutable with no interfaces
   "github.com:443"  # name-based -- must fail to resolve at all
 )
 
@@ -189,10 +257,14 @@ for canary in "${MAGPIE_NETWORK_CANARIES[@]}"; do
 done
 
 # The gateway itself MUST be reachable -- derive host/port from
-# OPENAI_BASE_URL (config.gateway.containerBaseUrl, e.g.
-# "http://172.31.99.1:4000/v1") rather than hardcoding a second copy of the
+# OPENAI_BASE_URL (config.gateway.containerBaseUrl, as of M7-1 always
+# "http://127.0.0.1:4000/v1" -- this container's OWN loopback, served by the
+# forwarder started above) rather than hardcoding a second copy of the
 # address here, so this check can never silently drift from what Pi is
 # actually configured to talk to (see the models.json translation below).
+# This probe transits forwarder -> /run/gw/gw.sock -> gateway, so a pass here
+# proves the ENTIRE permitted path is up end-to-end, not just the forwarder's
+# own listener.
 magpie_gateway_authority="${OPENAI_BASE_URL#*://}"
 magpie_gateway_authority="${magpie_gateway_authority%%/*}"
 magpie_gateway_host="${magpie_gateway_authority%%:*}"

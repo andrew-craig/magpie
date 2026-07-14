@@ -80,9 +80,12 @@ args the caller passes (`"$@"`). So the runtime inputs are:
   key** (packages/gateway), never a real OpenRouter key — the orchestrator no longer
   holds one at all. The entrypoint fails fast if it's unset.
 - **`OPENAI_BASE_URL` — via `-e OPENAI_BASE_URL=...`, required as of M4-C.** The
-  gateway's container-facing proxy/data plane (default
-  `http://172.31.99.1:4000/v1`, `magpie-net`'s fixed gateway IP — see PLAN.md §5 and
-  `scripts/setup-network.sh`). **Pi itself does not read this env var** — verified
+  container-facing proxy/data plane. As of M7-1 (Design D — see
+  `DISTRIBUTION.md` §2) this is always `http://127.0.0.1:4000/v1`: an address
+  inside the container's OWN `--network none` network namespace, served by
+  the in-container forwarder (`forwarder.mjs`, baked into the image) that
+  relays to the gateway's real unix socket bind-mounted read-only at
+  `/run/gw/gw.sock`. **Pi itself does not read this env var** — verified
   empirically against a stub HTTP server that a bare `OPENAI_BASE_URL` is silently
   ignored by Pi 0.80.3. The entrypoint instead writes it into
   `~/.pi/agent/models.json` as an `openrouter` provider `baseUrl` override before
@@ -99,13 +102,22 @@ the full flag list.
 As of M4-C, the review container **never holds a real OpenRouter key**. It
 authenticates to the host-side gateway (`packages/gateway`) with a per-job,
 budget-capped, short-lived virtual key minted by the orchestrator
-(`packages/orchestrator/src/gateway.ts`) and revoked on cleanup, and reaches the
-gateway's proxy plane over `magpie-net` (an `--internal` docker network whose only
-permitted destination is the gateway — M4-D's `scripts/setup-network.sh`). The real
+(`packages/orchestrator/src/gateway.ts`) and revoked on cleanup. As of M7-1
+(Design D — `DISTRIBUTION.md` §2) it reaches the gateway's proxy plane through
+a per-job **unix domain socket** bind-mounted read-only at `/run/gw`
+(`/run/gw/gw.sock`), via an in-container TCP→unix forwarder (`forwarder.mjs`)
+— the container itself runs `--network none` and has no network interfaces
+except its own loopback, so that socket is its only channel out at all. (The
+pre-M7-1 design routed this over a dedicated `magpie-net` docker bridge +
+host iptables; that apparatus — `scripts/setup-network.sh`,
+`magpie-firewall.service` — is deleted, since `--network none` makes the
+isolation a property of the container's network namespace instead of a
+daemon-config-dependent firewall rule — see `DISTRIBUTION.md` §2.3.) The real
 OpenRouter key lives only in the gateway process's own environment
 (`MAGPIE_GATEWAY_OPENROUTER_KEY`). Containerizing Pi (M3) bought process/filesystem
-isolation and a read-only, `.git`-free worktree; this milestone (M4) is what removes
-the long-lived provider credential and locks down egress on top of that.
+isolation and a read-only, `.git`-free worktree; M4 removed the long-lived
+provider credential; M7-1 made the egress lockdown provable and
+config-independent on top of that.
 
 ### Fail-closed startup confinement assertions (M4-E)
 
@@ -122,28 +134,35 @@ invariant below is violated — PLAN.md milestone 4's explicit acceptance check:
    credential), so "present" can no longer be the bar — "wrong shape" is.
 2. **Network confinement**: a couple of canaries that must be UNREACHABLE (a
    raw public IP, `1.1.1.1:443`, plus a name-based one, `github.com:443`,
-   which is expected to fail at DNS resolution on `magpie-net`'s `--internal`
-   bridge) and the gateway's proxy-plane `GET /healthz` (host:port parsed from
-   `OPENAI_BASE_URL`, not a second hardcoded copy) which must SUCCEED. Both
+   which is expected to fail at DNS resolution — as of M7-1 the container runs
+   `--network none` and has no interfaces, let alone a resolver, at all) and
+   the gateway's proxy-plane `GET /healthz` (host:port parsed from
+   `OPENAI_BASE_URL`, not a second hardcoded copy — this now transits the
+   in-container forwarder and `/run/gw/gw.sock`) which must SUCCEED. Both
    probes use bash's builtin `/dev/tcp` plus `timeout` — no new image
    dependency (curl/wget/nc) was added for this.
 
-**Manual check** (reproduces the exact commands/output captured in
-task_1ffd's Review section — see `.chalk/tasks/task_1ffd.md` /
-`.chalk/tasks/closed/task_1ffd.md` once closed):
+**Manual check** (M7-1, Design D — `--network none` + the mounted gateway
+socket; see also `scripts/test-zero-egress.sh` for a scripted, self-contained
+version of the same proof):
 
-- Happy path: `docker run ... --network magpie-net -e OPENROUTER_API_KEY=<a
-  freshly minted sk-magpie- key> -e OPENAI_BASE_URL=http://172.31.99.1:4000/v1
-  ... magpie-reviewer:0.1.0 --provider openrouter --model <id>` completes a
-  real review through the gateway, exit `0`.
+- Happy path: `docker run ... --network none -v <job-dir>:/run/gw:ro
+  -e OPENROUTER_API_KEY=<a freshly minted sk-magpie- key>
+  -e OPENAI_BASE_URL=http://127.0.0.1:4000/v1 ...
+  magpie-reviewer:latest --provider openrouter --model <id>` completes a
+  real review through the gateway (forwarder → `/run/gw/gw.sock` → gateway),
+  exit `0`.
 - Real-key injection: same command with `OPENROUTER_API_KEY=sk-or-v1-deadbeef...`
   aborts immediately with `magpie-reviewer: refusing to run: OPENROUTER_API_KEY
   is not a magpie gateway virtual key ...`, exit `1`, no LLM traffic (verify
   against the gateway's own log — no new request line).
-- Extra network route: the SAME image run with `--network bridge` instead of
-  `magpie-net` (where `1.1.1.1` is actually routable) aborts with
-  `magpie-reviewer: refusing to run: network canary 1.1.1.1:443 is REACHABLE
-  from this container ...`, exit `1` — proving the probe genuinely detects an
+- Missing/wrong gateway mount: the SAME image run without the
+  `-v <job-dir>:/run/gw:ro` mount (or `--network bridge` instead of `none`)
+  aborts with either the forwarder-startup timeout
+  (`the in-container forwarder never came up on 127.0.0.1:4000`) or, under
+  `--network bridge`, `magpie-reviewer: refusing to run: network canary
+  1.1.1.1:443 is REACHABLE from this container ...` (since `1.1.1.1` becomes
+  routable again on a real bridge) — proving the probes genuinely detect an
   escape rather than trusting the network name.
 
 ## Smoke-testing a build

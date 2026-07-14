@@ -27,8 +27,15 @@ const FAKE_TOKEN = "ghs_super-secret-installation-token-fixture-should-never-lea
 // and revoke is a no-op, so the pipeline never reaches for the real gateway
 // mgmt API over the network. The dedicated "gateway virtual-key lifecycle"
 // describe block below injects its own spies instead to assert the calls.
-const FAKE_GATEWAY_KEY = { id: "gw-key-fixture", key: "sk-magpie-fixture-should-never-leak" };
-async function fakeMintGatewayKey(): Promise<{ id: string; key: string }> {
+const FAKE_GATEWAY_KEY = {
+  id: "gw-key-fixture",
+  key: "sk-magpie-fixture-should-never-leak",
+  // M7-1 (Design D): opaque mount-source path for the `-v <socketDir>:/run/gw:ro`
+  // bind mount reviewer.ts now adds — the fake docker below never actually
+  // connects through it, so any non-empty string is fine here.
+  socketDir: "/run/magpie-gateway/jobs/gw-key-fixture",
+};
+async function fakeMintGatewayKey(): Promise<{ id: string; key: string; socketDir: string }> {
   return FAKE_GATEWAY_KEY;
 }
 async function fakeRevokeGatewayKey(): Promise<void> {}
@@ -212,11 +219,10 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",
-      network: "bridge",
     },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
-      containerBaseUrl: "http://172.31.99.1:4000/v1",
+      containerBaseUrl: "http://127.0.0.1:4000/v1",
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
@@ -498,6 +504,45 @@ describe("createReviewPipeline / runJob", () => {
     const nameIdx = argv!.indexOf("--name");
     expect(nameIdx).toBeGreaterThanOrEqual(0);
     expect(argv![nameIdx + 1]).toBe("magpie-job-e2e-42");
+  });
+
+  it("threads the minted gateway key's socketDir into the reviewer's --network none /run/gw mount (M7-1, Design D)", async () => {
+    // gateway.ts's mintGatewayKeyFromConfig now returns `socketDir` alongside
+    // `id`/`key` (M7-1 — see gateway.ts's `GatewayKey` doc comment), and
+    // pipeline.ts must thread it into reviewer.ts's `runReview` as
+    // `gatewaySocketDir`, which reviewer.ts bind-mounts read-only at
+    // `/run/gw` on a container that now runs `--network none` instead of the
+    // old bridge network — see reviewer.test.ts for the reviewer.ts-level
+    // unit coverage of the mount/flag themselves; this asserts pipeline.ts
+    // actually threads the value through end to end.
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good, no issues found."));
+    const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken,
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    expect(argv).toContain(`${FAKE_GATEWAY_KEY.socketDir}:/run/gw:ro`);
+    const netIdx = argv!.indexOf("--network");
+    expect(netIdx).toBeGreaterThanOrEqual(0);
+    expect(argv![netIdx + 1]).toBe("none");
   });
 
   it("anchors a findable finding to an inline comment and folds an unanchorable one into Other observations", async () => {
@@ -1060,9 +1105,13 @@ describe("createReviewPipeline / runJob", () => {
 describe("gateway virtual-key lifecycle (M4-B)", () => {
   /** Spy mint/revoke deps that record the minted key and every revoke id. */
   function gatewaySpies() {
-    const minted = { id: "gw-live-key-id", key: "sk-magpie-live-should-never-leak" };
+    const minted = {
+      id: "gw-live-key-id",
+      key: "sk-magpie-live-should-never-leak",
+      socketDir: "/run/magpie-gateway/jobs/gw-live-key-id",
+    };
     const revokedIds: string[] = [];
-    const mintGatewayKey = vi.fn(async () => minted);
+    const mintGatewayKey = vi.fn(async (_config: Config, _jobId: string) => minted);
     const revokeGatewayKey = vi.fn(async (_config: Config, id: string) => {
       revokedIds.push(id);
     });

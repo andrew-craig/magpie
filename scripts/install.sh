@@ -3,10 +3,15 @@
 # install.sh — idempotent production install for magpie (Milestone 5, task_56ad).
 #
 # Sets up the two unprivileged service users, the config/secret/state
-# directories, and the three systemd units (firewall oneshot -> gateway ->
-# orchestrator) so a reboot brings magpie up in the correct order with no
-# manual steps. Safe to re-run: it never overwrites an existing secret, env
-# file, or config.toml, and never duplicates a user or a directory.
+# directories, and the two systemd units (gateway -> orchestrator) so a
+# reboot brings magpie up in the correct order with no manual steps. Safe to
+# re-run: it never overwrites an existing secret, env file, or config.toml,
+# and never duplicates a user or a directory.
+#
+# As of M7-1 (Design D — DISTRIBUTION.md §2) there is no network-lockdown
+# unit/script to install any more: each review container runs `--network
+# none`, so there is no bridge/iptables apparatus to provision at boot
+# (magpie-firewall.service and scripts/setup-network.sh are deleted).
 #
 # It does NOT build the code and does NOT start the services — building runs as
 # the operator (not root), and enabling is a deliberate final step once secrets
@@ -64,10 +69,9 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "must run as root (use sudo)"
 
-for unit in magpie-firewall.service magpie-gateway.service magpie.service; do
+for unit in magpie-gateway.service magpie.service; do
   [[ -f "$REPO_ROOT/systemd/$unit" ]] || die "missing $REPO_ROOT/systemd/$unit"
 done
-[[ -x "$REPO_ROOT/scripts/setup-network.sh" ]] || die "missing/again scripts/setup-network.sh"
 [[ -f "$REPO_ROOT/config.example.toml" ]] || die "missing config.example.toml"
 
 command -v systemctl >/dev/null 2>&1 || die "systemctl not found — this installer targets systemd hosts"
@@ -210,9 +214,11 @@ MAGPIE_GATEWAY_OPENROUTER_KEY=
 # Management-plane bearer token. REQUIRED and MUST equal the orchestrator's
 # MAGPIE_GATEWAY_MASTER_KEY (one shared secret known to both processes).
 MAGPIE_GATEWAY_MASTER_KEY=
-# Bind the proxy plane to the magpie-net bridge IP so review containers can
-# reach it (the mgmt plane stays hardcoded to 127.0.0.1 in code).
-GATEWAY_PROXY_HOST=172.31.99.1
+# No proxy-plane host/port to set: as of M7-1 (Design D) the proxy plane is a
+# per-job UNIX SOCKET under systemd's RuntimeDirectory (see
+# systemd/magpie-gateway.service's GATEWAY_SOCKET_DIR), not a bound TCP
+# host:port — GATEWAY_PROXY_HOST/GATEWAY_PROXY_PORT no longer exist. The mgmt
+# plane stays hardcoded to 127.0.0.1 in code.
 # Optional: default model when a request/key specifies none.
 # GATEWAY_DEFAULT_MODEL=anthropic/claude-sonnet-4.5
 EOF
@@ -226,8 +232,9 @@ if [[ -e "$ETC_MAGPIE/config.toml" ]]; then
 else
   install -o root -g magpie -m 0640 "$REPO_ROOT/config.example.toml" "$ETC_MAGPIE/config.toml"
   log "seeded $ETC_MAGPIE/config.toml from config.example.toml (0640) — EDIT it:"
-  log "  repo_allowlist, github.app_id, github.private_key_path, [llm].model,"
-  log "  and set [container].network = \"magpie-net\" for the M4 egress lockdown."
+  log "  repo_allowlist, github.app_id, github.private_key_path, [llm].model."
+  log "  (Egress lockdown needs no config as of M7-1: every review container"
+  log "  runs --network none unconditionally — see DISTRIBUTION.md §2.)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -250,7 +257,6 @@ install_unit() {
   log "installed $dst"
 }
 
-install_unit magpie-firewall.service
 install_unit magpie-gateway.service
 install_unit magpie.service
 
@@ -259,7 +265,7 @@ systemctl daemon-reload
 
 if [[ "$ENABLE_UNITS" -eq 1 ]]; then
   log "enabling units (start on boot)"
-  systemctl enable magpie-firewall.service magpie-gateway.service magpie.service
+  systemctl enable magpie-gateway.service magpie.service
 fi
 
 # ---------------------------------------------------------------------------
@@ -279,7 +285,8 @@ cat <<NOTES
      The master key MUST match in both files.
 
   2. Edit $ETC_MAGPIE/config.toml (app id, private_key_path, repo_allowlist,
-     model, and [container].network = "magpie-net").
+     model). No network/firewall config needed — every review container runs
+     --network none unconditionally (M7-1, DISTRIBUTION.md §2).
 
   3. Place the GitHub App private key where config.toml's private_key_path
      points (default /etc/magpie/github-app.private-key.pem); make it readable
@@ -306,8 +313,8 @@ cat <<NOTES
      it per docs/cloudflared.md if you haven't already.
 
   6. Enable + start (or reboot to prove boot ordering):
-       sudo systemctl enable --now magpie-firewall.service magpie-gateway.service magpie.service
-     Boot order is enforced by the units: firewall -> gateway -> orchestrator.
-     Check: systemctl status magpie-firewall magpie-gateway magpie
+       sudo systemctl enable --now magpie-gateway.service magpie.service
+     Boot order is enforced by the units: gateway -> orchestrator.
+     Check: systemctl status magpie-gateway magpie
 
 NOTES
