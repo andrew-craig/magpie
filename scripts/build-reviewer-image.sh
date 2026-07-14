@@ -2,6 +2,11 @@
 #
 # build-reviewer-image.sh — build the magpie-reviewer container image (M3-A).
 #
+# NOTE (M7-2): the reviewer image is now PUBLISHED to GHCR
+# (ghcr.io/andrew-craig/magpie/reviewer) multi-arch + cosign-signed by release
+# CI (.github/workflows/release-reviewer.yml on `reviewer-v*` tags). This script
+# is for LOCAL DEVELOPMENT builds only; production pulls the published image.
+#
 # The build context is the REPO ROOT, not docker/reviewer/, because the
 # Dockerfile needs to COPY packages/review-extension/src and
 # reviewer-prompt.md, which live outside docker/reviewer/. Idempotent: safe

@@ -72,10 +72,23 @@ const rawConfigSchema = z
       .prefault({}),
     container: z
       .object({
-        // MUST match the tag the M3-A image build produces (see PLAN.md M3
-        // and docker/). Not just a convention: task_4ed4 (M3-C)'s `docker
-        // run` invocation uses this value directly as the image to run.
-        image: z.string().min(1).default("magpie-reviewer:0.1.0"),
+        // The reviewer image the review container runs. As of M7-2
+        // (DISTRIBUTION.md §3.1) this is PULLED from GHCR rather than built
+        // locally: it's published multi-arch (amd64+arm64), cosign-signed with
+        // SLSA provenance by .github/workflows/release-reviewer.yml on
+        // `reviewer-v*` tags, and is the ONLY container in the product
+        // (orchestrator + gateway are host services). Not just a convention:
+        // task_4ed4 (M3-C)'s `docker run` invocation uses this value directly
+        // as the image to run. In PRODUCTION, pin by digest
+        // (`...reviewer:0.2.0@sha256:...`) so a re-tagged upstream image can't
+        // silently swap the untrusted-content runtime under you; the plain tag
+        // below is the floor. `scripts/build-reviewer-image.sh` still builds a
+        // local `magpie-reviewer:*` image for development.
+        // TODO(tech-lead): pin @sha256: digest after first publish.
+        image: z
+          .string()
+          .min(1)
+          .default("ghcr.io/andrew-craig/magpie/reviewer:0.2.0"),
         memory: z.string().min(1).default("4g"),
         cpus: z.string().min(1).default("2"),
         pids_limit: z.number().int().positive().default(256),

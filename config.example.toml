@@ -111,11 +111,17 @@ max_diff_lines = 4000
 work_dir = "/var/lib/magpie/work"
 
 [container]
-# Docker image tag the review container runs (see PLAN.md Milestone 3). This
-# MUST match the tag produced by the magpie-reviewer image build (docker/) —
-# the orchestrator does not build or pull the image itself.
-# Default: "magpie-reviewer:0.1.0"
-image = "magpie-reviewer:0.1.0"
+# Reviewer image the review container runs (the ONLY container in the product;
+# orchestrator + gateway are host services). As of M7-2 this is PUBLISHED to
+# GHCR — built multi-arch (amd64+arm64) and cosign-signed with SLSA provenance
+# by .github/workflows/release-reviewer.yml on `reviewer-v*` tags — so adopters
+# `docker pull` it rather than building locally. In PRODUCTION, PIN BY DIGEST
+# (e.g. "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:<digest>") so a
+# re-tagged upstream image can't silently swap the untrusted-content runtime
+# under you; the plain tag below is the floor. `scripts/build-reviewer-image.sh`
+# is now for LOCAL DEVELOPMENT ONLY (it builds a `magpie-reviewer:*` image).
+# Default: "ghcr.io/andrew-craig/magpie/reviewer:0.2.0"
+image = "ghcr.io/andrew-craig/magpie/reviewer:0.2.0"
 
 # Memory limit passed to `docker run --memory` for the review container.
 # Bounds how much host memory a single (possibly prompt-injected) review job

@@ -7,7 +7,44 @@ baked into the image at build time. This image is a pure runtime artifact — it
 no secrets and no per-repo/per-job config; those are supplied by the orchestrator at
 `docker run` time (see `packages/orchestrator` M3-C/M3-D, task_4ed4/task_d8aa).
 
+## Published image (GHCR)
+
+As of M7-2 (see `DISTRIBUTION.md` §3.1) this image is **published to GHCR** so
+adopters `pull` it instead of building and re-pinning Pi to their host — it is
+the *only* container in the product (the orchestrator and gateway are host
+services):
+
+```
+docker pull ghcr.io/andrew-craig/magpie/reviewer:0.2.0
+# or, recommended for production, pin by digest:
+docker pull ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:<digest>
+```
+
+It's built **multi-arch (amd64 + arm64)** and **cosign-signed (keyless — GitHub
+OIDC / Fulcio + Rekor, no long-lived keys)** with SLSA build provenance + SBOM
+attestations by `.github/workflows/release-reviewer.yml`, which runs on
+`reviewer-v*` release tags (e.g. `reviewer-v0.2.0` → image tag `0.2.0`). Because
+the reviewer runs untrusted, prompt-injectable PR content, **pin it by digest**
+(`container.image = "…/reviewer:0.2.0@sha256:<digest>"`) in production so a
+re-tagged upstream image can't silently swap the runtime under you.
+
+Verify the signature before trusting a pulled digest (keyless — assert the image
+was signed by *this* repo's release workflow, via its OIDC identity):
+
+```
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/andrew-craig/magpie' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/andrew-craig/magpie/reviewer@sha256:<digest>
+```
+
+The GHCR package must be made **public** once, after the first publish, for
+adopters to be able to `pull` it (packages default to private).
+
 ## Building
+
+> **Local development only.** Production pulls the published GHCR image above;
+> this build path exists for iterating on the image locally.
 
 ```
 npm run build:reviewer-image

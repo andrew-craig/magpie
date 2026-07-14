@@ -74,7 +74,7 @@ describe("loadConfig", () => {
     expect(config.limits.maxDiffLines).toBe(4000);
     expect(config.repoAllowlist).toEqual(["my-org/my-repo"]);
     expect(config.workspace.workDir).toBe("/var/lib/magpie/work");
-    expect(config.container.image).toBe("magpie-reviewer:0.1.0");
+    expect(config.container.image).toBe("ghcr.io/andrew-craig/magpie/reviewer:0.2.0");
     expect(config.container.memory).toBe("4g");
     expect(config.container.cpus).toBe("2");
     expect(config.container.pidsLimit).toBe(256);
