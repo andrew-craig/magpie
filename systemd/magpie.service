@@ -10,7 +10,11 @@
 # its environment / config.
 #
 # Ordering: started AFTER the gateway (so a webhook arriving right after boot
-# can immediately mint a virtual key) and AFTER docker + the firewall. On stop
+# can immediately mint a virtual key) and AFTER docker. There is no firewall/
+# network-lockdown unit to order after any more — M7-1's Design D
+# (DISTRIBUTION.md §2) runs each review container `--network none`, so there
+# is no bridge/iptables apparatus left to provision (magpie-firewall.service
+# and scripts/setup-network.sh are deleted). On stop
 # it must DRAIN in-flight jobs rather than be killed mid-review — the SIGTERM
 # graceful-shutdown path already exists (packages/orchestrator/src/index.ts +
 # shutdown.ts); TimeoutStopSec below is sized to let that drain finish.
@@ -24,7 +28,7 @@
 Description=magpie orchestrator (GitHub PR review bot)
 Documentation=file:/opt/magpie/PLAN.md
 Requires=docker.service
-After=docker.service network-online.target magpie-gateway.service magpie-firewall.service
+After=docker.service network-online.target magpie-gateway.service
 Wants=network-online.target magpie-gateway.service
 
 [Service]

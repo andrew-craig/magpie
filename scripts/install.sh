@@ -3,14 +3,29 @@
 # install.sh — idempotent production install for magpie (Milestone 5, task_56ad).
 #
 # Sets up the two unprivileged service users, the config/secret/state
-# directories, and the three systemd units (firewall oneshot -> gateway ->
-# orchestrator) so a reboot brings magpie up in the correct order with no
-# manual steps. Safe to re-run: it never overwrites an existing secret, env
-# file, or config.toml, and never duplicates a user or a directory.
+# directories, and the two systemd units (gateway -> orchestrator) so a
+# reboot brings magpie up in the correct order with no manual steps. Safe to
+# re-run: it never overwrites an existing secret, env file, or config.toml,
+# and never duplicates a user or a directory.
 #
-# It does NOT build the code and does NOT start the services — building runs as
-# the operator (not root), and enabling is a deliberate final step once secrets
-# are filled in. Both are printed as clear next steps at the end.
+# As of M7-1 (Design D — DISTRIBUTION.md §2) there is no network-lockdown
+# unit/script to install any more: each review container runs `--network
+# none`, so there is no bridge/iptables apparatus to provision at boot
+# (magpie-firewall.service and scripts/setup-network.sh are deleted).
+#
+# It does NOT install dependencies or build the code, and does NOT start the
+# services — that runs as the operator (not root), and enabling is a
+# deliberate final step once secrets are filled in. Both are printed as clear
+# next steps at the end.
+#
+# PRIMARY FLOW (M7-3): download a release tarball (built by
+# scripts/pack-host.sh / .github/workflows/release-host.yml — see
+# INSTALL.md), unpack it to /opt/magpie (or MAGPIE_PREFIX), then:
+#   sudo ./scripts/install.sh
+#   npm ci --omit=dev            # dist/ ships prebuilt in the tarball; no build step
+# A raw git checkout (no dist/ yet) instead needs the full
+# `npm ci && npm run build && npm run gateway:build` — this script detects
+# which case applies and prints the right next step.
 #
 # Usage:
 #   sudo ./scripts/install.sh            # install units + scaffolding
@@ -43,7 +58,7 @@ ENABLE_UNITS=0
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE_UNITS=1 ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -64,10 +79,9 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "must run as root (use sudo)"
 
-for unit in magpie-firewall.service magpie-gateway.service magpie.service; do
+for unit in magpie-gateway.service magpie.service; do
   [[ -f "$REPO_ROOT/systemd/$unit" ]] || die "missing $REPO_ROOT/systemd/$unit"
 done
-[[ -x "$REPO_ROOT/scripts/setup-network.sh" ]] || die "missing/again scripts/setup-network.sh"
 [[ -f "$REPO_ROOT/config.example.toml" ]] || die "missing config.example.toml"
 
 command -v systemctl >/dev/null 2>&1 || die "systemctl not found — this installer targets systemd hosts"
@@ -199,6 +213,7 @@ MAGPIE_CONFIG=$ETC_MAGPIE/config.toml
 MAGPIE_WEBHOOK_SECRET=
 # Shared bearer token for the gateway management plane. REQUIRED and MUST be
 # the SAME value as MAGPIE_GATEWAY_MASTER_KEY in $ETC_GATEWAY/gateway.env.
+# Generate it once with: openssl rand -hex 32
 MAGPIE_GATEWAY_MASTER_KEY=
 EOF
 
@@ -209,10 +224,13 @@ seed_file "$ETC_GATEWAY/gateway.env" magpie-gateway 0600 <<'EOF'
 MAGPIE_GATEWAY_OPENROUTER_KEY=
 # Management-plane bearer token. REQUIRED and MUST equal the orchestrator's
 # MAGPIE_GATEWAY_MASTER_KEY (one shared secret known to both processes).
+# Generate it once with: openssl rand -hex 32
 MAGPIE_GATEWAY_MASTER_KEY=
-# Bind the proxy plane to the magpie-net bridge IP so review containers can
-# reach it (the mgmt plane stays hardcoded to 127.0.0.1 in code).
-GATEWAY_PROXY_HOST=172.31.99.1
+# No proxy-plane host/port to set: as of M7-1 (Design D) the proxy plane is a
+# per-job UNIX SOCKET under systemd's RuntimeDirectory (see
+# systemd/magpie-gateway.service's GATEWAY_SOCKET_DIR), not a bound TCP
+# host:port — GATEWAY_PROXY_HOST/GATEWAY_PROXY_PORT no longer exist. The mgmt
+# plane stays hardcoded to 127.0.0.1 in code.
 # Optional: default model when a request/key specifies none.
 # GATEWAY_DEFAULT_MODEL=anthropic/claude-sonnet-4.5
 EOF
@@ -226,8 +244,9 @@ if [[ -e "$ETC_MAGPIE/config.toml" ]]; then
 else
   install -o root -g magpie -m 0640 "$REPO_ROOT/config.example.toml" "$ETC_MAGPIE/config.toml"
   log "seeded $ETC_MAGPIE/config.toml from config.example.toml (0640) — EDIT it:"
-  log "  repo_allowlist, github.app_id, github.private_key_path, [llm].model,"
-  log "  and set [container].network = \"magpie-net\" for the M4 egress lockdown."
+  log "  repo_allowlist, github.app_id, github.private_key_path, [llm].model."
+  log "  (Egress lockdown needs no config as of M7-1: every review container"
+  log "  runs --network none unconditionally — see DISTRIBUTION.md §2.)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -250,7 +269,6 @@ install_unit() {
   log "installed $dst"
 }
 
-install_unit magpie-firewall.service
 install_unit magpie-gateway.service
 install_unit magpie.service
 
@@ -259,7 +277,7 @@ systemctl daemon-reload
 
 if [[ "$ENABLE_UNITS" -eq 1 ]]; then
   log "enabling units (start on boot)"
-  systemctl enable magpie-firewall.service magpie-gateway.service magpie.service
+  systemctl enable magpie-gateway.service magpie.service
 fi
 
 # ---------------------------------------------------------------------------
@@ -269,6 +287,21 @@ fi
 DIST_ORCH="$PREFIX/packages/orchestrator/dist/index.js"
 DIST_GW="$PREFIX/packages/gateway/dist/index.js"
 
+# A release tarball (scripts/pack-host.sh) ships prebuilt dist/ for both
+# services, so the only remaining step is `npm ci --omit=dev` to materialize
+# node_modules — there is no TypeScript build on the adopter host. A raw git
+# checkout has no dist/ yet, so it still needs the full build.
+if [[ -f "$DIST_ORCH" && -f "$DIST_GW" ]]; then
+  STEP4="  4. Install production dependencies (as your normal user, from $PREFIX):
+       npm ci --omit=dev
+     dist/ is already prebuilt (this looks like a release tarball) — no
+     TypeScript build needed on this host."
+else
+  STEP4="  4. Build the code (as your normal user, from $PREFIX):
+       npm ci
+       npm run build && npm run gateway:build"
+fi
+
 cat <<NOTES
 
 [install] Done. Remaining manual steps:
@@ -276,19 +309,19 @@ cat <<NOTES
   1. Fill in secrets (the templates were seeded empty):
        sudoedit $ETC_GATEWAY/gateway.env     # OpenRouter key + shared master key
        sudoedit $ETC_MAGPIE/magpie.env       # webhook secret + SAME master key
-     The master key MUST match in both files.
+     The master key MUST match in both files. Generate the shared master key
+     once with:  openssl rand -hex 32
 
   2. Edit $ETC_MAGPIE/config.toml (app id, private_key_path, repo_allowlist,
-     model, and [container].network = "magpie-net").
+     model). No network/firewall config needed — every review container runs
+     --network none unconditionally (M7-1, DISTRIBUTION.md §2).
 
   3. Place the GitHub App private key where config.toml's private_key_path
      points (default /etc/magpie/github-app.private-key.pem); make it readable
      by 'magpie' only, e.g.:
        install -o magpie -g magpie -m 0600 app.pem /etc/magpie/github-app.private-key.pem
 
-  4. Build the code (as your normal user, from $PREFIX):
-       npm ci
-       npm run build && npm run gateway:build
+$STEP4
 NOTES
 
 if [[ -f "$DIST_ORCH" && -f "$DIST_GW" ]]; then
@@ -306,8 +339,8 @@ cat <<NOTES
      it per docs/cloudflared.md if you haven't already.
 
   6. Enable + start (or reboot to prove boot ordering):
-       sudo systemctl enable --now magpie-firewall.service magpie-gateway.service magpie.service
-     Boot order is enforced by the units: firewall -> gateway -> orchestrator.
-     Check: systemctl status magpie-firewall magpie-gateway magpie
+       sudo systemctl enable --now magpie-gateway.service magpie.service
+     Boot order is enforced by the units: gateway -> orchestrator.
+     Check: systemctl status magpie-gateway magpie
 
 NOTES

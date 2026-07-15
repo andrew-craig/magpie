@@ -110,15 +110,23 @@ function recordingLogger(): { errors: Record<string, unknown>[]; error(p: Record
 
 describe("mintGatewayKey", () => {
   it("POSTs to /admin/keys with the master-key bearer auth and the right body shape", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "abc123", key: "sk-magpie-deadbeef" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "abc123", key: "sk-magpie-deadbeef", socketDir: "/run/magpie-gateway/jobs/abc123" },
+    });
 
     const result = await mintGatewayKey(authConfig(fake.baseUrl), {
       model: "anthropic/claude-sonnet-4.5",
       budgetUsd: 0.5,
       ttlSeconds: 720,
+      jobId: "job-abc123",
     });
 
-    expect(result).toEqual({ id: "abc123", key: "sk-magpie-deadbeef" });
+    expect(result).toEqual({
+      id: "abc123",
+      key: "sk-magpie-deadbeef",
+      socketDir: "/run/magpie-gateway/jobs/abc123",
+    });
 
     expect(fake.requests).toHaveLength(1);
     const req = fake.requests[0];
@@ -130,22 +138,29 @@ describe("mintGatewayKey", () => {
       model: "anthropic/claude-sonnet-4.5",
       budgetUsd: 0.5,
       ttlSeconds: 720,
+      jobId: "job-abc123",
     });
   });
 
   it("omits `model` from the body when no model scope is given", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "id1", key: "sk-magpie-x" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "id1", key: "sk-magpie-x", socketDir: "/run/magpie-gateway/jobs/id1" },
+    });
 
-    await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 });
+    await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" });
 
-    expect(JSON.parse(fake.requests[0].body)).toEqual({ budgetUsd: 1, ttlSeconds: 60 });
+    expect(JSON.parse(fake.requests[0].body)).toEqual({ budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" });
     expect(JSON.parse(fake.requests[0].body)).not.toHaveProperty("model");
   });
 
   it("tolerates a base URL with a trailing slash (no doubled //admin/keys)", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "id1", key: "sk-magpie-x" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "id1", key: "sk-magpie-x", socketDir: "/run/magpie-gateway/jobs/id1" },
+    });
 
-    await mintGatewayKey(authConfig(`${fake.baseUrl}/`), { budgetUsd: 1, ttlSeconds: 60 });
+    await mintGatewayKey(authConfig(`${fake.baseUrl}/`), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" });
 
     expect(fake.requests[0].url).toBe("/admin/keys");
   });
@@ -153,30 +168,32 @@ describe("mintGatewayKey", () => {
   it("throws on a non-201 status (e.g. 401 bad master key), surfacing the status", async () => {
     const fake = await startFakeGateway({ status: 401, json: { error: { message: "unauthorized", type: "unauthorized" } } });
 
-    await expect(mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 })).rejects.toThrow(/HTTP 401/);
+    await expect(
+      mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" }),
+    ).rejects.toThrow(/HTTP 401/);
   });
 
   it("throws on a 201 with an unexpected response shape (missing key)", async () => {
     const fake = await startFakeGateway({ status: 201, json: { id: "only-an-id" } });
 
-    await expect(mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 })).rejects.toThrow(
-      /unexpected virtual-key mint response shape/,
-    );
+    await expect(
+      mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" }),
+    ).rejects.toThrow(/unexpected virtual-key mint response shape/);
   });
 
   it("throws on a 201 with an unparseable (non-JSON) body", async () => {
     const fake = await startFakeGateway({ status: 201, raw: "<html>not json</html>" });
 
-    await expect(mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 })).rejects.toThrow(
-      /unparseable virtual-key mint response/,
-    );
+    await expect(
+      mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" }),
+    ).rejects.toThrow(/unparseable virtual-key mint response/);
   });
 
   it("throws (never hangs) when the gateway is unreachable", async () => {
     // Point at a port nothing is listening on (an ephemeral high port we
     // never bound). The fetch should fail fast and be wrapped as a reach error.
     const cfg = authConfig("http://127.0.0.1:1");
-    await expect(mintGatewayKey(cfg, { budgetUsd: 1, ttlSeconds: 60 })).rejects.toThrow(
+    await expect(mintGatewayKey(cfg, { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" })).rejects.toThrow(
       /failed to reach LLM gateway management API/,
     );
   });
@@ -185,10 +202,13 @@ describe("mintGatewayKey", () => {
     // Confirms the AbortSignal.timeout is wired onto the fetch (the real signal
     // still runs; we only assert the bound). Without it, a wedged gateway would
     // block a worker until the far coarser per-job wall-clock backstop fired.
-    const fake = await startFakeGateway({ status: 201, json: { id: "id1", key: "sk-magpie-x" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "id1", key: "sk-magpie-x", socketDir: "/run/magpie-gateway/jobs/id1" },
+    });
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     try {
-      await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 });
+      await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" });
       expect(timeoutSpy).toHaveBeenCalledWith(5000);
     } finally {
       timeoutSpy.mockRestore();
@@ -200,7 +220,7 @@ describe("mintGatewayKey", () => {
 
     let caught: unknown;
     try {
-      await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60 });
+      await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 1, ttlSeconds: 60, jobId: "job-1" });
     } catch (err) {
       caught = err;
     }
@@ -286,9 +306,8 @@ describe("mintGatewayKeyFromConfig", () => {
         cpus: "2",
         pidsLimit: 256,
         dockerBin: "docker",
-        network: "bridge",
       },
-      gateway: { baseUrl, containerBaseUrl: "http://172.31.99.1:4000/v1", perJobBudgetUsd: 0.75, ttlMarginSeconds: 90 },
+      gateway: { baseUrl, containerBaseUrl: "http://127.0.0.1:4000/v1", perJobBudgetUsd: 0.75, ttlMarginSeconds: 90 },
       secrets: {
         webhookSecret: "test-webhook-secret",
         githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
@@ -297,25 +316,36 @@ describe("mintGatewayKeyFromConfig", () => {
     };
   }
 
-  it("scopes to config.llm.model, budgets per config, and sets TTL = jobTimeout + margin", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "id1", key: "sk-magpie-x" } });
+  it("scopes to config.llm.model, budgets per config, sets TTL = jobTimeout + margin, and passes jobId through", async () => {
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "id1", key: "sk-magpie-x", socketDir: "/run/magpie-gateway/jobs/id1" },
+    });
 
-    await mintGatewayKeyFromConfig(testConfig(fake.baseUrl));
+    await mintGatewayKeyFromConfig(testConfig(fake.baseUrl), "job-42");
 
     expect(JSON.parse(fake.requests[0].body)).toEqual({
       model: "some/model",
       budgetUsd: 0.75,
       // 600 (jobTimeoutSeconds) + 90 (ttlMarginSeconds).
       ttlSeconds: 690,
+      jobId: "job-42",
     });
   });
 });
 
 describe("per-job lifecycle (mint -> ... -> revoke)", () => {
   it("mints a key, then revokes it by the returned id on success", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "job-key-1", key: "sk-magpie-live" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "job-key-1", key: "sk-magpie-live", socketDir: "/run/magpie-gateway/jobs/job-key-1" },
+    });
 
-    const minted: GatewayKey = await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 0.5, ttlSeconds: 700 });
+    const minted: GatewayKey = await mintGatewayKey(authConfig(fake.baseUrl), {
+      budgetUsd: 0.5,
+      ttlSeconds: 700,
+      jobId: "job-key-1",
+    });
     fake.setResponse({ status: 204 });
     await revokeGatewayKey(authConfig(fake.baseUrl), minted.id, recordingLogger());
 
@@ -326,10 +356,17 @@ describe("per-job lifecycle (mint -> ... -> revoke)", () => {
   });
 
   it("revoke still runs (and swallows failure) even if the run it wrapped failed — the key id is always cleaned up", async () => {
-    const fake = await startFakeGateway({ status: 201, json: { id: "job-key-2", key: "sk-magpie-live" } });
+    const fake = await startFakeGateway({
+      status: 201,
+      json: { id: "job-key-2", key: "sk-magpie-live", socketDir: "/run/magpie-gateway/jobs/job-key-2" },
+    });
     const logger = recordingLogger();
 
-    const minted = await mintGatewayKey(authConfig(fake.baseUrl), { budgetUsd: 0.5, ttlSeconds: 700 });
+    const minted = await mintGatewayKey(authConfig(fake.baseUrl), {
+      budgetUsd: 0.5,
+      ttlSeconds: 700,
+      jobId: "job-key-2",
+    });
     // Simulate the gateway being flaky at cleanup time (e.g. mid-restart):
     // the revoke must not throw regardless, so the job's own failure outcome
     // is never masked.

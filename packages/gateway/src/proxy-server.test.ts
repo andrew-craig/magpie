@@ -44,7 +44,12 @@ async function startStubUpstream(
 
 function testConfig(upstreamBaseUrl: string, defaultModel?: string): GatewayConfig {
   return {
-    proxy: { host: "127.0.0.1", port: 0 },
+    // Not exercised by these tests (they bind the proxy server to a plain
+    // TCP loopback port for `fetch()` convenience — see `start()` below —
+    // rather than a unix socket; the socket-specific bind/permissions/
+    // teardown behavior is covered by job-sockets.test.ts instead). Kept as
+    // a syntactically valid path so `GatewayConfig` stays fully populated.
+    socketDirRoot: "/tmp/unused-in-proxy-server-tests",
     mgmt: { host: "127.0.0.1", port: 0 },
     upstream: { baseUrl: upstreamBaseUrl },
     defaultModel,

@@ -10,7 +10,7 @@ describe("loadGatewayConfig", () => {
   it("returns a fully typed config with defaults applied given only the required secrets", () => {
     const config = loadGatewayConfig({ ...REQUIRED_ENV });
 
-    expect(config.proxy).toEqual({ host: "127.0.0.1", port: 4000 });
+    expect(config.socketDirRoot).toBe("/run/magpie-gateway/jobs");
     expect(config.mgmt).toEqual({ host: "127.0.0.1", port: 4100 });
     expect(config.upstream.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(config.defaultModel).toBeUndefined();
@@ -21,14 +21,13 @@ describe("loadGatewayConfig", () => {
   it("honours GATEWAY_* overrides", () => {
     const config = loadGatewayConfig({
       ...REQUIRED_ENV,
-      GATEWAY_PROXY_HOST: "172.31.99.1",
-      GATEWAY_PROXY_PORT: "5000",
+      GATEWAY_SOCKET_DIR: "/tmp/some-other-jobs-root",
       GATEWAY_MGMT_PORT: "5100",
       GATEWAY_UPSTREAM_BASE_URL: "https://example.invalid/v1",
       GATEWAY_DEFAULT_MODEL: "anthropic/claude-sonnet-4.5",
     });
 
-    expect(config.proxy).toEqual({ host: "172.31.99.1", port: 5000 });
+    expect(config.socketDirRoot).toBe("/tmp/some-other-jobs-root");
     // mgmt.host is hardcoded to loopback regardless of any env — there is no
     // env var that can move it (see config.ts's doc comment on `mgmt.host`).
     expect(config.mgmt).toEqual({ host: "127.0.0.1", port: 5100 });
@@ -49,13 +48,7 @@ describe("loadGatewayConfig", () => {
     }
   });
 
-  it("rejects GATEWAY_PROXY_HOST=0.0.0.0", () => {
-    expect(() =>
-      loadGatewayConfig({ ...REQUIRED_ENV, GATEWAY_PROXY_HOST: "0.0.0.0" }),
-    ).toThrow(/must not be 0\.0\.0\.0/);
-  });
-
-  it("rejects an out-of-range port", () => {
-    expect(() => loadGatewayConfig({ ...REQUIRED_ENV, GATEWAY_PROXY_PORT: "99999" })).toThrow(GatewayConfigError);
+  it("rejects an out-of-range mgmt port", () => {
+    expect(() => loadGatewayConfig({ ...REQUIRED_ENV, GATEWAY_MGMT_PORT: "99999" })).toThrow(GatewayConfigError);
   });
 });

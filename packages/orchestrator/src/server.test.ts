@@ -31,11 +31,10 @@ function testConfig(): Config {
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",
-      network: "bridge",
     },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
-      containerBaseUrl: "http://172.31.99.1:4000/v1",
+      containerBaseUrl: "http://127.0.0.1:4000/v1",
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },

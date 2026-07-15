@@ -1,0 +1,148 @@
+# release-reviewer.yml — publish the magpie-reviewer container image to GHCR.
+#
+# WHAT THIS DOES
+#   On a `reviewer-v*` release tag (e.g. `reviewer-v0.2.0`) this builds the
+#   reviewer image multi-arch (linux/amd64 + linux/arm64), pushes it to
+#   ghcr.io/andrew-craig/magpie/reviewer, cosign-signs it BY DIGEST, and
+#   attaches SLSA build provenance + an SBOM as registry attestations. The
+#   emitted image tag is the bare semver (`reviewer-v0.2.0` -> `0.2.0`), plus
+#   `latest` on the newest release.
+#
+# REVIEWER-ONLY SCOPE
+#   The reviewer is the ONLY container in the product — the orchestrator and the
+#   gateway are host systemd services and are NOT published as images (see
+#   DISTRIBUTION.md §2/§3.1). This workflow triggers ONLY on the `reviewer-v*`
+#   tag namespace so that future host-service `v*` release tags never re-publish
+#   (or mis-version) the reviewer image.
+#
+# KEYLESS SIGNING MODEL
+#   Signing uses cosign KEYLESS mode (GitHub OIDC -> Fulcio short-lived cert,
+#   transparency logged in Rekor) — there are NO long-lived signing keys or
+#   secrets stored anywhere. `id-token: write` lets the job mint the OIDC token
+#   Fulcio and the attestation action consume. Adopters verify with:
+#     cosign verify \
+#       --certificate-identity-regexp '^https://github.com/andrew-craig/magpie' \
+#       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#       ghcr.io/andrew-craig/magpie/reviewer@sha256:<digest>
+#
+# ONE-TIME MANUAL STEP AFTER FIRST PUBLISH
+#   New GHCR packages are PRIVATE by default. After the first successful run,
+#   make the `magpie/reviewer` package PUBLIC once (GitHub -> Packages ->
+#   reviewer -> Package settings -> Change visibility) so adopters can `pull` it
+#   without authentication. Subsequent publishes inherit that visibility.
+
+name: release-reviewer
+
+on:
+  push:
+    tags:
+      - "reviewer-v*"
+  # Manual runs (e.g. re-publishing after making the package public, or a dry
+  # run) — note metadata-action derives tags from the git ref, so a manual run
+  # from a non-tag ref will not produce a semver image tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read # checkout
+  packages: write # push image + attestations to GHCR
+  id-token: write # OIDC token for cosign keyless + provenance attestation
+  attestations: write # actions/attest-build-provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/andrew-craig/magpie/reviewer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # QEMU registers binfmt handlers so the amd64 runner can build the arm64
+      # leg under emulation (the Pi/adopter arm64 target).
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive image tags + OCI labels from the git ref. `type=match` strips the
+      # `reviewer-v` prefix so `reviewer-v0.2.0` yields the clean tag `0.2.0`;
+      # `latest=auto` (metadata-action default) additionally tags the newest
+      # release `latest`.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=match,pattern=reviewer-v(.*),group=1
+          labels: |
+            org.opencontainers.image.source=https://github.com/andrew-craig/magpie
+            org.opencontainers.image.description=Magpie reviewer — sandboxed Pi coding agent runtime (the only container in the product)
+            org.opencontainers.image.licenses=MIT
+
+      # Build both arches and push. `provenance: true` + `sbom: true` make
+      # buildkit attach a SLSA provenance predicate and an SBOM to the pushed
+      # image index. `id: build` exposes the pushed digest for signing below.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/reviewer/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the pushed image BY DIGEST (never by tag — a tag can move between
+      # sign and use). Keyless: cosign mints an OIDC token, gets a short-lived
+      # Fulcio cert, and records the signature in Rekor. `--yes` skips the
+      # interactive confirmation.
+      - name: Sign image (keyless)
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      # Attach a signed SLSA build-provenance attestation to the pushed image,
+      # stored alongside it in the registry.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # Surface the pushed tags + digest in the run summary so the tech lead can
+      # copy the digest to pin `container.image` (config.ts / config.toml).
+      - name: Job summary
+        run: |
+          {
+            echo "## magpie-reviewer published"
+            echo ""
+            echo "**Image:** \`${IMAGE}\`"
+            echo ""
+            echo "**Digest:** \`${DIGEST}\`"
+            echo ""
+            echo "**Pin in production:** \`${IMAGE}:<tag>@${DIGEST}\`"
+            echo ""
+            echo "**Tags pushed:**"
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}

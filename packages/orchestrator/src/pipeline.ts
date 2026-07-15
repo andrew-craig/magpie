@@ -49,7 +49,12 @@
 //      `runReview` below as `gatewayApiKey` (M4-C), which sets it as the
 //      review container's `OPENROUTER_API_KEY` — the orchestrator never
 //      holds (and, since M4-C, no longer even loads — see config.ts) a real
-//      provider key to substitute instead.
+//      provider key to substitute instead. As of M7-1 (Design D —
+//      DISTRIBUTION.md §2) the mint call also passes `job.id` and the
+//      response's `.socketDir` is threaded into `runReview` as
+//      `gatewaySocketDir`, which reviewer.ts bind-mounts read-only at
+//      `/run/gw` in the review container — now the container's ONLY path to
+//      the gateway, since it runs `--network none`.
 //   3. Create the credential-free host workspace (workspace.ts) for the PR
 //      head checkout. From here on the rest of the job body runs inside a
 //      (nested) `try/finally` so the workspace is always cleaned up, on every
@@ -200,9 +205,11 @@ export interface PipelineDeps {
    * {@link mintGatewayKeyFromConfig}. Overridable so pipeline.test.ts can run
    * the whole flow against a fake gateway (or none at all) — production
    * callers (index.ts) leave it undefined so the real gateway mgmt API is
-   * called.
+   * called. As of M7-1 (Design D) takes the job id as a second argument — the
+   * gateway needs it to create/name the per-job socket directory it returns
+   * as `GatewayKey.socketDir` (see gateway.ts).
    */
-  mintGatewayKey?: (config: Config) => Promise<GatewayKey>;
+  mintGatewayKey?: (config: Config, jobId: string) => Promise<GatewayKey>;
   /**
    * Revoke a per-job gateway virtual key by id (M4-B). Defaults to
    * {@link revokeGatewayKeyFromConfig}. Best-effort by contract — never
@@ -308,7 +315,7 @@ export function createReviewPipeline(
     // subsequent exit path (success, thrown error, review-failed result,
     // abort), one level out from the workspace cleanup.
     logger.info({ event: "minting-gateway-key", ...jobLogFields(job) });
-    const gatewayKey = await mintGatewayKey(config);
+    const gatewayKey = await mintGatewayKey(config, job.id);
 
     try {
       if (signal.aborted) return;
@@ -495,6 +502,12 @@ export function createReviewPipeline(
             // module's doc comment) — reviewer.ts sets this as the review
             // container's OPENROUTER_API_KEY (M4-C).
             gatewayApiKey: gatewayKey.key,
+            // The per-job socket directory minted alongside the key above
+            // (M7-1, Design D — see gateway.ts's `GatewayKey.socketDir` doc
+            // comment) — reviewer.ts bind-mounts this read-only at `/run/gw`
+            // in the (now `--network none`) review container, the container's
+            // only remaining path to the gateway.
+            gatewaySocketDir: gatewayKey.socketDir,
             piBinary: deps.piBinary,
             // The queue's own per-job id (see queue.ts's `JobDescriptor.id`,
             // already used for every log line via `jobLogFields` above) doubles

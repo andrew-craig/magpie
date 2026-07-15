@@ -1,9 +1,12 @@
 # Magpie — Automated Code Review Bot: Implementation Plan
 
-Magpie is a self-hosted code review bot that runs on a personal Linux server. It listens for
-GitHub pull request events, checks out the PR branch, runs the [Pi coding agent](https://pi.dev/)
-over the changes inside a locked-down container, and posts the findings back to the PR as a
-review with inline comments.
+Magpie is a self-hosted code review bot that any organisation can stand up on its own Linux
+host — it remains a single-host, single-tenant deployment per organisation, not a shared
+multi-tenant service. It listens for GitHub pull request events, checks out the PR branch,
+runs the [Pi coding agent](https://pi.dev/) over the changes inside a locked-down container,
+and posts the findings back to the PR as a review with inline comments. See
+[DISTRIBUTION.md](DISTRIBUTION.md) for the distribution/self-hosting architecture (Design D,
+published images, portable config, pluggable ingress) that makes this possible.
 
 ## Confirmed architecture decisions
 
@@ -115,8 +118,8 @@ PR content execute in a context holding secrets.
 
 - In-process `p-queue` with concurrency 2 and a hard per-job timeout (default 10 min) that
   `docker kill`s the container and deletes the workspace. A crashed orchestrator loses queued
-  jobs — acceptable for personal use since a re-push re-triggers review; move to BullMQ/Redis
-  only if durability ever matters.
+  jobs — acceptable for a single-host deployment since a re-push re-triggers review; move to
+  BullMQ/Redis only if durability ever matters.
 
 ### 4. Review container
 
@@ -168,7 +171,7 @@ secret from the container.
 > adopt LiteLLM and **not** to run Postgres or any database for it: LiteLLM's virtual-key/budget
 > features assume a DB-backed deployment for anything beyond the simplest setups, which is much
 > more operational surface (a whole extra service + schema + backup story) than a
-> single-provider, single-host personal project needs. Instead, magpie implements a **small,
+> single-provider, single-host deployment needs. Instead, magpie implements a **small,
 > purpose-built TypeScript proxy** — `packages/gateway` (`@magpie/gateway`) — that speaks only
 > to OpenRouter (no generic multi-provider abstraction) and keeps virtual keys in an **in-memory
 > `Map`**, matching the orchestrator's existing `node:http` + `zod` conventions rather than
@@ -315,6 +318,19 @@ magpie/
 6. **Nice-to-haves (later):** `@magpie review` comment command for on-demand re-review,
    per-repo config file (`.magpie.toml` — read from the *base* branch only, never the PR
    head, to keep config out of attacker control), gVisor runtime, multi-provider support.
+7. **Distribution / self-hosting (M7):** make Magpie self-hostable by other organisations, not
+   just this deployment. Core isolation change: "Design D" — the reviewer container runs
+   `--network none` and reaches the host gateway over a bind-mounted per-job unix socket
+   (via a tiny in-container TCP→unix forwarder), which gives provable, daemon-config-
+   independent egress isolation and **deletes** the host-`iptables`/pinned-`172.31.99.0/24`-
+   subnet egress apparatus from M4 entirely. Around that: publish `magpie-reviewer` to GHCR
+   (multi-arch amd64+arm64, digest-pinned, signed, release CI) so adopters pull instead of
+   building; a versioned host-service release tarball for the orchestrator + gateway; portable
+   config (no pinned IPs, `openssl rand -hex 32` for the shared gateway master key); pluggable
+   ingress (reverse proxy, Cloudflare Tunnel, or another tunnel — no longer arm64/`apt`-only);
+   and docs-only onboarding (`QUICKSTART.md`) covering GitHub App registration end to end. See
+   [DISTRIBUTION.md](DISTRIBUTION.md) for the full design, threat-model preservation argument,
+   and rejected alternatives.
 
 ## Defaults chosen (easily changed, flag if you disagree)
 

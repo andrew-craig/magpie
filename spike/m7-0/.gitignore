@@ -1,0 +1,4 @@
+# Per-run job artifacts (sockets, logs, fixture payloads) created by
+# run-spike.sh at runtime -- never committed, only the scripts are.
+run/jobs/*
+!run/jobs/.gitkeep

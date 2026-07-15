@@ -1,6 +1,7 @@
 # Magpie
 
-Magpie is a self-hosted GitHub code-review bot for a personal Linux server. It listens for
+Magpie is a self-hosted GitHub code-review bot that any organisation can run on its own
+Linux host. It listens for
 pull request webhooks, checks out the PR branch, runs the [Pi coding agent](https://pi.dev/)
 over the diff, and posts findings back to the PR as a `COMMENT` review (it never approves or
 blocks — humans decide). See `PLAN.md` for the full design, threat model, and the

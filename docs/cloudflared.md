@@ -1,6 +1,11 @@
 # Cloudflare Tunnel setup (webhook ingress)
 
-This is the production path for exposing the magpie orchestrator's webhook
+Cloudflare Tunnel is one of three supported ingress options; see
+[`docs/ingress.md`](ingress.md) for the full option matrix (reverse proxy,
+Cloudflare Tunnel, other tunnels) and the security rationale that applies to
+all of them.
+
+This is one production path for exposing the magpie orchestrator's webhook
 endpoint to GitHub (PLAN.md Milestone 5), replacing the `smee.io` dev relay
 used during the Milestone 1 walking skeleton. It uses a Cloudflare **named
 tunnel**: `cloudflared` makes an *outbound-only* connection from this host to
@@ -50,8 +55,13 @@ Related files:
 ## Prerequisites
 
 - A domain (or subdomain) whose DNS is managed by Cloudflare (free plan is
-  fine). You'll route something like `magpie.yourdomain.com` to the tunnel.
-- This host: aarch64 (Raspberry Pi / Raspberry Pi OS or other Debian arm64).
+  fine — you don't need to have registered or bought the domain through
+  Cloudflare, just have its nameservers pointed there). You'll route
+  something like `magpie.yourdomain.com` to the tunnel.
+- Any Linux host `cloudflared` supports: the setup script installs from
+  Cloudflare's apt repo on Debian-family hosts (any architecture apt
+  publishes packages for), or the official static binary (amd64/arm64/arm,
+  checksum-verified) everywhere else. Not limited to arm64 or Raspberry Pi.
 - The magpie orchestrator already runs and listens on `127.0.0.1:8787`
   (default `config.toml` `[server]` — see `README.md` for orchestrator setup).
 
@@ -59,8 +69,11 @@ Related files:
 
 ### 1. Install cloudflared
 
-Either run the script (installs from Cloudflare's official apt repo, arm64
-package, gpg-keyed — idempotent, skips if already installed):
+Either run the script — on Debian-family hosts it installs from Cloudflare's
+official apt repo (gpg-keyed, whatever architecture `dpkg` reports); on other
+hosts it downloads the official static binary matched to `uname -m` and
+verifies its checksum before installing to `/usr/local/bin/cloudflared`.
+Idempotent either way — skips if `cloudflared` is already on `PATH`:
 
 ```bash
 ./scripts/setup-cloudflared.sh --dry-run magpie.yourdomain.com   # preview
@@ -69,7 +82,7 @@ MAGPIE_TUNNEL_HOSTNAME=magpie.yourdomain.com ./scripts/setup-cloudflared.sh
 ```
 
 or install by hand, following [Cloudflare's install docs][cf-install] for
-"Debian/Ubuntu" (works on Raspberry Pi OS), selecting the `arm64` package.
+your distro/architecture.
 
 [cf-install]: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 

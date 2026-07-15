@@ -101,11 +101,10 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",
-      network: "bridge",
     },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
-      containerBaseUrl: "http://172.31.99.1:4000/v1",
+      containerBaseUrl: "http://127.0.0.1:4000/v1",
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
@@ -129,6 +128,9 @@ function assistantMessage(text: string) {
 /** Default per-job gateway virtual key used by `baseParams` below (M4-C: this replaces the old real-provider-key fixture). */
 const TEST_GATEWAY_API_KEY = "test-gateway-virtual-key";
 
+/** Default per-job gateway socket directory used by `baseParams` below (M7-1, Design D). Just an opaque mount-source path here — the fake docker never actually connects through it. */
+const TEST_GATEWAY_SOCKET_DIR = "/run/magpie-gateway/jobs/test-job";
+
 function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
   return {
     workspaceDir: root,
@@ -138,6 +140,7 @@ function baseParams(overrides: Partial<Parameters<typeof runReview>[0]> = {}) {
     prBody: "Some body",
     config: testConfig(),
     gatewayApiKey: TEST_GATEWAY_API_KEY,
+    gatewaySocketDir: TEST_GATEWAY_SOCKET_DIR,
     ...overrides,
   };
 }
@@ -262,14 +265,18 @@ describe("runReview", () => {
     expect(userIdx).toBeGreaterThanOrEqual(0);
     expect(argv[userIdx + 1]).toMatch(/^\d+:\d+$/);
 
-    // --network <net>.
+    // --network none (M7-1, Design D): the review container gets NO network
+    // interfaces except its own loopback — no bridge, no `magpie-net`.
     const netIdx = argv.indexOf("--network");
     expect(netIdx).toBeGreaterThanOrEqual(0);
-    expect(argv[netIdx + 1]).toBe("bridge");
+    expect(argv[netIdx + 1]).toBe("none");
 
-    // Both bind mounts, with the read-only /work flag.
+    // All three bind mounts: the read-only /work flag, the read-write /out
+    // findings dir, and (M7-1) the read-only /run/gw gateway socket dir —
+    // the container's only remaining path off itself.
     expect(argv.some((a) => a.endsWith(":/work:ro"))).toBe(true);
     expect(argv.some((a) => a.endsWith(":/out"))).toBe(true);
+    expect(argv).toContain(`${TEST_GATEWAY_SOCKET_DIR}:/run/gw:ro`);
 
     // --name magpie-<id>.
     const nameIdx = argv.indexOf("--name");
@@ -282,8 +289,9 @@ describe("runReview", () => {
 
     // -e OPENAI_BASE_URL=<gateway proxy plane> (M4-C): non-secret, so passed
     // inline (unlike OPENROUTER_API_KEY below) with the value baked into the
-    // argv token itself.
-    const baseUrlIdx = argv.indexOf("OPENAI_BASE_URL=http://172.31.99.1:4000/v1");
+    // argv token itself. As of M7-1 this resolves inside the container's own
+    // loopback (the in-container forwarder), not a bridge IP.
+    const baseUrlIdx = argv.indexOf("OPENAI_BASE_URL=http://127.0.0.1:4000/v1");
     expect(baseUrlIdx).toBeGreaterThan(0);
     expect(argv[baseUrlIdx - 1]).toBe("-e");
   });

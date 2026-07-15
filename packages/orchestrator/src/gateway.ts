@@ -6,13 +6,27 @@
 // packages/gateway/README.md's "Management plane" section and
 // packages/gateway/src/admin-server.ts, which this module is written against
 // exactly: `POST /admin/keys` mints a fresh, budget-capped, TTL-limited
-// virtual key (`201 { id, key }`); `DELETE /admin/keys/:id` revokes one,
-// idempotently (`204`, even for an unknown/already-revoked id). This module
-// is the orchestrator-side half of that contract: mint one fresh virtual key
-// per review job (mirrors github.ts's "mint fresh per job, no cross-job
-// cache" principle) and revoke it during the pipeline's cleanup, on every
-// exit path — success, failure, timeout, and abort alike (see pipeline.ts,
-// which wires the calls below into its existing per-job try/finally).
+// virtual key (`201 { id, key, socketDir }`); `DELETE /admin/keys/:id`
+// revokes one, idempotently (`204`, even for an unknown/already-revoked id).
+// This module is the orchestrator-side half of that contract: mint one fresh
+// virtual key per review job (mirrors github.ts's "mint fresh per job, no
+// cross-job cache" principle) and revoke it during the pipeline's cleanup, on
+// every exit path — success, failure, timeout, and abort alike (see
+// pipeline.ts, which wires the calls below into its existing per-job
+// try/finally).
+//
+// SOCKET DIR (M7-1, Design D — see DISTRIBUTION.md §2.2/§2.6): as of M7-1 the
+// mint response also carries `socketDir`, an absolute HOST path to a per-job
+// directory the gateway has already created and bound its per-job unix
+// socket inside (always named `gw.sock`, so the full path is
+// `<socketDir>/gw.sock`). This module treats `socketDir` as an opaque,
+// non-secret path — it never opens, reads, or writes it directly. pipeline.ts
+// threads it into reviewer.ts's `runReview` as `gatewaySocketDir`, which
+// bind-mounts the directory read-only at `/run/gw` in the review container
+// (which now runs `--network none`; the mounted socket is the ONLY channel
+// the container has to reach the gateway at all). Mint request bodies now
+// also carry a required `jobId` so the gateway can create/name that
+// directory before responding — see `MintGatewayKeyOptions.jobId` below.
 //
 // SECURITY:
 //  - The master key (`config.secrets.gatewayMasterKey`, from
@@ -55,6 +69,16 @@ export interface GatewayAuthConfig {
 export interface GatewayKey {
   id: string;
   key: string;
+  /**
+   * Absolute HOST path to the per-job directory the gateway created and
+   * bound its per-job unix socket inside (M7-1 — see this module's doc
+   * comment). Always contains a `gw.sock` file once the gateway has finished
+   * binding. Not a secret (it's a filesystem path, not a credential) — safe
+   * to log if useful, unlike `key`. pipeline.ts threads this straight into
+   * reviewer.ts's `runReview` as `gatewaySocketDir`, which bind-mounts it
+   * read-only at `/run/gw` in the (now `--network none`) review container.
+   */
+  socketDir: string;
 }
 
 /** Inputs to {@link mintGatewayKey}, mirroring the gateway's mint request body exactly (see admin-server.ts's `mintKeyBodySchema`). */
@@ -65,6 +89,16 @@ export interface MintGatewayKeyOptions {
   budgetUsd: number;
   /** Key lifetime in seconds, starting from mint time. */
   ttlSeconds: number;
+  /**
+   * The queue's per-job id (see queue.ts's `JobDescriptor.id`). REQUIRED as
+   * of M7-1: the gateway uses it to create/name the per-job socket directory
+   * it returns as `socketDir` (see this module's doc comment) before it ever
+   * responds, so the orchestrator can bind-mount a directory that already
+   * exists at `docker run` time (DISTRIBUTION.md §2.6's launch-ordering
+   * invariant — a nonexistent bind-mount source would otherwise let Docker
+   * invent a root-owned directory in its place).
+   */
+  jobId: string;
 }
 
 /** Minimal structured logger this module needs (only the `error` level — mint failures propagate as thrown Errors instead of being logged here). */
@@ -79,7 +113,9 @@ const consoleLogger: GatewayLogger = {
 };
 
 /** Validates the gateway's mint response shape before trusting it — the response crosses a process boundary (loopback HTTP), so it's parsed defensively like every other external-input trust boundary in this codebase (see findings.ts). */
-const mintResponseSchema = z.object({ id: z.string().min(1), key: z.string().min(1) }).strict();
+const mintResponseSchema = z
+  .object({ id: z.string().min(1), key: z.string().min(1), socketDir: z.string().min(1) })
+  .strict();
 
 /**
  * Per-call timeout for the loopback HTTP calls to the gateway's management
@@ -116,8 +152,8 @@ async function safeReadErrorDetail(res: Response): Promise<string> {
  * Mint a fresh virtual key on the gateway's management plane.
  *
  * `POST {gateway.baseUrl}/admin/keys` with `Authorization: Bearer
- * <masterKey>` and the given `{ model?, budgetUsd, ttlSeconds }` body. Throws
- * on any failure — unreachable gateway, non-201 response, or an
+ * <masterKey>` and the given `{ model?, budgetUsd, ttlSeconds, jobId }` body.
+ * Throws on any failure — unreachable gateway, non-201 response, or an
  * unparseable/wrong-shaped response body — rather than ever returning a
  * partial or placeholder key (see module doc comment: a job that can't mint a
  * key can't safely run a review). The thrown Error's message never contains
@@ -141,6 +177,7 @@ export async function mintGatewayKey(
         ...(options.model !== undefined ? { model: options.model } : {}),
         budgetUsd: options.budgetUsd,
         ttlSeconds: options.ttlSeconds,
+        jobId: options.jobId,
       }),
       signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
     });
@@ -211,15 +248,20 @@ export async function revokeGatewayKey(
  * the review (including reviewer.ts's SIGTERM->SIGKILL grace period and the
  * queue's own backstop timeout, see queue.ts's `QUEUE_TIMEOUT_GRACE_MS`) and
  * is always cleaned up by an explicit revoke on cleanup rather than expiring
- * mid-run.
+ * mid-run. `jobId` (the queue's own per-job id — see queue.ts's
+ * `JobDescriptor.id`) is REQUIRED as of M7-1 and passed straight through to
+ * {@link mintGatewayKey}'s request body — see `MintGatewayKeyOptions.jobId`'s
+ * doc comment for why the gateway needs it.
  */
 export function mintGatewayKeyFromConfig(
   config: Pick<Config, "gateway" | "llm" | "limits" | "secrets">,
+  jobId: string,
 ): Promise<GatewayKey> {
   return mintGatewayKey(config, {
     model: config.llm.model,
     budgetUsd: config.gateway.perJobBudgetUsd,
     ttlSeconds: config.limits.jobTimeoutSeconds + config.gateway.ttlMarginSeconds,
+    jobId,
   });
 }
 

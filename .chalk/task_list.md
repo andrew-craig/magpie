@@ -5,18 +5,10 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
-- **task_00d0** · P1 · open · M7-2: Publish magpie-reviewer image to GHCR — multi-arch, digest-pinned, signed + release CI  (parent: epic_0162)
-- **task_8844** · P1 · open · M7-1: Design-D reviewer isolation (core) — --network none + unix-socket gateway channel + forwarder; delete setup-network.sh; zero-egress test  (parent: epic_0162)
-- **task_d54c** · P1 · open · M7-3: Package the host services (orchestrator + gateway) — release artifact; rework install.sh  (parent: epic_0162)
-- **task_e365** · P1 · open · M7-0: Feasibility spike — Pi reaches the gateway over a unix socket via an in-container forwarder  (parent: epic_0162)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
-- **task_624f** · P2 · open · M7-5: Pluggable ingress — reverse-proxy + Cloudflare-Tunnel (multi-arch host binary) + tunnel docs  (parent: epic_0162)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
-- **task_d8b1** · P2 · open · M7-6: Onboarding docs — QUICKSTART.md, generated master key, secret consolidation  (parent: epic_0162)
-- **task_ecbf** · P2 · open · M7-4: Config portability — delete pinned IPs/subnet; gateway address becomes a socket path; keep secret split  (parent: epic_0162)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
 - **task_624d** · P3 · open · M6-C: gVisor (runsc) runtime for the reviewer container  (parent: epic_3c41)
 - **task_9c9d** · P3 · open · M6-D: multi-provider support beyond OpenRouter  (parent: epic_3c41)
 - **task_ad15** · P3 · open · M6-A: @magpie review — on-demand re-review via PR comment command  (parent: epic_3c41)
-- **task_de02** · P3 · open · M7-8: Reframe docs to self-hostable; platform matrix; add Distribution milestone to PLAN.md  (parent: epic_0162)

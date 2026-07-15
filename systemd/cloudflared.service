@@ -42,7 +42,13 @@ TimeoutStartSec=0
 # script prints the exact `sed` command to do this on install.
 User=magpie
 Group=magpie
-ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+# Bare command name (not an absolute path): scripts/setup-cloudflared.sh
+# installs to /usr/bin (Debian-family hosts, via Cloudflare's apt repo) or
+# /usr/local/bin (the static-binary fallback on other hosts). systemd
+# resolves a non-absolute ExecStart command via its default search PATH
+# (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin), which
+# covers both install locations without hardcoding either.
+ExecStart=cloudflared --config /etc/cloudflared/config.yml tunnel run
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true

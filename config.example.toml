@@ -29,7 +29,9 @@
 #                             secret known to both processes. It is NOT the real
 #                             OpenRouter key (that is the gateway's
 #                             MAGPIE_GATEWAY_OPENROUTER_KEY, which this
-#                             orchestrator never has or needs).
+#                             orchestrator never has or needs). Generate it
+#                             once with `openssl rand -hex 32` and use the
+#                             SAME value for both env files.
 # ---------------------------------------------------------------------------
 #
 # NOTE (M4-C): there is deliberately no MAGPIE_LLM_API_KEY here. The real
@@ -111,11 +113,19 @@ max_diff_lines = 4000
 work_dir = "/var/lib/magpie/work"
 
 [container]
-# Docker image tag the review container runs (see PLAN.md Milestone 3). This
-# MUST match the tag produced by the magpie-reviewer image build (docker/) —
-# the orchestrator does not build or pull the image itself.
-# Default: "magpie-reviewer:0.1.0"
-image = "magpie-reviewer:0.1.0"
+# Reviewer image the review container runs (the ONLY container in the product;
+# orchestrator + gateway are host services). As of M7-2 this is PUBLISHED to
+# GHCR — built multi-arch (amd64+arm64) and cosign-signed with SLSA provenance
+# by .github/workflows/release-reviewer.yml on `reviewer-v*` tags — so adopters
+# `docker pull` it rather than building locally. The value below is PINNED BY
+# DIGEST (the `@sha256:` is the multi-arch image-index digest, so a re-tagged
+# upstream image can't silently swap the untrusted-content runtime under you);
+# the `:0.2.0` tag is human-readable provenance only. Verify the signature
+# before trusting a new digest (see docker/reviewer/README.md, "Published
+# image"). `scripts/build-reviewer-image.sh` is now for LOCAL DEVELOPMENT ONLY
+# (it builds a `magpie-reviewer:*` image you'd point this at instead).
+# Default: "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed"
+image = "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed"
 
 # Memory limit passed to `docker run --memory` for the review container.
 # Bounds how much host memory a single (possibly prompt-injected) review job
@@ -138,20 +148,16 @@ pids_limit = 256
 # Default: "docker"
 docker_bin = "docker"
 
-# Docker network the review container is attached to, via `docker run
-# --network`. Milestone 4 locks the reviewer down to a dedicated, egress-
-# controlled `magpie-net` bridge: an `--internal` docker network (subnet
-# 172.31.99.0/24) plus host iptables rules whose ONLY permitted destination is
-# the credential-injecting gateway at 172.31.99.1:4000 — github.com,
-# openrouter.ai directly, arbitrary IPs, external DNS and the cloud-metadata IP
-# are all denied (see PLAN.md §5 and scripts/setup-network.sh, which provisions
-# both the network and the rules idempotently; M5 runs it at boot).
-#
-# Set this to "magpie-net" once scripts/setup-network.sh has been run on the
-# host (the code default remains "bridge" — Docker's default network — so a
-# host that hasn't provisioned magpie-net yet still works, just without the M4
-# egress lockdown). Flipping it is a config change only, no code change.
-network = "magpie-net"
+# NOTE: there is deliberately no `network` field. As of Milestone 7 (Design D,
+# DISTRIBUTION.md §2) the review container is ALWAYS launched with
+# `--network none` — it has no network interfaces at all, only loopback. Its
+# one channel to the outside is a per-job unix domain socket the gateway binds
+# and the orchestrator bind-mounts read-only into the container (see
+# reviewer.ts and packages/gateway/src/job-sockets.ts). This replaces the
+# old M4 `magpie-net` bridge + iptables egress lockdown entirely: with no
+# network namespace there is no bridge, subnet, or firewall left to provision,
+# so scripts/setup-network.sh and magpie-firewall.service were deleted. Egress
+# confinement is now a kernel network-namespace property, not a config toggle.
 
 [gateway]
 # Credential-injecting LLM gateway (M4, PLAN.md §5; packages/gateway). The
@@ -170,17 +176,18 @@ network = "magpie-net"
 # Default: "http://127.0.0.1:4100" (matches the gateway's default mgmt port).
 base_url = "http://127.0.0.1:4100"
 
-# Base URL of the gateway's container-facing PROXY (data) plane (M4-C) — where
-# the review CONTAINER itself sends chat-completions requests, via
-# `-e OPENAI_BASE_URL=...` on `docker run` (see reviewer.ts). Deliberately a
-# SEPARATE address from base_url above: that one is loopback-only and
-# unreachable from magpie-net; this one is the only address a review container
-# on magpie-net (M4-D's `--internal` docker network) can reach at all.
-# Default: "http://172.31.99.1:4000/v1" — magpie-net's fixed gateway IP
-# (172.31.99.1, provisioned by scripts/setup-network.sh) on the gateway's
-# default proxy port (4000), with the /v1 suffix Pi's OpenAI-compatible
-# provider config expects.
-container_base_url = "http://172.31.99.1:4000/v1"
+# Base URL the review CONTAINER points Pi at for chat-completions, via
+# `-e OPENAI_BASE_URL=...` on `docker run` (see reviewer.ts). Under Design D
+# (M7) the container has no network, so this is a LOOPBACK address inside the
+# container: a tiny in-container TCP->unix forwarder listens on 127.0.0.1:4000
+# and relays every request to the gateway's per-job unix socket mounted at
+# /run/gw/gw.sock (see docker/reviewer/forwarder.mjs and entrypoint.sh). The
+# gateway serves the SAME proxy-plane handler over that socket as it used to
+# serve over the old magpie-net IP; only the transport changed. Deliberately
+# still separate from base_url above (the loopback-only mgmt plane).
+# Default: "http://127.0.0.1:4000/v1" — the in-container forwarder's listener,
+# with the /v1 suffix Pi's OpenAI-compatible provider config expects.
+container_base_url = "http://127.0.0.1:4000/v1"
 
 # Per-job spend cap, in USD, for each minted virtual key. This is the HARD
 # cost cap Pi itself lacks (no --max-turns/budget flag): once a job's key has

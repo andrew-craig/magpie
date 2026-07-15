@@ -14,14 +14,19 @@ deviation note for the full rationale. This package intentionally mirrors
 
 ## What it is
 
-One process, two independent HTTP listeners:
+One process, two independent planes (M7-1 / DISTRIBUTION.md §2.6 "Design D"):
 
 1. **Proxy (data) plane** — the OpenAI-compatible surface the review container's Pi process
-   talks to.
-2. **Management (control) plane** — key lifecycle, used only by the host orchestrator (and
-   operators). Bound to `127.0.0.1` only, on its own port — structurally unreachable from
-   `magpie-net`, so a fully compromised review container can never mint or revoke keys, no
-   matter what it can reach on the data plane.
+   talks to, via an in-container TCP->unix forwarder. Unlike the management plane, this is
+   **not** one listener: the gateway binds a dedicated unix-domain-socket `http.Server` **per
+   job**, created when that job's virtual key is minted and torn down when it's revoked (see
+   `src/job-sockets.ts`'s `JobSocketManager`). A `--network none` reviewer container's only path
+   off the box is the one socket bind-mounted into it — there is no shared listener a second job,
+   or anything else on the host, could reach.
+2. **Management (control) plane** — key + per-job-socket lifecycle, used only by the host
+   orchestrator (and operators). Bound to `127.0.0.1` only, on its own port — structurally
+   unreachable from inside any reviewer container, so a fully compromised review container can
+   never mint or revoke keys, no matter what it can reach on its own job's data-plane socket.
 
 Keys are stored in an in-memory `Map`. There is no database and no persistence across restarts —
 this is intentional: keys are minted immediately before a review job and revoked on cleanup, so
@@ -58,17 +63,17 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `GATEWAY_PROXY_HOST` | `127.0.0.1` | Proxy-plane bind address. **Never** `0.0.0.0` (the loader rejects it). Production binds the `magpie-net` gateway IP (`172.31.99.1`, per PLAN.md) — that wiring is M4-D's job, not this package's; this variable just makes the bind address configurable for it. |
-| `GATEWAY_PROXY_PORT` | `4000` | Proxy-plane port. |
+| `GATEWAY_SOCKET_DIR` | `/run/magpie-gateway/jobs` | Root directory under which each job gets its own `<sanitized-jobId>/` subdirectory (mode `0711`) holding that job's proxy-plane unix socket (`gw.sock`, chmod `0666` after bind) — see `src/job-sockets.ts`. In production this lives under systemd's `RuntimeDirectory` for the `magpie-gateway` unit; this process creates the root at startup if missing (for local dev) but never `chmod`s it. |
 | `GATEWAY_MGMT_PORT` | `4100` | Management-plane port. The management-plane **host** is hardcoded to `127.0.0.1` in code (not env-configurable) — see `src/config.ts`'s doc comment on `mgmt.host` for why. |
 | `GATEWAY_UPSTREAM_BASE_URL` | `https://openrouter.ai/api/v1` | Upstream OpenRouter API base. Requests are forwarded to `${baseUrl}/chat/completions`. |
 | `GATEWAY_DEFAULT_MODEL` | unset | Fallback model applied when a request specifies none AND the virtual key wasn't minted with a model scope. |
 
 ## HTTP contract
 
-### Proxy plane
+### Proxy plane (per-job unix socket — `<GATEWAY_SOCKET_DIR>/<sanitized-jobId>/gw.sock`)
 
-- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by M4-E's gateway-reachable probe.
+- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by M4-E's gateway-reachable probe —
+  the reviewer entrypoint health-probes this THROUGH the mounted socket before starting Pi.
 - `POST /v1/chat/completions` — OpenAI-compatible, streaming (SSE, `stream: true`) and
   non-streaming.
   - Auth: `Authorization: Bearer <virtual key>`. Unknown/expired/revoked key -> `401`
@@ -97,11 +102,19 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 ### Management plane (loopback-only)
 
-- `POST /admin/keys` — mint a virtual key.
+- `POST /admin/keys` — mint a virtual key AND bind its per-job proxy socket (both happen
+  together — see "Security model" below).
   - Auth: `Authorization: Bearer <MAGPIE_GATEWAY_MASTER_KEY>`. Anything else -> `401`.
-  - Body: `{ "model"?: string, "budgetUsd": number, "ttlSeconds": number }`.
-  - Response: `201 { "id": string, "key": string }`. `key` looks like `sk-magpie-<64 hex chars>`.
-- `DELETE /admin/keys/:id` — revoke a virtual key.
+  - Body: `{ "jobId": string, "model"?: string, "budgetUsd": number, "ttlSeconds": number }`.
+    `jobId` is required — it determines the per-job socket directory name (sanitized to
+    `[a-zA-Z0-9_.-]`).
+  - Response: `201 { "id": string, "key": string, "socketDir": string }`. `key` looks like
+    `sk-magpie-<64 hex chars>`. `socketDir` is the directory (`<GATEWAY_SOCKET_DIR>/<sanitized-
+    jobId>/`) the orchestrator bind-mounts **read-only** into the reviewer container — the socket
+    itself always lives at `<socketDir>/gw.sock`. If binding the socket fails, the just-minted key
+    is revoked and the request fails `500` — a key is never handed out without a working socket.
+- `DELETE /admin/keys/:id` — revoke a virtual key AND tear down that job's per-job socket
+  (`server.close()`, unlink the socket, remove the now-empty job directory).
   - Auth: same as above.
   - **Idempotent**: revoking an unknown or already-revoked id still returns `204` — never an
     error. The orchestrator's cleanup path calls this unconditionally and must never fail a job
@@ -110,8 +123,8 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 - **Every request on this plane is also checked against the socket's remote address** and
   rejected with `403` if it isn't loopback (`127.0.0.1`/`::1`) — defense-in-depth on top of the
   listener only ever being bound to `127.0.0.1` in the first place. Both checks must hold for the
-  "management plane is unreachable from `magpie-net`" guarantee; see `src/admin-server.ts`'s
-  module doc comment.
+  "management plane is unreachable from any reviewer container" guarantee; see
+  `src/admin-server.ts`'s module doc comment.
 
 ## Security model (summary)
 
@@ -124,7 +137,14 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   at most its remaining budget for at most its remaining TTL, then nothing.
 - The management plane (mint/revoke) is loopback-only by construction (separate `http.Server`,
   bound to `127.0.0.1`) plus a per-request remote-address check — a compromised review container
-  on `magpie-net` can reach the data plane but categorically cannot mint or revoke keys.
+  (which has **no network at all**, per `--network none` — see DISTRIBUTION.md §2) categorically
+  cannot mint or revoke keys.
+- **Per-job proxy socket isolation (M7-1, DISTRIBUTION.md §2.6 "Design D"):** each job's proxy
+  plane is its own unix socket, bound only for that job's lifetime and reachable only via the
+  read-only bind mount the orchestrator gives that one `--network none` container. There is no
+  shared listener a second job — or anything else with host access to a *different* job's mount —
+  could reach. Access control is directory traversal (`0711` job dir, `0666` socket) rather than a
+  shared group; see `src/job-sockets.ts`'s module doc comment for the full permissions rationale.
 - **Future hardening (noted, not implemented here):** the gateway's own outbound traffic only
   ever needs to reach `openrouter.ai`. An SNI/domain allowlist on the gateway process's own
   egress (e.g. host `iptables`/`ipset` scoped to the gateway user, or an actual SNI-filtering
@@ -147,7 +167,6 @@ sudo install -o magpie-gateway -g magpie-gateway -m 600 /dev/null /etc/magpie-ga
 sudo tee /etc/magpie-gateway/gateway.env > /dev/null <<'EOF'
 MAGPIE_GATEWAY_OPENROUTER_KEY=sk-or-...
 MAGPIE_GATEWAY_MASTER_KEY=...
-GATEWAY_PROXY_HOST=127.0.0.1
 EOF
 sudo chown magpie-gateway:magpie-gateway /etc/magpie-gateway/gateway.env
 sudo chmod 600 /etc/magpie-gateway/gateway.env

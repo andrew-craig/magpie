@@ -1,0 +1,120 @@
+# release-host.yml — publish the magpie HOST-SERVICE release tarball (M7-3).
+#
+# WHAT THIS DOES
+#   On a `v*` release tag (e.g. `v0.3.0`) this builds the two host systemd
+#   services — @magpie/orchestrator and @magpie/gateway — compiles their
+#   TypeScript, packages prebuilt `dist/**` plus a lockfile pruned to exactly
+#   those two workspaces via `scripts/pack-host.sh`, attaches SLSA build
+#   provenance, and publishes a GitHub Release with the tarball + checksum.
+#
+# HOST-SERVICES-ONLY SCOPE
+#   The reviewer is the ONLY container in the product and is published
+#   separately by release-reviewer.yml on the `reviewer-v*` tag namespace (see
+#   DISTRIBUTION.md §2/§3.1). This workflow triggers ONLY on the plain `v*`
+#   tag namespace, which does NOT match `reviewer-v*` — the two release
+#   pipelines never collide or re-publish each other's artifact.
+#
+# PROVENANCE
+#   `actions/attest-build-provenance` records a signed SLSA provenance
+#   attestation for the tarball via GitHub's Sigstore-backed attestations API
+#   (the same keyless/OIDC model release-reviewer.yml uses for the image).
+#   Adopters verify with:
+#     gh attestation verify magpie-<version>.tar.gz --repo andrew-craig/magpie
+
+name: release-host
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual runs (e.g. a dry-run build off a branch). Note: with no tag,
+  # VERSION falls back to the root package.json version, and the release
+  # step is skipped (guarded on `refs/tags/`) — a workflow_dispatch run only
+  # builds and uploads the workflow artifact, it never publishes a Release.
+  workflow_dispatch:
+
+permissions:
+  contents: write # checkout + create the GitHub Release
+  id-token: write # OIDC token for build provenance attestation
+  attestations: write # actions/attest-build-provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Pin npm to the version pack-host.sh's lockfile pruning is validated
+      # against. `npm install --package-lock-only` garbage-collects the
+      # now-unreferenced review-extension dependency subtree only on npm >= 11;
+      # the npm 10 that ships with Node 22 leaves @earendil-works/* entries in
+      # the pruned lockfile, which pack-host.sh's leakage guard (correctly)
+      # rejects. Pinning here makes CI reproduce the version the release is
+      # built + verified with locally.
+      - name: Pin npm
+        run: npm install -g npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build orchestrator
+        run: npm run build
+
+      - name: Build gateway
+        run: npm run gateway:build
+
+      - name: Derive version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Pack host release artifact
+        run: bash scripts/pack-host.sh "${{ steps.version.outputs.version }}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist-release/magpie-*.tar.gz
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist-release/magpie-*.tar.gz \
+            dist-release/*.sha256 \
+            --title "magpie $GITHUB_REF_NAME (host services)" \
+            --notes "Host-service release: @magpie/orchestrator + @magpie/gateway. See INSTALL.md for install steps and DISTRIBUTION.md for the design. The reviewer container is published separately (see docker/reviewer/README.md)."
+
+      - name: Job summary
+        run: |
+          {
+            echo "## magpie host-service release packaged"
+            echo ""
+            echo "**Version:** \`${{ steps.version.outputs.version }}\`"
+            echo ""
+            echo "**Tarball:**"
+            echo '```'
+            ls dist-release/magpie-*.tar.gz
+            echo '```'
+            echo ""
+            echo "**SHA256:**"
+            echo '```'
+            cat dist-release/*.sha256
+            echo '```'
+            echo ""
+            echo "Build provenance attestation attached via actions/attest-build-provenance."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,7 +1,23 @@
 # magpie
 
-Self-hosted GitHub code-review bot. See [PLAN.md](PLAN.md) for the full design and
-[CLAUDE.md](CLAUDE.md) for project/task-tracking conventions.
+Self-hosted GitHub code-review bot — any organisation can stand up its own instance on its
+own Linux host (single-host, single-tenant per deployment; see the platform matrix below).
+See [PLAN.md](PLAN.md) for the full design, [DISTRIBUTION.md](DISTRIBUTION.md) for the
+distribution/self-hosting architecture, and [CLAUDE.md](CLAUDE.md) for project/task-tracking
+conventions.
+
+## Supported platforms
+
+| Requirement | Detail |
+|---|---|
+| OS | Any Linux host with **systemd** |
+| Container runtime | **Docker** (runs the one reviewer container per review) |
+| Architecture | **amd64 and arm64** — the reviewer image is published multi-arch; the host services are pure JS and arch-independent |
+| Host | A **cloud VM or a Raspberry Pi** alike — this project runs on a Pi in production |
+| Ingress | Pluggable — reverse proxy, Cloudflare Tunnel, or another outbound tunnel; see [docs/ingress.md](docs/ingress.md) |
+
+New to Magpie? Start with [QUICKSTART.md](QUICKSTART.md) for the end-to-end install, or
+[INSTALL.md](INSTALL.md) for install-script details.
 
 ## Prerequisites
 
