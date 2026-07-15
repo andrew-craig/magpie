@@ -64,16 +64,19 @@ npm run dev     # run the orchestrator directly from TypeScript source (tsx)
 npm run start   # run the compiled output (after `npm run build`)
 ```
 
-Both scripts now boot the full Milestone 1 pipeline
-(`packages/orchestrator/src/index.ts`): a webhook server (`server.ts`) verifies and
-forwards `pull_request` deliveries through the repo-allowlist/event filter (`filter.ts`)
-into an in-process job queue (`queue.ts`), which runs each accepted PR through the review
-pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the PR head
-credential-free (`workspace.ts`), fetch the diff (`diff.ts`), run the Pi reviewer on the
-host (`reviewer.ts`), and publish exactly one summary comment back to the PR
-(`publisher.ts`). The process shuts down gracefully on `SIGINT`/`SIGTERM`. The container
-sandbox, `report_findings` inline comments, and the credential-injecting LLM gateway
-described in PLAN.md §5 (now `packages/gateway` — see its README) are later milestones.
+Both scripts boot the full pipeline (`packages/orchestrator/src/index.ts`): a webhook server
+(`server.ts`) verifies and forwards `pull_request` deliveries through the repo-allowlist/event
+filter (`filter.ts`) into an in-process job queue (`queue.ts`), which runs each accepted PR
+through the review pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the
+PR head credential-free (`workspace.ts`), fetch the diff (`diff.ts`), mint a per-job gateway
+virtual key (`gateway.ts`), run the Pi reviewer in a hardened `--network none` `docker`
+container (`reviewer.ts`), parse its structured `report_findings` output (`findings.ts`,
+`anchor.ts`), and publish exactly one `COMMENT` review with diff-anchored inline comments back
+to the PR (`publisher.ts`) — incremental and deduped on re-push (`rereview.ts`). The process
+shuts down gracefully on `SIGINT`/`SIGTERM`. Running from source this way still requires the
+gateway (`packages/gateway`) to be up and the reviewer image available; for a production
+install use the release tarball instead (see [QUICKSTART.md](QUICKSTART.md) /
+[INSTALL.md](INSTALL.md)).
 
 ### Reproducing an end-to-end review
 
@@ -88,8 +91,9 @@ described in PLAN.md §5 (now `packages/gateway` — see its README) are later m
    in a second shell; the `cloudflared` tunnel needs no local relay process.
 4. Open a non-draft pull request on the allowlisted repo (or push a commit to an existing
    one).
-5. Magpie mints an installation token, clones the PR head, runs the reviewer, and posts one
-   `## 🐦 Magpie review` comment on the PR.
+5. Magpie mints an installation token, clones the PR head, mints a per-job gateway virtual
+   key, runs the reviewer in a `--network none` container, and posts one `## 🐦 Magpie review`
+   (`COMMENT`-type) review — with diff-anchored inline comments — on the PR.
 
 ## Webhook ingress (production)
 

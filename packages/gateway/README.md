@@ -171,13 +171,13 @@ EOF
 sudo chown magpie-gateway:magpie-gateway /etc/magpie-gateway/gateway.env
 sudo chmod 600 /etc/magpie-gateway/gateway.env
 
-# 3. Run under that user (a formal systemd unit lands in M5 — for now, run
-#    directly to prove the property):
+# 3. Run under that user. For a one-off/manual check you can run it directly:
 sudo -u magpie-gateway env $(cat /etc/magpie-gateway/gateway.env | xargs) \
   node /path/to/magpie/packages/gateway/dist/index.js
 ```
 
-A `systemd` unit (`User=magpie-gateway`, `EnvironmentFile=/etc/magpie-gateway/gateway.env`,
-started before `magpie.service`) is the intended production form and is tracked for M5, matching
-how `docker/reviewer/README.md` and the orchestrator's own systemd unit are staged — this package
-only needs to be runnable and documented now, per the M4-A task contract.
+In production the gateway runs as a **systemd unit** — `systemd/magpie-gateway.service`
+(`User=magpie-gateway`, `EnvironmentFile=/etc/magpie-gateway/gateway.env`, ordered before
+`magpie.service`, with a `RuntimeDirectory` for the per-job socket tree) — installed by
+`scripts/install.sh` (M5-A). The manual invocation above is only for iterating locally; see
+`INSTALL.md` / `QUICKSTART.md` for the packaged install.
