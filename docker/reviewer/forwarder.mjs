@@ -59,6 +59,15 @@ const server = net.createServer((tcpConn) => {
   tcpConn.pause();
   dialUnixWithRetry()
     .then((unixConn) => {
+      // The retry+backoff above can span several seconds; the inbound TCP
+      // connection may already be gone by the time the unix dial resolves.
+      // Registering the teardown listeners below only now means a `close`
+      // that fired during the retry window was missed -- so relaying would
+      // leak `unixConn`. Bail out and close it if the peer is already gone.
+      if (tcpConn.destroyed) {
+        unixConn.destroy();
+        return;
+      }
       log(`relaying connection -> ${SOCKET_PATH}`);
       tcpConn.pipe(unixConn);
       unixConn.pipe(tcpConn);

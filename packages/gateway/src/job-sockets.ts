@@ -38,7 +38,6 @@
 // proxy-server.ts), but log lines below are kept to job ids/paths only, same
 // discipline as every other module in this package.
 
-import { existsSync } from "node:fs";
 import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
 import * as path from "node:path";
 import type { GatewayConfig } from "./config.js";
@@ -57,9 +56,12 @@ const SOCKET_FILE_MODE = 0o666;
 /** Characters allowed in a sanitized job id / directory name — same spirit as `packages/orchestrator/src/reviewer.ts`'s `buildContainerName`/`DOCKER_NAME_UNSAFE_RE`, so a job id containing e.g. `/` or spaces can never be used to escape `config.socketDirRoot` or collide with an unrelated path. */
 const JOB_ID_UNSAFE_RE = /[^a-zA-Z0-9_.-]/g;
 
-/** Sanitizes a caller-supplied `jobId` into a safe, non-empty directory-name component. Unsafe characters become `-`; an empty (or all-unsafe) input falls back to `"job"`. */
+/** Sanitizes a caller-supplied `jobId` into a safe, non-empty directory-name component. Unsafe characters become `-`; an empty (or all-unsafe) input falls back to `"job"`. `.` and `..` are allowed by {@link JOB_ID_UNSAFE_RE} (both are legal filename chars) but must never be used as a directory name here — either would make `path.join(root, name)` resolve to the root itself or its parent, letting a job escape `config.socketDirRoot` (in production `jobId` is always a `randomUUID()`, but this stays a real traversal boundary regardless). */
 function sanitizeJobId(jobId: string): string {
   const sanitized = jobId.replace(JOB_ID_UNSAFE_RE, "-");
+  if (sanitized === "." || sanitized === "..") {
+    return "job";
+  }
   return sanitized.length > 0 ? sanitized : "job";
 }
 
@@ -150,20 +152,24 @@ export class JobSocketManager {
 
     // A stale socket file from a previous (crashed/unclean-shutdown) bind at
     // this exact path would make the upcoming `listen()` fail EADDRINUSE.
-    // Safe to unlink unconditionally: `socketPath` is always a path THIS
-    // process just computed under its own `config.socketDirRoot`, never
-    // caller-supplied beyond the sanitized `jobId` component baked into it.
-    if (existsSync(socketPath)) {
-      await unlink(socketPath).catch(() => {});
-    }
+    // Unlink unconditionally (a missing file just no-ops via `.catch`) rather
+    // than gating on a synchronous `existsSync` stat — same effect without
+    // blocking the event loop or a stat/unlink TOCTOU. Safe: `socketPath` is
+    // always a path THIS process just computed under its own
+    // `config.socketDirRoot`, never caller-supplied beyond the sanitized
+    // `jobId` component baked into it.
+    await unlink(socketPath).catch(() => {});
 
     const proxy = createProxyServer(this.#config, this.#keyStore, this.#deps);
     try {
       await proxy.listen(socketPath);
       await chmod(socketPath, SOCKET_FILE_MODE);
     } catch (err) {
+      // Roll back everything this call created, including the (now empty) job
+      // directory, so a failed bind doesn't leak a directory under the root.
       await proxy.close().catch(() => {});
       await unlink(socketPath).catch(() => {});
+      await rmdir(socketDir).catch(() => {});
       throw err;
     }
 

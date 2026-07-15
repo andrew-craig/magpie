@@ -103,6 +103,18 @@ describe("JobSocketManager", () => {
     expect(path.dirname(socketDir)).toBe(root);
   });
 
+  it("maps a jobId of `.` or `..` to a safe fallback dir strictly under root (never root itself or its parent)", async () => {
+    // `.` and `..` survive the unsafe-char regex (both are legal filename
+    // chars) but would make `path.join(root, name)` resolve to root itself
+    // or its parent -- an escape. Both must collapse to the "job" fallback.
+    const { jobSockets, root } = await setup();
+    const dot = await jobSockets.bind({ id: "key-dot", jobId: "." });
+    expect(dot.socketDir).toBe(path.join(root, "job"));
+    const dotdot = await jobSockets.bind({ id: "key-dotdot", jobId: ".." });
+    expect(dotdot.socketDir).toBe(path.join(root, "job"));
+    expect(path.dirname(dotdot.socketDir)).toBe(root);
+  });
+
   it("round-trips a GET /healthz over the bound unix socket", async () => {
     const { jobSockets } = await setup();
     const { socketDir } = await jobSockets.bind({ id: "key-1", jobId: "job-health" });
