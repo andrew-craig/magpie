@@ -4,6 +4,15 @@ Status: **design document, no code**. Tracks `task_0f51`, superseding the shelve
 implementation on `m6e-rootless-spike` (see `.chalk/tasks/task_edbd.md`'s "PIVOT" section). Written
 for CTO sign-off; see "Open questions / risks" (§8) for the specific decisions requested.
 
+**CTO decisions (2026-07-17), pushed for broader review:**
+- Direction **endorsed**: proceed on this design — **3b (root-socket shim)**, **Phase 1 (shim-only,
+  native) shipped independently** as the M6-E fix, containerisation as Phase 2.
+- **§8.6 resolved: the shim is a small static binary in Go or Rust** (not TS/Node) — smallest
+  attack/supply-chain surface for the single most-privileged component; Go-vs-Rust sub-choice deferred
+  to the pre-Phase-1 spike (§8.5), leaning Go for stdlib unix-socket + `SO_PEERCRED` simplicity.
+- Remaining §8 items (blocking `launch-reviewer`, `network_mode: service:gateway`, Phase 2 as its own
+  epic) accepted as the doc recommends, but left visible here for broader-review input.
+
 ## 0. Recap: why we're here
 
 `task_edbd` (M6-E) set out to remove `SupplementaryGroups=docker` from `magpie.service` — the
@@ -541,13 +550,11 @@ this whole epic exists to ship.**
    problem against the shim's own concurrency ceiling, §2.3 rule 5) — none of this is architecturally
    risky per se, but "does Node's `net.Socket` expose peer credentials cleanly" is an empirical question
    worth 30 minutes before committing to §2.5's auth design.
-6. **Needs explicit scoping:** is the shim itself written in TypeScript/Node (consistent with the rest
-   of the codebase, PLAN.md's "one language for the whole project" rationale) or a different, more
-   minimal runtime (e.g. a small Go/Rust static binary, arguably easier to audit and with fewer
-   supply-chain dependencies for the single most privileged component in the system)? This document
-   deliberately doesn't recommend one — it's a real tradeoff between "one language" and "smallest
-   possible attack surface for the crown jewel" that deserves an explicit CTO call rather than an
-   inherited default.
+6. **RESOLVED (CTO, 2026-07-17): small static binary in Go or Rust**, not TS/Node — the smallest-
+   possible-attack-surface option for the crown-jewel component wins over "one language." Go-vs-Rust
+   sub-choice deferred to the §8.5 spike (leaning Go for stdlib unix-socket + `SO_PEERCRED` ergonomics).
+   Consequence: the shim does NOT reuse the existing TS fake-binary test seam; it gets its own test
+   harness, and the repo gains a second toolchain (build/CI wiring is part of Phase 1 scope).
 7. **§6.3: does Phase 2's heavier upgrade story (config relocation, compose adoption) need its own
    dedicated M-series task/epic**, separate from Phase 1's, given it's explicitly a topology preference
    rather than a security-blocking fix? Recommend yes, but flagging for confirmation since it affects
