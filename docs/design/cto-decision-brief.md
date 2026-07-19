@@ -9,17 +9,7 @@
    secrets.
 2. **Easy Linux self-host distribution** that **minimises the permissions the app needs**.
 
-> **DECISION (CTO, 2026-07-19) — see the final "DECISION" section at the end; it supersedes every
-> recommendation in this doc.** The reviewer isolation boundary is a **rootless KVM-backed microVM
-> (default)** on Design B's rootless substrate (no root anywhere; orchestrator ⟂ gateway uid split
-> preserved); **gVisor is a deferred future upgrade for larger / no-KVM hosts.** The layered analysis
-> below (cost-aware → bigger-picture reconsideration → gVisor validation) is retained to show the
-> reasoning that led here.
 
-**Evidence base:** everything below marked *[validated]* was tested on a real distribution target —
-a Raspberry Pi, Debian 12 bookworm, **aarch64**, cgroup v2, unprivileged userns enabled, docker +
-podman + crun + slirp4netns present, **runsc/gVisor absent**. Two sonnet spikes + direct checks.
-This is a representative low-end self-host box, not a lab.
 
 ---
 
@@ -33,28 +23,6 @@ This is a representative low-end self-host box, not a lab.
 
 ---
 
-## Pivotal cross-cutting finding (reframes the whole comparison)
-
-**Memory caps are unenforced on this box for _all three_ designs — including the shipped product
-today.** *[validated]* The kernel boots with `cgroup_disable=memory` (an RPi firmware default not
-visible in `/boot/firmware/cmdline.txt`); the memory controller is absent from the entire cgroup v2
-hierarchy. Direct proof:
-
-```
-$ cat /proc/cmdline                     → ... cgroup_disable=memory ...
-$ cat /sys/fs/cgroup/cgroup.controllers → cpuset cpu io pids      # no "memory"
-$ docker run --rm --memory=64m alpine echo ran
-WARNING: Your kernel does not support memory limit capabilities ... Limitation discarded.
-ran
-```
-
-Implications:
-- This is **not a differentiator** between A/B/C — it's a host/firmware gap affecting every design
-  equally, and it already silently affects the **current production reviewer's** `--memory` limit.
-- No design may market "enforced memory caps." Whatever we pick needs an **install-time preflight
-  that fails loud** (mirroring the existing `cgroup-preflight.ts` philosophy) rather than trusting
-  the flag to bind. `pids`, `--network none`, and hard timeouts *do* enforce here *[validated]* — the
-  gap is memory specifically.
 
 ---
 
@@ -119,78 +87,11 @@ optional** — see the recommendation.
 
 ---
 
-## Bottom line & recommendation
 
-**Recommend A (the shim) as the primary architecture — arrived at from the evidence, not from the
-prior endorsement — with two deliberate borrowings and one product-wide fix:**
 
-1. **Adopt A's shim.** It is the only option that fixes the actual M6-E problem (orchestrator
-   docker-group root-equivalence) **without** either regressing secret separation (B as written) or
-   making the #1 property — the reviewer's empty netns — silently fail-open (C). Its reviewer boundary
-   is the shipped, proven, config-independent `--network none`.
 
-2. **Design the shim runtime-agnostic so it can launch via rootless podman where the operator has set
-   it up.** This folds in **B's genuine win (no root anywhere)** as an *optional hardening* — validated
-   to work here for `--network none`/pids/host-isolation *[validated]* — without betting the product on
-   gVisor/subuid/linger portability. On this box rootless enforces everything *except* memory (same
-   firmware gap as everyone).
 
-3. **Track C as the future deployment target, gated on making the nested reviewer netns
-   empty-by-construction** (not `PrivateNetwork`-dependent). C has the best distribution story (one
-   artifact) and should not be discarded — but it is **not security-primary today** because its #1
-   property fails open. Revisit once the nested netns is provable without leaning on `CAP_SYS_ADMIN`.
 
-4. **Ship a loud memory-cgroup preflight product-wide, now**, independent of the A/B/C choice — the
-   current reviewer already has an unenforced `--memory` on Pi-class hosts.
-
-**What the CTO is really deciding (the honest trade):** A accepts that a root docker daemon + a small
-audited root-equivalent shim remain on the host, in exchange for a **provable reviewer boundary,
-preserved secret separation, and near-zero rework**. B and C both chase "no root anywhere," but B pays
-for it with a non-portable gVisor story + a Go rewrite + an as-written secret-separation regression,
-and C pays for it with a reviewer network boundary that is *less* provable than what we already ship.
-For a **security-first, broadly self-hostable** product, a provable reviewer boundary beats
-root-elimination that is either non-portable (B) or bought at the cost of that same boundary (C).
-
-### If the CTO weights differently
-- **Weights "zero root on the host" above all** → the answer is **B's rootless substrate**, but insist
-  on: (i) keeping the separate gateway uid (fix B's regression), (ii) treating gVisor as optional not
-  assumed, (iii) documenting the subuid/linger/userns prereqs. This is essentially "A's recommendation
-  #2 promoted to primary" — which is why a runtime-agnostic shim is the low-regret hedge.
-- **Weights "one-artifact install" above all** → fund the **C spike to closure** first (make nested
-  netns empty-by-construction; confirm `CAP_SYS_ADMIN` scope is acceptable); do not ship C as primary
-  until 1a is provable.
-
-### Open questions for the CTO
-1. Is a **root-equivalent-but-audited shim on the host** acceptable as the steady state (A), or is
-   "no root anywhere" a hard requirement (forces B/C and their costs)?
-2. Is **arm64/Raspberry-Pi-class** hardware in the supported self-host matrix? If yes, gVisor (B) is
-   effectively off the table as a *default*, and the memory-preflight is mandatory.
-3. For C: is granting the **outer container `CAP_SYS_ADMIN`** an acceptable deployment requirement, or
-   does its fail-open netns disqualify it until redesigned?
-4. Does B's implied **orchestrator rewrite (TS→Go)** and its **secret-separation regression** change
-   its standing, or is B really "rootless substrate under the existing code" (which is recommendation
-   #2, not a rewrite)?
-
----
-
-## Appendix — validation log (this box, aarch64 Debian 12)
-
-| Check | Result |
-|---|---|
-| `cgroup_disable=memory` on kernel cmdline; memory controller absent hierarchy-wide | confirmed (direct) |
-| `docker run --memory=64m` → "Limitation discarded", runs anyway | confirmed (direct) |
-| rootless podman: works, crun, rootless=true | PASS |
-| rootless `--network none`: only `lo`, no route out | PASS |
-| rootless `--pids-limit`: fork bomb contained | PASS |
-| rootless userns: container-root → host uid 1000; non-mounted host files unreachable | PASS |
-| rootless `--memory`: hard error (systemd mgr) / silent no-op (cgroupfs) | FAIL (firmware) |
-| C: nested `PrivateNetwork=yes`, default caps → **inherits outer routed network, fail-open** | FAIL |
-| C: nested `PrivateNetwork=yes` + outer `--cap-add=SYS_ADMIN` → fresh netns, only `lo` | PASS |
-| C: nested `MemoryMax=64M` → 200MB alloc not killed | FAIL (firmware) |
-| C: nested `TasksMax`, `RuntimeMaxSec`, host-file isolation, uid mapping | PASS |
-| gVisor/runsc present | absent on box; **installable on arm64** (per CTO) — runs-rootless-here still to be validated |
-
----
 
 ## Bigger-picture reconsideration (supersedes the recommendation above)
 
@@ -481,3 +382,23 @@ from "proven vehicle"):**
 
 Floor invariant added: the crun tier must not be weaker than today's shipped hardened posture (so no
 host regresses below the current product).
+
+## Appendix — validation log (this box, aarch64 Debian 12)
+
+| Check | Result |
+|---|---|
+| `cgroup_disable=memory` on kernel cmdline; memory controller absent hierarchy-wide | confirmed (direct) |
+| `docker run --memory=64m` → "Limitation discarded", runs anyway | confirmed (direct) |
+| rootless podman: works, crun, rootless=true | PASS |
+| rootless `--network none`: only `lo`, no route out | PASS |
+| rootless `--pids-limit`: fork bomb contained | PASS |
+| rootless userns: container-root → host uid 1000; non-mounted host files unreachable | PASS |
+| rootless `--memory`: hard error (systemd mgr) / silent no-op (cgroupfs) | FAIL (firmware) |
+| C: nested `PrivateNetwork=yes`, default caps → **inherits outer routed network, fail-open** | FAIL |
+| C: nested `PrivateNetwork=yes` + outer `--cap-add=SYS_ADMIN` → fresh netns, only `lo` | PASS |
+| C: nested `MemoryMax=64M` → 200MB alloc not killed | FAIL (firmware) |
+| C: nested `TasksMax`, `RuntimeMaxSec`, host-file isolation, uid mapping | PASS |
+| gVisor/runsc present | absent on box; **installable on arm64** (per CTO) — runs-rootless-here still to be validated |
+
+---
+
