@@ -18,6 +18,18 @@ virtualization. This gives the reviewer a real, separate guest kernel — the is
 stays correct even after the reviewer is allowed to *execute* untrusted repo code — while keeping the
 whole trusted computing base unprivileged. Rationale below.
 
+**Decisions requested:**
+1. **Approve the target architecture** — the §5 synthesis: rootless KVM micro-VM default on B's
+   rootless substrate, with the three-tier isolation ladder. (This retires the M6-E shim direction —
+   Proposal A — as the mid-term target.)
+2. **Approve the single pre-implementation gate** — the libkrun-under-rootless-Podman spike (§7.1),
+   with Firecracker-direct as the already-validated fallback vehicle if it fails.
+3. **Accept tier-conditional isolation depth** on hosts without `/dev/kvm` (most non-metal cloud
+   VMs): they run the gVisor tier (later) or today's hardened-crun posture (now), with the active
+   tier surfaced per review. The #1 no-network property is tier-invariant; only escape *depth* varies.
+4. **Confirm gVisor stays deferred** — an optional later tier for no-KVM and high-density hosts, not
+   built this round.
+
 ---
 
 ## 1. The three options
@@ -260,6 +272,58 @@ vehicle" (libkrun specifically).
 2. **Network-off-by-construction assertion** for the chosen VMM (§5, caveat under "no-network"): TSI/passt
    transport must be built off and re-asserted fail-closed from inside the guest.
 3. **Installer + preflight** implementing the tier-honesty and floor invariants of §5.
+
+---
+
+## 8. Implementation scope and effort (grounded in current code)
+
+- **Reused unchanged:** `packages/review-extension/*` (the `report_findings` tool),
+  `reviewer-prompt.md`, `packages/orchestrator/src/findings.ts` + `anchor.ts` (trust-boundary
+  parsing/anchoring), `publisher.ts`/`rereview.ts` core logic, `queue.ts`, `workspace.ts`,
+  `diff.ts`, `github.ts`, `filter.ts`, `shutdown.ts`; the gateway's budget/TTL keystore and
+  management-plane HTTP contract; the `docker/reviewer` image build (reused as the guest rootfs
+  OCI image under libkrun).
+- **Modified:**
+  - `packages/orchestrator/src/reviewer.ts` — swap the hardened `docker run --network none`
+    invocation for `podman run` (krun OCI runtime) or a direct Firecracker launch; drop the
+    gateway-socket bind mount entirely (vsock replaces it); add guest RAM/vCPU flags.
+  - `packages/orchestrator/src/docker.ts` — extend the single `docker version` preflight into the
+    tier-detection probe (`/dev/kvm` open + `KVM_CREATE_VM`, podman/krun presence, gVisor presence).
+  - `packages/orchestrator/src/container-mounts.ts` — `/work` stays a read-only bind mount for the
+    crun/gVisor tiers; add the Firecracker-only per-job `mkfs.ext4 -d` image builder.
+  - `docker/reviewer/entrypoint.sh` — keep the fail-closed assertion pattern; add the
+    TSI/passt-off assertion (§5's no-network caveat).
+  - `docker/reviewer/forwarder.mjs` — rewritten: today's TCP→unix relay becomes a guest-side vsock
+    client (Node has no native `AF_VSOCK`; likely a small native/Go helper).
+  - `packages/orchestrator/src/gateway.ts` / `pipeline.ts` — thread tier + per-job vsock socket
+    path instead of the socket-dir mount path; the mint/revoke flow is otherwise unchanged.
+  - `packages/orchestrator/src/orphan-cleanup.ts` — reap orphaned VM/podman processes instead of
+    `docker kill` targets.
+  - `scripts/install.sh`, `systemd/magpie.service` — rootless Podman + subuid/subgid + linger +
+    `kvm`-group setup replacing today's docker-group grant; `RestrictAddressFamilies` gains
+    `AF_VSOCK`.
+  - `server.ts` / `publisher.ts` — surface the active isolation tier on `/healthz` and in the
+    review footer (§5 tier honesty).
+- **Net-new:** the host-side per-VM vsock↔gateway-socket forwarder; the install-time `/dev/kvm`
+  tier preflight; the isolation-tier selection module (the ladder); a libkrun release pin +
+  cosign-verify step alongside the existing reviewer-image digest pin; and — only if the libkrun
+  spike fails — a Firecracker-direct guest-kernel/rootfs supply chain.
+- **Phasing:**
+  1. libkrun-under-rootless-Podman spike (§7.1 — the gate).
+  2. vsock transport spike: guest↔host round-trip against the gateway's real per-job socket.
+  3. Port `reviewer.ts`/`container-mounts.ts` to launch the micro-VM tier end-to-end, crun floor
+     as feature-flagged fallback.
+  4. Tier preflight + ladder wiring, installer rootless-Podman provisioning, `/healthz`/footer
+     surfacing.
+  5. Firecracker-direct fallback path + gVisor deferred-tier scaffolding; micro-VM ships as
+     default.
+- **Effort ballpark:** comparable to **M3 + M4 + M7 combined** — the largest single architectural
+  change since M7, and unlike M7 it starts from an IPC primitive the codebase has no working
+  example of (vsock; no Node-native support) rather than unix sockets/TCP. **Biggest
+  uncertainty:** whether libkrun behaves as a drop-in OCI runtime for the existing
+  mount/env/argv contract — exactly the question the §7.1 spike answers; a negative result forces
+  the heavier Firecracker-direct fallback (owning a guest-kernel/rootfs pipeline per
+  architecture), which pushes the estimate meaningfully higher.
 
 ---
 

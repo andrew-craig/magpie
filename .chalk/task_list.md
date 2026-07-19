@@ -3,8 +3,10 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_0f51** · P ·  · 
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
+- **task_9591** · P2 · in_progress · CTO decision brief: 3-way design reconsideration (shim vs rootless-podman/gVisor vs single-userns-container)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
