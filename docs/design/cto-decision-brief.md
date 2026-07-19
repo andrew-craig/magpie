@@ -1,10 +1,8 @@
 # CTO decision brief — reviewer sandbox / distribution architecture (3-way)
 
-**Purpose:** prepare a final, from-scratch decision between the three proposals now in
-`docs/design/`. This is a **full reconsideration** — prior CTO endorsements recorded inside
-`shim-containerisation.md` are treated here as *one option's argument*, not settled fact.
+**Purpose:** decide on the mid-term target architecture for Magpie. This document reviews options and recommends a new architecture.
 
-**The two priorities, in order (from the project brief):**
+**The two priorities for the project architecture, in order:**
 1. **Secure the reviewer** — malicious PR code cannot impact the host or other systems, or steal
    secrets.
 2. **Easy Linux self-host distribution** that **minimises the permissions the app needs**.
@@ -13,25 +11,19 @@
 
 ---
 
-## The three proposals in one line each
+##  Summary of Options
 
 | | Proposal | Privileged launcher | Reviewer isolation mechanism | Deployment shape |
 |---|---|---|---|---|
-| **A** | `shim-containerisation.md` — host-native **magpie-shim** + containerised orchestrator/gateway | small audited **root-equivalent shim** fronts the root docker daemon | `docker run --network none` (unchanged, proven) | native shim + compose stack; 2-phase |
-| **B** | `sandboxed-reviewer-design.md` — **rootless Podman + gVisor**, orchestrator launches directly | none — rootless, no root anywhere | rootless `podman --network none`, `runsc` where available else `crun` | single Go orchestrator, rootless podman; heavy host prereqs |
-| **C** | `single-container-systemd.md` — **one unprivileged userns container**, all-systemd | none — no root daemon, no shim | **nested** transient systemd unit (`PrivateNetwork=yes`, cgroup caps) | one artifact, one `docker run`/compose |
-
----
-
+| **A** | host-native **magpie-shim** + containerised orchestrator/gateway - see `shim-containerisation.md`  | small audited **root-equivalent shim** fronts the root docker daemon | `docker run --network none` (unchanged, proven) | native shim + compose stack; 2-phase |
+| **B** | **rootless Podman + gVisor**, orchestrator launches directly - see `sandboxed-reviewer-design.md`  | none — rootless, no root anywhere | rootless `podman --network none`, `runsc` where available else `crun` | single Go orchestrator, rootless podman; heavy host prereqs |
+| **C** | **one unprivileged userns container**, all-systemd - see `single-container-systemd.md`  | none — no root daemon, no shim | **nested** transient systemd unit (`PrivateNetwork=yes`, cgroup caps) | one artifact, one `docker run`/compose |
 
 ---
 
 ## Priority 1 — securing the reviewer: how the three differ
 
 ### 1a. The #1 property: the reviewer must have NO network, provably and config-independently
-
-This is the project's own north star (M7 "Design D": egress isolation must be provable *by
-construction*, not dependent on config).
 
 | | Result | Evidence |
 |---|---|---|
@@ -60,9 +52,7 @@ spend-capped virtual key.
 
 ### 1c. Runtime-escape depth & blast radius of the privileged component
 
-- **gVisor (B's headline):** strongest in principle (userspace kernel). **But runsc is absent here and
-  this is arm64** — gVisor supports arm64 but is a non-distro binary and a rough target on Pi-class
-  kernels. On this box B **degrades to `crun`**, i.e. the same namespace/seccomp isolation A and C use
+- **gVisor (B's headline):** strongest in principle (userspace kernel). On this box B **degrades to `crun`**, i.e. the same namespace/seccomp isolation A and C use
   — so B's security *edge* is conditional and non-portable, while its costs are certain.
 - **Root-equivalence:** A keeps a root docker daemon + a root-equivalent shim on the host (concentrated
   in a ~500-line audited component, **unreachable from the untrusted-input path**). B and C have **no
@@ -88,25 +78,8 @@ optional** — see the recommendation.
 ---
 
 
+## Bigger-picture
 
-
-
-
-
-## Bigger-picture reconsideration (supersedes the recommendation above)
-
-**Instruction:** ignore rework; treat gVisor as an installable dependency (not impossible); treat the
-memory-cgroup gap as fixable; do not anchor the decision on fixable constraints. Re-derived from the
-*structural* (non-fixable) properties only.
-
-### What's fixable (excluded) vs structural (decisive)
-
-| Penalty I'd put on B earlier | Ruling | Status |
-|---|---|---|
-| Go rewrite / rework | don't care | excluded |
-| gVisor install + arm64 availability | installable dependency | excluded |
-| memory-cgroup gap | fixable on host; also hits all three equally | excluded |
-| secret-separation regression | a **design bug**, not a cost | must be fixed in the target (keep separate-uid gateway) |
 
 ### The structural facts that remain
 
@@ -194,7 +167,7 @@ first-class.
 
 ---
 
-## DECISION (CTO, 2026-07-19) — rootless microVM default, gVisor future upgrade
+## Recommendation — rootless microVM default, gVisor future upgrade
 
 **Supersedes every recommendation above.** The reviewer isolation boundary is a **rootless KVM-backed
 microVM (Kata Containers / Firecracker) by default**, built on **Design B's rootless substrate** (no
