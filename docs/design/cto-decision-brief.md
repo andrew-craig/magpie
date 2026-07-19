@@ -1,377 +1,286 @@
-# CTO decision brief — reviewer sandbox / distribution architecture (3-way)
+# CTO decision brief — reviewer sandbox / distribution architecture
 
-**Purpose:** decide on the mid-term target architecture for Magpie. This document reviews options and recommends a new architecture.
+**Purpose:** choose the mid-term target architecture for how Magpie isolates the PR reviewer and
+how the whole stack is packaged for self-hosting. Three design proposals are on the table
+(`shim-containerisation.md`, `sandboxed-reviewer-design.md`, `single-container-systemd.md`). This
+brief defines each, weighs the trade-offs against the project's two priorities, and recommends a
+synthesis rather than any one proposal as-written.
 
-**The two priorities for the project architecture, in order:**
-1. **Secure the reviewer** — malicious PR code cannot impact the host or other systems, or steal
-   secrets.
+**The two priorities, in order:**
+1. **Secure the reviewer.** Malicious PR code cannot impact the host or other systems, and cannot
+   steal secrets. (The threat is indirect prompt injection + untrusted code, not a cooperative user.)
 2. **Easy Linux self-host distribution** that **minimises the permissions the app needs**.
 
-
+**TL;DR recommendation:** adopt Proposal **B's rootless substrate** (no root anywhere) as the
+foundation, and make the reviewer sandbox a **rootless KVM micro-VM by default** (libkrun/krun under
+Podman), with **gVisor** and **hardened crun** as explicit weaker tiers for hosts without hardware
+virtualization. This gives the reviewer a real, separate guest kernel — the isolation boundary that
+stays correct even after the reviewer is allowed to *execute* untrusted repo code — while keeping the
+whole trusted computing base unprivileged. Rationale below.
 
 ---
 
-##  Summary of Options
+## 1. The three options
 
-| | Proposal | Privileged launcher | Reviewer isolation mechanism | Deployment shape |
+| | Proposal | Privileged launcher | Reviewer isolation | Deployment shape |
 |---|---|---|---|---|
-| **A** | host-native **magpie-shim** + containerised orchestrator/gateway - see `shim-containerisation.md`  | small audited **root-equivalent shim** fronts the root docker daemon | `docker run --network none` (unchanged, proven) | native shim + compose stack; 2-phase |
-| **B** | **rootless Podman + gVisor**, orchestrator launches directly - see `sandboxed-reviewer-design.md`  | none — rootless, no root anywhere | rootless `podman --network none`, `runsc` where available else `crun` | single Go orchestrator, rootless podman; heavy host prereqs |
-| **C** | **one unprivileged userns container**, all-systemd - see `single-container-systemd.md`  | none — no root daemon, no shim | **nested** transient systemd unit (`PrivateNetwork=yes`, cgroup caps) | one artifact, one `docker run`/compose |
+| **A** | Host-native **magpie-shim** + containerised orchestrator/gateway (`shim-containerisation.md`) | small audited **root-equivalent shim** fronts the root Docker daemon | `docker run --network none` — the shipped, proven mechanism | native shim service + compose stack; 2-phase rollout |
+| **B** | **Rootless Podman**, orchestrator launches the sandbox directly (`sandboxed-reviewer-design.md`) | **none** — rootless, no root anywhere | rootless `podman --network none`; **gVisor (`runsc`)** where supported, else `crun` | single orchestrator binary + rootless Podman; heavier host prereqs |
+| **C** | **One unprivileged userns container**, all-systemd (`single-container-systemd.md`) | **none** — no root daemon, no shim | **nested** transient systemd unit (`PrivateNetwork=yes`, cgroup caps) | one artifact, one `docker run`/compose |
+
+All three share Magpie's existing capability-separation model: the orchestrator parses untrusted PR
+content and holds the GitHub App key + gateway master key; a **separate-uid gateway** holds the real
+provider key; the reviewer gets only a short-lived, budget-capped virtual key and its sole egress is a
+per-job socket to the gateway. The proposals differ in *how the reviewer is sandboxed* and *what
+privilege the launcher needs* — which is exactly where the two priorities bite.
 
 ---
 
-## Priority 1 — securing the reviewer: how the three differ
+## 2. Priority 1 — securing the reviewer
 
-### 1a. The #1 property: the reviewer must have NO network, provably and config-independently
+Three sub-properties matter, in descending order of importance.
 
-| | Result | Evidence |
+### 2a. The #1 property — the reviewer must have **no network**, provably and config-independently
+
+This is the single most consequential axis. Indirect prompt injection is defeated structurally by the
+reviewer having no way out except the audited gateway socket; if the "no network" guarantee can
+silently fail, the whole model is compromised.
+
+| | Result | Why |
 |---|---|---|
-| **A** | **Provable, config-independent** | `docker run --network none` = kernel-empty netns; does not depend on any outer-container capability. This is the shipped, proven mechanism. |
-| **B** | **Provable** *[validated]* | rootless `podman --network none`: container sees only `lo`, empty route table, connect to `1.1.1.1` → Network unreachable. |
-| **C** | **FAILS OPEN** *[validated]* | Nested `PrivateNetwork=yes` inside the unprivileged container under **default** caps *silently ran with the outer container's routed network still attached* — journal shows `network namespace setup failed, ignoring`, and curl to `1.1.1.1` returned 301 (reached the internet). Correct isolation only appeared after granting the **outer** container `--cap-add=SYS_ADMIN`. |
+| **A** | **Provable, config-independent** | `docker run --network none` gives a kernel-empty netns; it does not depend on any outer-container capability. Shipped and proven. |
+| **B** | **Provable** | rootless `podman --network none`: the sandbox sees only `lo`, has an empty route table, and cannot reach any external address. |
+| **C** | **Fails open** | A nested `PrivateNetwork=yes` inside an unprivileged container under *default* capabilities silently runs with the **outer container's routed network still attached** — isolation only appears once the outer container is granted `CAP_SYS_ADMIN`. |
 
-**This is the single most consequential result in the brief.** For the property that matters most,
-A and B are empty-by-construction; **C degrades to a silent fail-open** unless the deployment recipe
-grants the outer container a broad capability — i.e. C makes the #1 security property *config- and
-capability-dependent*, exactly the class of reasoning Design D was created to eliminate. Even done
-"right," C's reviewer netns is only as good as `CAP_SYS_ADMIN` being present on the outer container,
-which also widens the outer boundary.
+**A and B are empty-by-construction; C makes the #1 property capability-dependent.** C's failure mode
+is the exact class of config-dependent security the project's "Design D" work was created to eliminate.
+Making C safe requires granting `CAP_SYS_ADMIN` back to the outer container — which also widens the
+outer boundary. This is disqualifying for C as a primary architecture.
 
-### 1b. Secret separation (can a compromised untrusted-input path reach the provider key?)
-
-Magpie's current model: orchestrator (parses untrusted PR content; holds GitHub key + gateway master
-key) is a **different uid** from the gateway (holds the real OpenRouter key). The reviewer gets only a
-spend-capped virtual key.
+### 2b. Secret separation — can a compromised untrusted-input path reach the provider key?
 
 | | Secret separation | Note |
 |---|---|---|
-| **A** | **Preserved** | orchestrator ⟂ gateway kept as separate container uids; shim never sees any secret. Unchanged from today. |
-| **B** | **Regressed as written** | the design folds credential injection into "the orchestrator's proxy … injects the gateway auth header" — i.e. the untrusted-input-parsing process holds the provider credential. Collapses the orchestrator/gateway uid split. Fixable, but the doc as written is a step *down* on priority 1. |
-| **C** | **Preserved** | separate internal uids O ≠ G, gateway key in a 0600 file; `/tmp/host-only` and non-mounted host files unreachable, container-root maps to unprivileged host uid *[validated]*. |
+| **A** | **Preserved** | orchestrator and gateway stay separate container uids; the shim never sees a secret. |
+| **B** | **Regressed as written** | the proposal folds credential injection into "the orchestrator's proxy injects the gateway auth header" — putting the provider key in the *same* process that parses untrusted PR content. This collapses the uid split. **Fixable, but a step down as written — and the recommendation mandates fixing it.** |
+| **C** | **Preserved** | separate internal uids for orchestrator and gateway; provider key in a `0600` file the reviewer uid cannot read. |
 
-### 1c. Runtime-escape depth & blast radius of the privileged component
+### 2c. Escape depth and blast radius of the privileged component
 
-- **gVisor (B's headline):** strongest in principle (userspace kernel). On this box B **degrades to `crun`**, i.e. the same namespace/seccomp isolation A and C use
-  — so B's security *edge* is conditional and non-portable, while its costs are certain.
-- **Root-equivalence:** A keeps a root docker daemon + a root-equivalent shim on the host (concentrated
-  in a ~500-line audited component, **unreachable from the untrusted-input path**). B and C have **no
-  root anywhere** — genuinely better on this axis — **except** C's fail-open netns pushes you toward
-  `CAP_SYS_ADMIN` on the outer container, eroding that advantage.
-- **pids cap + hard timeout:** enforce in all three *[validated]*.
+- **Runtime-escape depth.** A and C both rely *solely* on the host kernel as the boundary between
+  untrusted code and everything else — a single kernel 0-day is a full escape. B's gVisor interposes a
+  **userspace kernel** (a second, independent kernel boundary) — but only where gVisor actually runs
+  (see §4 on portability).
+- **Root in the TCB.** A keeps a **root Docker daemon plus a root-equivalent shim** on the host — small
+  and audited, and unreachable from the untrusted-input path, but permanently present. B and C have
+  **no root anywhere** — genuinely better — except C erodes this by needing `CAP_SYS_ADMIN` on its
+  outer container for §2a.
+- **Resource caps.** pids limits and hard timeouts enforce in all three. Memory caps are a weak point
+  for *every* container-based design — see §4.
 
----
-
-## Priority 2 — easy install / minimal permissions
-
-| | Host prerequisites | Permissions footprint | Rework |
-|---|---|---|---|
-| **A** | root docker daemon (already the requirement since M3) + one native shim service | removes docker-group from orchestrator; **concentrates** root-equivalence in the shim | **lowest** — reuses the entire TS codebase, signed reviewer image, gateway; 2-phase, incremental |
-| **B** | rootless podman + crun + **runsc** + subuid/subgid + linger + userns + slirp4netns | **no root** (best on paper) — but the prereq matrix is the heaviest, and runsc/arm64 is the weakest link | **highest** — reads as a **Go rewrite** of the orchestrator; abandons current gateway split |
-| **C** | an unprivileged container runtime (rootless podman/docker) + cgroup v2 delegation + userns; skopeo/rootfs unpack for the reviewer image | **no root daemon, no shim** (best on paper) — but **needs `CAP_SYS_ADMIN` on the outer container** for reviewer netns, partly undoing "minimal" | **high** — least-proven path (systemd-in-userns-container + nested transient units + 2-level cgroup delegation) |
-
-Note the tension: on the *pure* "minimise permissions" axis B and C look best (no root), but B's win is
-undercut by an unshippable prereq matrix on low-end targets, and C's is undercut by the `CAP_SYS_ADMIN`
-requirement its own #1-property isolation depends on. **A's root-equivalence can itself be made
-optional** — see the recommendation.
-
----
-
-
-## Bigger-picture
-
-
-### The structural facts that remain
-
-- **A permanently has a root docker daemon in its TCB.** Intrinsic to "front docker with a shim,"
-  not an implementation detail. Against priority 2 ("minimize the permissions the app needs") that is a
-  **structural liability**.
-- **B has no root anywhere *and* a second kernel.** Rootless ⇒ the whole TCB is unprivileged
-  (permanent). gVisor ⇒ the reviewer sits behind a userspace kernel **independent of host-kernel
-  correctness** — a boundary neither A nor C has or can gain without becoming B. B's empty netns is a
-  *superset* of A's (empty-netns **plus** gVisor).
-- **C's reviewer boundary is intrinsically nested.** The fail-open netns is a symptom, not a bug: a
-  sandbox built inside a deliberately-unprivileged container has guarantees **bounded by what the outer
-  container can delegate** (hence needing `CAP_SYS_ADMIN` back on the outer container). A first-class
-  sandbox is always easier to *prove* than a sandbox-in-a-sandbox.
-
-### The long-horizon argument (the actual "think bigger")
+### 2d. The long-horizon argument (why 2c will get more important, not less)
 
 The reviewer's **read-only tool allowlist is a current product choice, not a permanent property.** The
-natural product evolution — run the tests/linters/build and review the failures — means the reviewer
-**executes untrusted repo code.** At that point:
-- A and C rely *solely* on the host kernel boundary between executing-attacker-code and root.
-- B's gVisor userspace kernel becomes the **load-bearing** boundary — and it's the only design with one.
+obvious next step for a review bot — run the project's tests/linters/build and review the failures —
+means the reviewer will **execute untrusted repo code**. At that point the isolation boundary stops
+being "can injected text exfiltrate?" and becomes "can executing attacker code escape?"
 
-Pick the architecture that stays correct **after** the reviewer gains code execution. That is B. This is
-the difference between the right *today* decision (A: familiar, low-rework) and the right *long-term*
-decision (B: structurally sound as the product grows).
+- A and C then rest entirely on the host kernel boundary.
+- Only a design with a **second kernel** between the reviewer and the host — gVisor (userspace kernel)
+  or a KVM micro-VM (a real guest kernel) — stays correct.
 
-### Revised recommendation: **Design B's substrate is the target architecture**
-
-Rootless Podman + gVisor, a **first-class (non-nested) reviewer sandbox**, no root anywhere.
-
-- **Priority 1:** zero-root TCB + host-kernel-independent isolation + a provable, non-nested reviewer
-  boundary. **Strictly dominates A**; **structurally more provable than C**.
-- **Priority 2:** "minimize the permissions the app needs" is maximized by "the app needs none." B is
-  the only design whose entire TCB is unprivileged (A can't beat "there is a root daemon"; C is rootless
-  too but reclaims `CAP_SYS_ADMIN` for its reviewer boundary).
-
-**Mandatory refinements (not costs):**
-1. Keep the **orchestrator ⟂ gateway uid split** — provider key in a separate-uid gateway, never in the
-   untrusted-input-parsing orchestrator. (Fixes B's as-written regression.)
-2. **Absorb C's distribution ambition** — package the rootless-user / subuid / linger / cgroup-delegation
-   / runsc setup into a clean installer so B *feels* as easy to install as C's one-artifact goal.
-
-**A** demotes to "the familiar, low-rework option" — but those were the excluded considerations; what's
-left is a permanent root daemon. **C** remains the **north star for distribution UX**, and its packaging
-idea is absorbed into B, but its nested reviewer boundary loses on the priority that ranks first.
-
-### gVisor validated on this box — result: host-conditional, not universal *[validated 2026-07-19]*
-
-`runsc` installs cleanly (release-20260714.0, systrap platform) but **cannot boot a single sandbox on
-this box, rootful or rootless** — the kernel uses **16 KB pages** (`getconf PAGE_SIZE` = 16384) while the
-official `runsc` arm64 build is hard-compiled for **4 KB pages**: `FATAL ERROR: host page size (16384)
-does not match compiled page size (4096)`, no override flag. Rootful and rootless fail **identically**,
-proving the blocker is the host page size, not rootless mechanics (userns/cgroup/ptrace were never
-reached). The reviewer-workload/overhead tests were therefore unreachable on this box.
-
-**Decision impact — gVisor moves from "installable dependency" to "host-conditional layer":**
-- The official gVisor **arm64** build assumes 4K pages, so it fails on **16K-page arm64 (RPi 5 default)
-  and 64K-page arm64 (some arm64 server distros)** — a broad arm64 boundary, not a Pi quirk.
-- On the **mainstream target — amd64, and 4K-page arm64 — gVisor works** (well-trodden path; *expected*,
-  not validated here since this box is arm64/16K).
-- **B's own doc already plans for this** ("runsc where it works; fall back to crun") — consistent, not a
-  contradiction.
-
-**Refined recommendation (supersedes the flat "B" above but keeps its core):**
-> **B's _rootless substrate_ (rootless Podman, no root anywhere, first-class `--network none` reviewer
-> sandbox — validated PASS on this box) is the right foundation. gVisor is the strongest
-> _kernel-independent isolation layer_ to stack on top _where the host supports it_ (amd64 / 4K-arm64);
-> B degrades cleanly to rootless-podman + crun where it doesn't (16K/64K arm64) — still rootless, still
-> first-class, still ahead of A's permanent root daemon on priority 2.**
-
-**Bigger-picture hedge:** the architectural goal is "a reviewer isolation boundary independent of the
-host kernel." gVisor is one implementation; a **KVM-backed microVM (Kata/Firecracker)** is another (this
-box *has* `/dev/kvm`) and may be the more portable way to get the same "second kernel" where gVisor's
-page-size constraint bites. Same principle as B, different mechanism — worth scoping if arm64 is
-first-class.
-
-**Sharpened CTO question:**
-1. **amd64-first matrix?** → B + gVisor is a clean win; long-term recommendation stands.
-2. **arm64 (incl. RPi 5 / 16K-page) first-class?** → gVisor can't be assumed; adopt B's rootless
-   substrate as baseline, treat kernel-independent isolation (gVisor *or* a KVM microVM) as a
-   host-conditional layer.
-
-*(runsc left installed on this box as a non-default Docker runtime; default runtime unchanged = runc.)*
+**The right long-term architecture is the one that is still sound after the reviewer gains code
+execution.** That rules for a kernel-independent isolation boundary, which neither A nor C has or can
+gain without becoming a different design.
 
 ---
 
-## Recommendation — rootless microVM default, gVisor future upgrade
+## 3. Priority 2 — easy install, minimal permissions
 
-**Supersedes every recommendation above.** The reviewer isolation boundary is a **rootless KVM-backed
-microVM (Kata Containers / Firecracker) by default**, built on **Design B's rootless substrate** (no
-root anywhere; the orchestrator ⟂ gateway uid split is preserved — the provider key never lives in the
-untrusted-input-parsing process). **gVisor is a deferred, optional upgrade** for larger / high-density
-or no-KVM hosts — not built this round.
+| | Host prerequisites | Permissions footprint | Implementation cost |
+|---|---|---|---|
+| **A** | root Docker daemon (already required) + one native shim service | removes docker-group from the orchestrator; **concentrates** root-equivalence in a small shim | **lowest** — reuses the whole existing codebase, signed reviewer image, gateway split; incremental 2-phase |
+| **B** | rootless Podman + crun + (optionally) runsc + subuid/subgid + linger + unprivileged userns | **no root** — best on this axis, but the heaviest prereq matrix | **highest** — reads as a substantial rewrite of the launcher; must fix the secret-split regression |
+| **C** | unprivileged container runtime + cgroup v2 delegation + userns + rootfs unpack for the reviewer image | **no root daemon, no shim** — but **needs `CAP_SYS_ADMIN`** on the outer container for §2a, partly undoing "minimal" | **high** — the least-proven path (systemd-in-userns + nested transient units + 2-level cgroup delegation) |
 
-### Why microVM is the right default
+The tension: on the pure "minimise permissions" axis B and C look best (no root), but B's win comes with
+the heaviest prerequisites, and C's is undercut by the very capability its #1-property isolation depends
+on. A is the cheapest to build but permanently carries a root daemon — the thing priority 2 most wants
+gone.
+
+---
+
+## 4. Two portability facts that shape the choice
+
+Two findings generalize well beyond any single host and constrain the runtime options:
+
+1. **gVisor is not universally available on arm64.** The official `runsc` arm64 build is compiled for
+   **4 KB memory pages**; it cannot boot at all on **16 KB-page** (e.g. Raspberry Pi 5 default) or
+   **64 KB-page** arm64 kernels — a broad arm64 boundary, not a single-device quirk. On amd64 and
+   4 KB-page arm64, gVisor works on a well-trodden path. So **B's headline isolation edge is
+   host-conditional**: where gVisor can't run, B degrades to `crun`, i.e. the same shared-host-kernel
+   namespace isolation as A and C.
+
+2. **Container memory caps depend on host cgroup configuration; VMM memory caps do not.** On hosts where
+   the kernel memory controller is disabled or not delegated, `--memory` is silently ignored for *all*
+   container-based designs (A/B/C) — the cap is a no-op and a memory bomb is uncontained. A micro-VM's
+   memory ceiling is instead its guest RAM allocation, **hard-enforced by the VMM** independent of host
+   cgroups — structurally closing this gap.
+
+Together these push toward a **KVM micro-VM** as the strongest *and* most portable way to get the
+"second kernel" that §2d requires: KVM is agnostic to host page size (the guest runs its own kernel and
+paging), and the VMM enforces the memory ceiling regardless of host cgroup state.
+
+---
+
+## 5. Recommendation — rootless KVM micro-VM on B's rootless substrate
+
+**No single proposal is adopted as-is. The recommendation is a synthesis:**
+
+- **Foundation = B's rootless substrate.** No root daemon, no shim, no docker-group anywhere. This is
+  the best answer to priority 2 ("minimise the permissions the app needs" is maximised when the app
+  needs none) and removes A's permanent root liability.
+- **Reviewer sandbox = a rootless KVM micro-VM by default**, with a tiered fallback for hosts without
+  hardware virtualization.
+- **Keep the orchestrator ⟂ gateway uid split** (fixes B's as-written secret regression from §2b — the
+  provider key never lives in the untrusted-input-parsing process).
+- **Absorb C's distribution ambition** — package the rootless-user / subuid / linger setup into a clean
+  installer so the result *feels* as easy to run as C's one-artifact goal, without C's nested-sandbox
+  weakness.
+
+### Why a micro-VM is the right default
+
 1. **Strongest reviewer isolation — a real, separate guest kernel.** A hardware-virtualized (KVM)
-   boundary, not a shared host kernel (A/C) or a userspace kernel (gVisor). This is the correct
-   long-term choice for the "reviewer will execute untrusted repo code" future: code execution inside
-   the reviewer faces a full VM boundary, not just namespaces.
-2. **Portable across the arm64 page-size boundary that just sank gVisor.** KVM is agnostic to host page
-   size — the guest runs its own kernel/paging. Works on this RPi 5 (`/dev/kvm` present, 16K pages)
-   where the official gVisor arm64 build cannot boot at all.
-3. **Structurally solves the memory-cap gap.** A microVM's memory ceiling is its guest RAM allocation,
-   hard-enforced by the VMM — independent of host cgroup controllers. This sidesteps the
-   `cgroup_disable=memory` gap that leaves `--memory` unenforced for *all* container-based designs
-   (A/B/C) on this box.
-4. **network-none by construction, stronger than a container** — *with one libkrun caveat (below).* A
-   microVM with no virtio-net device has no network path — not even a shared host netns to misconfigure.
-   **CAVEAT (review round 2):** libkrun can also provide guest egress via **TSI/passt** (a userspace
-   socket-passthrough transport with *no* virtio-net device to spot in a config audit) — the libkrun
-   analog of Design C's fail-open netns. So `--network none` under libkrun is a **mandated invariant**:
-   the reviewer VM is built/launched with **network transport explicitly disabled**, asserted *by
-   construction + preflight* and re-asserted **fail-closed from inside the guest at startup** (the way the
-   current entrypoint already makes confinement assertions) — never left to a launch flag.
-5. **Rootless — precise TCB claim (review round 2).** No root *daemon* and no root in any Magpie runtime
-   process (orchestrator/gateway/reviewer); `/dev/kvm` is reached via the `kvm` group. The *only* setuid
-   surface is **`newuidmap`/`newgidmap`** — two narrow, widely-audited shadow-utils helpers rootless
-   podman invokes once at namespace setup (inherent to Design B's rootless substrate, not new to
-   libkrun). Honest wording: *"no root daemon and no root Magpie process; the only setuid-root surface is
-   two shadow-utils binaries at namespace setup"* — a dramatically smaller TCB than a root docker daemon,
-   but not literally zero-setuid.
+   boundary, not a shared host kernel (A/C) or a userspace kernel (gVisor). This is the boundary that
+   remains load-bearing in the §2d future where the reviewer executes untrusted repo code.
+2. **Portable across the arm64 page-size boundary that constrains gVisor** (§4.1). KVM runs the guest's
+   own kernel, so the host page size is irrelevant.
+3. **Structurally closes the memory-cap gap** (§4.2). The VMM enforces the guest RAM ceiling regardless
+   of host cgroup configuration.
+4. **No-network by construction** — with one caveat. A micro-VM with no network device has no network
+   path at all, not even a shared host netns to misconfigure. *Caveat:* some rootless VMMs (libkrun via
+   TSI/passt) can provide guest egress through a userspace socket-passthrough transport with **no
+   virtio-net device to spot in a config audit** — the VMM analog of C's fail-open netns. So
+   "no network" is a **mandated invariant**, not a launch flag: the reviewer VM is built with network
+   transport disabled, asserted by construction + install preflight, and re-asserted **fail-closed from
+   inside the guest at startup** (the way the current entrypoint already makes confinement assertions).
 
-### gVisor is the no-KVM / high-density tier — ranked BELOW microVM (framing corrected post-review)
-Tiers ranked by isolation strength: **microVM (KVM) > gVisor > crun-hardened.** gVisor is *not* an
-"upgrade" (a microVM is strictly stronger); it is a deliberate isolation *downgrade* taken for coverage
-and density where a microVM isn't the right fit:
-- Needs **no `/dev/kvm`** → the tier for hosts **without hardware/nested virtualization** (most non-metal
-  cloud instances) — the gap the microVM default cannot cover, and where gVisor should be the preferred
-  floor over bare crun.
-- On **larger, high-concurrency hosts**, its lower per-sandbox memory overhead (no full guest kernel per
-  job) improves review density.
-- Deferred: an optional runtime on the same rootless substrate, still gated on the arm64 page-size story
-  (needs a 4K-page host, or an upstream/self-built 16K `runsc`).
+### The isolation ladder (all tiers on the same rootless substrate)
 
-### The isolation ladder (host-conditional, all on B's rootless substrate)
-Ranked by isolation strength: **microVM (KVM) > gVisor > crun-hardened.**
+Ranked by isolation strength: **micro-VM (KVM) > gVisor > hardened crun.**
 
 | Tier | Runtime | When | Requires |
 |---|---|---|---|
-| **Default (strongest)** | rootless KVM microVM — **libkrun/krun under podman** (primary), Firecracker-direct (proven fallback) | hardware virt available | `/dev/kvm` (bare metal or nested-virt VM) + `kvm` group |
-| **No-KVM / high-density** | gVisor (runsc) | no `/dev/kvm`, or large high-concurrency hosts | 4K-page host (arm64) or amd64 |
-| **Last-resort fallback** | rootless podman + crun (hardened namespaces) | no `/dev/kvm` **and** no gVisor | userns + subuid (validated on this box) |
+| **Default (strongest)** | rootless KVM micro-VM — **libkrun/krun under Podman** (primary), Firecracker-direct (proven fallback) | hardware virtualization available | `/dev/kvm` (bare metal or nested-virt VM) + `kvm` group |
+| **No-KVM / high-density** | **gVisor (`runsc`)** | no `/dev/kvm`, or large high-concurrency hosts where a full guest kernel per job is too costly | 4 KB-page host (arm64) or amd64 |
+| **Last-resort floor** | rootless Podman + **hardened crun** | no `/dev/kvm` **and** no usable gVisor | unprivileged userns + subuid/subgid |
 
-("Rootless Kata" is **not** a runtime option — see resolutions Q1: `kata-runtime` runs as root and does
-not support Podman.)
+gVisor is deliberately ranked **below** the micro-VM, not above it — a micro-VM is strictly stronger, so
+gVisor is a *coverage/density* tier (no-KVM hosts, or trading isolation depth for lower per-job overhead
+at high concurrency), not an "upgrade."
 
-### New architectural wrinkles a microVM introduces (corrected post-review)
-1. **Gateway channel: bind-mounted unix socket → vsock (NOT virtiofs).** Today the reviewer's only egress
-   is a bind-mounted `/run/gw` unix socket. A microVM guest can't share a host unix socket by bind mount,
-   and **virtiofs cannot carry an `AF_UNIX` connection** (it proxies file ops, not socket connections —
-   confirmed in review). **vsock is the only option**, and it is **mandated to be per-VM _hybrid_ vsock**
-   (each job's VM gets its own host-side UDS path, e.g. Firecracker/libkrun `uds_path`), **never a
-   host-global `vhost-vsock` listener** (which shares one host CID namespace and would make the virtual
-   key the sole cross-job authenticator). Per-VM UDS keeps per-job channel isolation *by construction*,
-   consistent with Design D. A small host-side forwarder bridges the per-job vsock UDS ↔ the gateway's
-   per-job socket; the budget-capped virtual-key model is unchanged.
-2. **Reviewer `/work` (PR checkout) delivery.** Read-only bind mount today. With **libkrun/Kata-virtiofs**
-   `/work` rides a read-only **virtiofs** mount (fine for a filesystem — the virtiofs limitation is only
-   for the *socket*). With **Firecracker-direct** (no virtiofs) use a per-job read-only **ext4 image**
-   built unprivileged via `mkfs.ext4 -d <dir>` (confirmed unprivileged in review). Workspace delivery is
-   coupled to VMM choice — a reason to prefer a virtiofs-capable rootless VMM.
-3. **Reviewer rootfs/guest-kernel delivery + supply chain.** A microVM needs a guest kernel (and, for FC,
-   a rootfs). **libkrun bundles + maintains its guest kernel upstream**, so our net-new supply-chain
-   surface is "pin + cosign-verify a libkrun release," not "build/patch/CVE-track a kernel ourselves"; the
-   existing signed, digest-pinned reviewer OCI image is reused as the guest rootfs. Firecracker-direct
-   instead makes us own a guest-kernel + rootfs pipeline per arch — real permanent scope. (Preference:
-   libkrun, precisely to externalize the kernel supply chain.)
-4. **Per-job boot cost.** ~125 ms–1 s VMM/kernel boot (**validated: 0.13 s to userspace on this Pi 5**) +
-   guest RAM per concurrent job. Fine for multi-second/minute reviews; sets the memory-bound concurrency
-   ceiling (~2–4 concurrent at ~1 GB guest RAM on an 8 GB host — validated).
+> **Vehicle note.** "Rootless Kata" is **not** an option: `kata-runtime` runs as root and does not
+> support Podman, so it fails the no-root requirement. **libkrun** is the one runtime that satisfies all
+> three constraints at once — rootless, KVM-isolated, *and* an OCI runtime under Podman — which is why
+> it's the primary vehicle. Firecracker-direct is the validated fallback at the cost of owning a
+> guest-kernel/rootfs pipeline (see §6).
 
-### Tier honesty is a first-class invariant (not a nicety)
-On hosts with **no `/dev/kvm`** (most non-metal cloud VMs) the "microVM default" silently degrades to a
-weaker tier. **Why this is *not* a re-import of Design C's sin (review round 2):** the #1 north-star
-property — *reviewer has no network, provable by construction* — is **tier-invariant.** All three tiers
-deliver an empty network path by construction and that guarantee never degrades down the ladder; only the
-*isolation depth* of the reviewer↔host-kernel boundary varies (separate guest kernel → userspace kernel →
-hardened shared-kernel namespaces), and that variation is preflighted and surfaced. Design C's
-disqualifier was that the #1 property *itself* silently failed open; here it holds identically in every
-tier. Requirements:
-- **Install-time tier preflight** probes `/dev/kvm` by *actually opening it + a trivial `KVM_CREATE_VM`*
-  (do **not** trust EL0 CPU ID registers — they mis-report on this box; review row 13) and **fails loud /
-  requires explicit acknowledgement** before landing on a weaker tier.
-- **Runtime tier surfacing:** the active isolation tier is exposed on `/healthz` and in the PR review
-  summary footer, so "this review ran in a microVM / gVisor / crun sandbox" is visible per review.
-- **All security claims are tier-qualified** in operator docs.
-- **Floor invariant (review round 2): the crun last-resort tier must be exactly today's shipped hardened
-  posture** — seccomp + `--cap-drop=ALL` + `no-new-privileges` + read-only rootfs + pids-cap +
-  `--network none` + `.git`-stripped RO `/work`. If crun-floor == current production isolation, **no
-  operator on any host is worse off than today's shipped product**, and microVM/gVisor are strict gains
-  where KVM/4K-page hosts exist. The fallback must never silently regress below today's baseline.
+### Two invariants that keep the tiering honest
 
-### Open questions → resolved (see "Fable review — resolutions" section below)
-The vehicle, socket, workspace, supply-chain, tier-honesty, and framing questions are resolved there. The
-**one remaining gate**: validate **libkrun/krun under rootless podman** (the chosen vehicle — keeps OCI
-images *and* rootless, unlike Kata) on this exact 16K-page box. Firecracker-direct is the proven rootless
-fallback (booted here). "Rootless Kata" is **dropped** — it is not real (root `kata-runtime`, no Podman).
+1. **Tier honesty.** On hosts without `/dev/kvm` the "micro-VM default" silently degrades to a weaker
+   tier. This is *not* a re-import of C's fail-open sin, because the **#1 property (no network) is
+   tier-invariant** — every tier delivers an empty network path by construction; only the *depth* of the
+   reviewer↔host-kernel boundary varies. To keep it honest:
+   - **Install-time preflight** probes `/dev/kvm` by *actually opening it and issuing a trivial
+     `KVM_CREATE_VM`* (not by reading CPU ID registers, which can misreport), and **fails loud /
+     requires explicit acknowledgement** before landing on a weaker tier.
+   - The **active tier is surfaced** on `/healthz` and in the PR review summary footer, so "this review
+     ran in a micro-VM / gVisor / crun sandbox" is visible per review.
+   - All security claims in operator docs are **tier-qualified**.
+2. **Floor invariant.** The last-resort crun tier must be **exactly today's shipped hardened posture** —
+   seccomp + `--cap-drop=ALL` + `no-new-privileges` + read-only rootfs + pids cap + `--network none` +
+   `.git`-stripped read-only `/work`. Then **no operator on any host is worse off than today's product**,
+   and the micro-VM / gVisor tiers are strict gains where the hardware allows.
+
+### Precise TCB claim (be accurate, not marketing)
+
+"No root" means: **no root daemon and no root in any Magpie runtime process** (orchestrator, gateway,
+reviewer); `/dev/kvm` is reached via `kvm`-group membership. The *only* setuid-root surface is
+**`newuidmap` / `newgidmap`** — two narrow, widely-audited shadow-utils helpers that rootless Podman
+invokes once at namespace setup (inherent to any rootless substrate, not new to the micro-VM). Honest
+wording for docs: *"no root daemon and no root Magpie process; the only setuid-root surface is two
+shadow-utils binaries at namespace setup"* — a dramatically smaller TCB than a root Docker daemon, but
+not literally zero-setuid.
 
 ---
 
-## Fable review — validation outcome & resolutions (2026-07-19)
+## 6. What a micro-VM changes (and what it doesn't)
 
-**Verdict from review: sound-with-conditions.** The core bet was **validated harder than the doc
-claimed** — on this exact box (RPi 5, 16K pages, kernel 6.12.93), as uid 1000 with *only* the `kvm`
-group (no root), the reviewer:
-- booted a real **Firecracker microVM with a 4K-page guest kernel on the 16K-page host in 0.13 s** →
-  proves KVM is page-size-agnostic where gVisor was not (decision claim #2);
-- ran a bidirectional **guest → vsock → host-unix-socket** exchange in 0.14 s → the gateway-bridge shape
-  works, rootless, with per-VM UDS isolation;
-- got a **VMM-enforced memory ceiling on a `cgroup_disable=memory` host** (guest OOM at ~96 MB in a
-  128 MiB VM; host FC RSS 126 MB) → the memory-cap gap that defeats every container `--memory` on this
-  box is structurally fixed (claim #3);
-- confirmed `/dev/kvm` is gated **solely** by the `kvm` group (claim #5 / priority-2).
+Adopting a micro-VM reuses most of the existing system — the orchestrator/gateway/publisher logic, the
+signed reviewer image, the virtual-key budget model — but changes four mechanics:
 
-**Resolutions to the reviewer's 7 questions (ranked as it ranked them):**
+1. **Gateway channel: bind-mounted unix socket → vsock.** A VM guest can't share a host unix socket by
+   bind mount, and virtiofs **cannot carry an `AF_UNIX` connection** (it proxies file operations, not
+   socket connections). vsock is the only option, and it is **mandated to be per-VM *hybrid* vsock** —
+   each job's VM gets its own host-side socket path (`uds_path`), **never a host-global `vhost-vsock`
+   listener** (which shares one host CID namespace and would make the virtual key the sole cross-job
+   authenticator). A small host-side forwarder bridges the per-job vsock socket to the gateway's per-job
+   socket; the budget-capped virtual-key model is unchanged.
+2. **Reviewer `/work` (PR checkout) delivery.** Today a read-only bind mount. Under a virtiofs-capable
+   VMM (libkrun) `/work` rides a **read-only virtiofs mount** (fine for a filesystem — the virtiofs
+   limitation is only for *sockets*). Under Firecracker-direct (no virtiofs) use a per-job read-only
+   **ext4 image** built unprivileged with `mkfs.ext4 -d <dir>`. Workspace delivery is coupled to VMM
+   choice — a reason to prefer a virtiofs-capable rootless VMM.
+3. **Guest-kernel supply chain.** A micro-VM needs a guest kernel. **libkrun bundles and maintains its
+   guest kernel upstream**, so the net-new supply-chain surface is "pin + cosign-verify a libkrun
+   release," not "build/patch/CVE-track a kernel ourselves"; the existing signed, digest-pinned reviewer
+   OCI image is reused as the guest rootfs. Firecracker-direct instead makes us own a guest-kernel +
+   rootfs pipeline per architecture — real permanent scope, and the main reason to prefer libkrun.
+4. **Per-job boot cost.** ~0.1–1 s VMM/kernel boot plus guest RAM per concurrent job. Negligible against
+   multi-second/minute reviews. This sets a memory-bound concurrency ceiling; a sensible default is
+   ~1 GB guest RAM per review and concurrency = `floor(available_RAM / 1 GB)`, min 1, both configurable.
+   A dead reviewer VM (OOM/panic/timeout) maps onto the **existing clear-failure-note publisher path** —
+   reviewer non-completion is already handled that way.
 
-1. **Vehicle → libkrun/krun under rootless podman (primary); Firecracker-direct (proven fallback); Kata
-   dropped.** The reviewer proved "rootless Kata" is not real (root `kata-runtime`, Podman unsupported),
-   so Kata is incompatible with our no-root requirement and is removed. **libkrun** uniquely satisfies all
-   three constraints at once — rootless, KVM-isolated, *and* an OCI runtime under podman (keeps the signed
-   reviewer image + bundles/maintains its own guest kernel). It is the target vehicle, **gated on a
-   libkrun-on-this-16K-box spike**. Firecracker-direct is the validated backup (booted here) at the cost
-   of owning a guest-kernel/rootfs pipeline and per-job ext4 for `/work`.
-2. **KVM-less hosts → tier honesty is now a mandated invariant** (added above): loud install-time
-   `/dev/kvm` preflight (open + `KVM_CREATE_VM`, not CPU-ID regs), runtime tier surfaced on `/healthz` +
-   the PR review footer, and tier-qualified security claims. The "microVM default" is explicitly a
-   *bare-metal / nested-virt* default; on KVM-less clouds the preferred floor is **gVisor**, then crun.
-3. **`/work` into the guest → virtiofs-ro (libkrun) or per-job `mkfs.ext4 -d` image (FC).** Added to
-   wrinkle #2. Note the split the review forced: **virtiofs is fine for `/work` (a filesystem) but not for
-   the gateway *socket*** (vsock only).
-4. **Per-VM hybrid vsock is now a stated invariant; host-global vhost-vsock is forbidden** (wrinkle #1).
-   Preserves per-job channel isolation by construction — another reason to prefer libkrun/FC (hybrid
-   vsock) over Kata (vhost-vsock).
-5. **Guest-kernel supply chain → externalized to libkrun** (pin + cosign-verify a libkrun release rather
-   than build/CVE-track a kernel), reviewer OCI image reused as guest rootfs. Added to wrinkle #3 — a
-   decisive reason to prefer libkrun over FC-direct.
-6. **"Upgrade" framing corrected** to a strength-ranked ladder (microVM > gVisor > crun); gVisor relabeled
-   the **no-KVM / high-density tier**, an intentional downgrade for coverage/density.
-7. **Failure semantics + sizing:** a dead reviewer VM (OOM/panic/timeout) maps to the **existing
-   clear-failure-note publisher path** (reviewer non-completion is already handled that way). Default guest
-   RAM **~1 GB/review** (Pi agent is Node); default concurrency = `floor(available_RAM / 1 GB)`, min 1,
-   guest RAM configurable.
+---
 
-**Net:** the decision stands; the substrate is empirically proven on the hardest target. Before
-implementation the **libkrun-under-rootless-podman spike (Q1)** is the one open gate; everything else is
-resolved and folded into the sections above.
+## 7. Open gates before implementation
 
-### Fable confirmation (round 2) — all conditions resolved, 3 refinements folded in
+None of these threaten the decision; they separate "proven substrate" (already validated) from "proven
+vehicle" (libkrun specifically).
 
-The reviewer confirmed its answers and closed all blocking conditions, with hard evidence, plus three
-refinements now incorporated above:
+1. **libkrun-under-rootless-Podman spike** on a representative host (including a 16 KB-page arm64 box, the
+   hardest case). libkrun's bundled aarch64 guest kernel is compiled `CONFIG_ARM64_4K_PAGES=y`, and the
+   KVM stage-2 granule is independent of the guest's stage-1 granule (the same reason a 4 KB Firecracker
+   guest already boots on a 16 KB host — see appendix), so it *should* boot; the spike confirms it in
+   practice. Carry: **crun #1894** — krun may need an ACL on `/dev/kvm` beyond `kvm`-group membership;
+   prefer `setfacl -m u:<svc>:rw /dev/kvm` over world-`0666` (which would be a real permission
+   regression). Also confirm the guest-vCPU ceiling and a boot-to-userspace timing on the real reviewer
+   rootfs.
+2. **Network-off-by-construction assertion** for the chosen VMM (§5, caveat under "no-network"): TSI/passt
+   transport must be built off and re-asserted fail-closed from inside the guest.
+3. **Installer + preflight** implementing the tier-honesty and floor invariants of §5.
 
-1. **Page-size gate green in principle.** libkrunfw's aarch64 kernel config is
-   `CONFIG_ARM64_4K_PAGES=y` / `PAGE_SHIFT=12` — a **4K-page bundled guest kernel that does not inherit
-   host page size** (KVM stage-2 granule is independent of the guest's stage-1 granule — exactly why the
-   Firecracker 4K-on-16K boot worked). So libkrun should boot on this 16K box; the spike confirms it in
-   practice.
-2. **`--network none` under libkrun is by-construction, not a flag (folded into claim #4).** libkrun's
-   TSI/passt transport can grant egress with no virtio-net device to audit — must be built off and
-   asserted fail-closed from inside the guest.
-3. **Precise "no root" wording (folded into claim #5):** no root daemon/process; only `newuidmap`/
-   `newgidmap` setuid helpers at namespace setup.
+---
 
-**Remaining gates before implementation (none threaten the decision — they separate "proven substrate"
-from "proven vehicle"):**
-- **The libkrun-on-this-16K-box spike**, carrying: **crun #1894** (krun may need an ACL on `/dev/kvm`
-  beyond `kvm`-group membership — **prefer `setfacl -m u:<svc>:rw /dev/kvm` over world-`0666`**, which
-  would be a real permission regression vs. the group gate already proven); the `CONFIG_NR_CPUS=8`
-  guest-vCPU ceiling; and a boot-to-userspace timing on the *real* reviewer rootfs.
-- **The TSI/network-off by-construction assertion** (refinement 2).
-- **The "no root anywhere" wording fix** naming the setuid shadow-utils helpers (refinement 3).
+## Appendix — validation evidence
 
-Floor invariant added: the crun tier must not be weaker than today's shipped hardened posture (so no
-host regresses below the current product).
-
-## Appendix — validation log (this box, aarch64 Debian 12)
+The load-bearing claims were validated on a representative arm64 self-host target (Raspberry Pi 5,
+16 KB-page kernel 6.12.93, Debian 12) — deliberately the hardest case for the page-size and memory-cap
+arguments. This host is only an example target; the findings are architectural, not device-specific.
 
 | Check | Result |
 |---|---|
-| `cgroup_disable=memory` on kernel cmdline; memory controller absent hierarchy-wide | confirmed (direct) |
-| `docker run --memory=64m` → "Limitation discarded", runs anyway | confirmed (direct) |
-| rootless podman: works, crun, rootless=true | PASS |
-| rootless `--network none`: only `lo`, no route out | PASS |
-| rootless `--pids-limit`: fork bomb contained | PASS |
-| rootless userns: container-root → host uid 1000; non-mounted host files unreachable | PASS |
-| rootless `--memory`: hard error (systemd mgr) / silent no-op (cgroupfs) | FAIL (firmware) |
-| C: nested `PrivateNetwork=yes`, default caps → **inherits outer routed network, fail-open** | FAIL |
-| C: nested `PrivateNetwork=yes` + outer `--cap-add=SYS_ADMIN` → fresh netns, only `lo` | PASS |
-| C: nested `MemoryMax=64M` → 200MB alloc not killed | FAIL (firmware) |
-| C: nested `TasksMax`, `RuntimeMaxSec`, host-file isolation, uid mapping | PASS |
-| gVisor/runsc present | absent on box; **installable on arm64** (per CTO) — runs-rootless-here still to be validated |
+| Real **Firecracker micro-VM with a 4 KB-page guest kernel booted on the 16 KB-page host** in **0.13 s**, as an unprivileged uid with only the `kvm` group | **PASS** — proves KVM is page-size-agnostic where gVisor is not |
+| Bidirectional **guest → vsock → host-unix-socket** exchange, per-VM socket, rootless | **PASS** (0.14 s) — gateway-bridge shape works |
+| **VMM-enforced memory ceiling** on a host where the cgroup memory controller is disabled (guest OOM at ~96 MB inside a 128 MiB VM) | **PASS** — structurally fixes the memory-cap gap that defeats every container `--memory` here |
+| `/dev/kvm` gated **solely** by `kvm`-group membership (no root) | **PASS** |
+| Container memory cap (`docker`/`podman --memory`) on this host | **FAIL (host firmware)** — "Limitation discarded", runs anyway; applies to A/B/C equally |
+| gVisor `runsc` boot, rootful **and** rootless | **FAIL (identical)** — host uses 16 KB pages, official arm64 `runsc` compiled for 4 KB: `host page size (16384) does not match compiled page size (4096)` |
+| B: rootless `podman --network none` / `--pids-limit` / userns host-isolation | **PASS** |
+| C: nested `PrivateNetwork=yes`, default caps → **inherits outer routed network (fail-open)** | **FAIL** |
+| C: nested `PrivateNetwork=yes` + outer `--cap-add=SYS_ADMIN` → fresh netns, only `lo` | PASS (only with the broad outer capability) |
 
----
-
+The Firecracker result is the decisive one: it demonstrates, on the hardest target, that a rootless KVM
+micro-VM delivers a page-size-portable, VMM-memory-capped, network-free reviewer sandbox — the exact
+combination none of the three proposals achieves as written, and the basis for the §5 recommendation.
