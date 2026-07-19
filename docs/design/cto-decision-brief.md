@@ -1,5 +1,27 @@
 # CTO decision brief — reviewer sandbox / distribution architecture
 
+> **DECISION (2026-07-19): approved with edits.** The CTO approved the §5 recommendation and all
+> four "decisions requested" below, with four binding edits that override the corresponding text
+> in this brief:
+>
+> 1. **The §2b secret-split fix is a merge blocker, not a follow-up.** The orchestrator ⟂ gateway
+>    uid separation must hold in every tier from the first landed commit; B-as-written's collapse
+>    of the provider key into the untrusted-input parser must never exist on main, even transiently.
+> 2. **Spike-failure decision rule.** If libkrun fails the §7.1 gate, do **not** auto-proceed to
+>    Firecracker-direct — owning a per-arch guest-kernel/rootfs pipeline is a scope change that
+>    returns to the CTO with an updated estimate. The spike is timeboxed to **two weeks**,
+>    including the 16 KB-page arm64 box.
+> 3. **The floor invariant gets a regression test, not just doc language** — CI/preflight must
+>    assert the crun tier's flag set is byte-for-byte today's hardened posture.
+> 4. **The active tier is removed from the public PR review footer** (attacker recon; overrides
+>    §5 "tier honesty" bullet 2 and the §8 `publisher.ts` item). Tier surfaces on `/healthz` and
+>    in operator logs only.
+>
+> Additionally mandated: the guest-side vsock client (§8 `forwarder.mjs` item) is a **static Go
+> (or Rust) binary, built in our CI, covered by the same cosign signing as the reviewer image**.
+> Implementation is tracked in chalk: `epic_59b1` (Milestone 8 — rootless micro-VM reviewer
+> sandbox) and `epic_6955` (Go adoption).
+
 **Purpose:** choose the mid-term target architecture for how Magpie isolates the PR reviewer and
 how the whole stack is packaged for self-hosting. Three design proposals are on the table
 (`shim-containerisation.md`, `sandboxed-reviewer-design.md`, `single-container-systemd.md`). This
