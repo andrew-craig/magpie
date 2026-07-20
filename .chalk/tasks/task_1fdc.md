@@ -178,9 +178,98 @@ Only `--memory` had to be dropped, for the cgroup reason above. This is a strong
 `task_08ec` (docker→rootless podman port): the hardening contract survives the runtime swap
 unchanged, so the B-phase risk is lower than the brief assumed.
 
-### Still open (Phase 2 blocked on build)
-The actual gate question — does krun boot the reviewer image on 16 KB pages — is **not yet
-answered**. libkrunfw kernel compile in progress.
+## SPIKE RESULT: PASS, with contract caveats that need a follow-up task
+
+**The gate question is answered: yes.** libkrun/krun boots the real pinned reviewer image as a
+rootless micro-VM on this 16 KB-page arm64 host. Per the CTO decision rule, `decision_06c2` should
+record a PASS and the C-phase may proceed on libkrun. **However**, "it boots" is not the same as
+"drop-in for our mount/env/argv contract" — three production flags are *silently ignored*, which
+needs handling before the C-phase port lands.
+
+### The 16 KB-page question — PASS, empirically
+```
+guest-kernel=6.12.91   pagesize=4096   (host: 6.12.93+rpt-rpi-2712, pagesize=16384)
+```
+Guest kernel config confirmed `CONFIG_ARM64_4K_PAGES=y`. The brief's theory held: KVM's stage-2
+granule is independent of the guest's stage-1, so a 4 KB guest boots on a 16 KB host. The `uname`
+differing from the host is itself the proof this is a real VM guest, not a container.
+
+### `/dev/kvm` access — PASS, and better than the checklist feared
+No `setfacl` needed and **no world-`0666`**. The working combination is:
+`sudo usermod -aG kvm <svc>` **plus podman's `--group-add keep-groups`**.
+Root cause of the initial `Error creating the Kvm object: Error(13)` (EACCES): rootless podman
+drops supplementary groups inside the user namespace, so `kvm` membership alone is not enough and
+`--device /dev/kvm` alone does not fix it. `keep-groups` retains the membership across the userns
+boundary. **crun #1894 does not bite us** — record this for `task_67aa` (installer).
+
+### Per-checklist verdicts
+| checklist item | verdict | evidence |
+|---|---|---|
+| boots on representative **amd64** host | **NOT TESTED** | no amd64 hardware available; see gap below |
+| boots on **16 KB-page arm64** | **PASS** | 4 KB guest on 16 KB host, above |
+| `/dev/kvm` via kvm-group, no 0666 | **PASS** | group + `keep-groups`; no ACL needed |
+| read-only virtiofs `/work` | **PASS** | reads OK, `touch /work/EVIL` rejected |
+| guest-vCPU ceiling + boot timing | **PARTIAL** | timing below; `--cpus` NOT honoured |
+| guest RAM ceiling VMM-enforced | **PASS** | containment test below |
+| written pass/fail per item | **DONE** | this section |
+
+### Boot-to-userspace on the real reviewer rootfs
+5 runs each, real image, `/work` mounted:
+- **krun micro-VM:** 3.98 / 5.57 / 5.69 / 6.38 / 7.08 s (median ≈ 5.7 s)
+- **crun baseline:** 3.26 / 3.40 / 3.71 / 4.34 / 4.49 s (median ≈ 3.7 s)
+
+**≈ +2 s per review.** Against multi-minute review runs this is a non-issue. (Pi 5 numbers; a
+server host will be faster.)
+
+### Guest RAM containment — PASS, and it fixes `bug_df2d` structurally
+Guest `MemTotal ≈ 1005 MB` (libkrun default; **not** derived from `--memory` — see caveat 3).
+A Node memory bomb allocating 64 MB chunks died in-guest at ~512 MB. **Host (8 GB) saw no OOM
+event at all.** This is the key structural result: the RAM ceiling is enforced by the VMM and
+holds *even though this host's memory cgroup is disabled entirely* (`cgroup_disable=memory`). The
+micro-VM tier therefore removes `bug_df2d`'s failure mode rather than patching it — worth adding
+to the brief's argument for M8.
+
+### ⚠ Contract caveats — three flags SILENTLY IGNORED under krun
+This is the dangerous class (silent-ignore, not error) and the main new risk this spike surfaces:
+
+1. **`--user 1000:1000` is ignored — the guest process runs as `uid=0(root)`.** Verified
+   explicitly: asked for 1000:1000, got `uid=0(root) gid=0(root) groups=0(root)`. Mitigated in
+   that it is root *inside a VM* rather than root in a shared kernel namespace, so the blast
+   radius is the guest — but it is a real, silent divergence from today's shipped posture and
+   must be a conscious, documented decision rather than an accident.
+2. **`--cpus=2` is ignored** — guest saw `nproc=4` (all host cores).
+3. **`--memory` does not map to guest RAM.** It is still routed through *host cgroups*, so on this
+   host it hard-errors (`open 'memory.max': No such file`) rather than sizing the VM. Guest RAM
+   came from libkrun's own default. Sizing the guest will need an explicit libkrun/krun mechanism,
+   not the podman flag — **this affects `config.container.memory` plumbing in the C-phase.**
+
+### ⚠ `--network none` is NOT a bare netns under krun
+The guest has **`dummy0` plus a route to `203.0.113.0/24`** (RFC 5737 TEST-NET-3) — libkrun's TSI
+(transparent socket impersonation) scaffolding — even with `--network none`.
+
+Egress was **empirically blocked** (`net.connect` to `1.1.1.1:443` → `ENETUNREACH`, identical to
+the crun baseline), so this is not a live escape. **But the mechanism is weaker than M7's
+guarantee.** Design D's egress isolation rests on "no interfaces exist, as a property of the
+namespace"; under krun it rests on "an interface exists but has no route there". That is a
+configuration-dependent property — exactly what M7's "provable and config-independent" framing
+was meant to eliminate. `task_3b48` (TSI/passt built off + fail-closed in-guest assertion) is
+therefore **load-bearing, not a nice-to-have**, and should be treated as a merge blocker for the
+C-phase in the same spirit as CTO edit 1.
+
+### Additional packaging findings for `task_67aa`
+- **crun/libkrun ABI skew:** crun HEAD `dlopen`s `libkrun.so.1`, but libkrun HEAD builds ABI 2
+  (`libkrun.so.2`) → `failed to open libkrun.so.1`. Fixed by building **libkrun `v1.19.4`**
+  (ABI 1). Both must be version-pinned together; tracking two HEADs breaks.
+- `libkrun` installs to `/usr/local/lib64`, which is **not** on Debian's linker path; needs an
+  `/etc/ld.so.conf.d/` entry + `ldconfig`.
+- Extra build deps beyond the first pass: `libclang-dev`/`clang` (bindgen), `libjson-c-dev`,
+  `autoconf automake libtool libyajl-dev libseccomp-dev libcap-dev libsystemd-dev go-md2man`.
+- `krun` is installed as a **symlink to `crun`**; the handler activates on `argv[0]`.
+
+### Gap: amd64 leg NOT tested
+Per the session decision, the spike ran arm64-only — no amd64 hardware was available. The 16 KB
+arm64 box was the *harder* case and it passed, so amd64 is lower-risk, but it is formally
+untested and the CTO should accept or reject that explicitly before the C-phase.
 
 ### Risks / open questions
 1. **amd64 coverage is not satisfiable on this host.** Checklist item 1 wants a representative

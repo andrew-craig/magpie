@@ -89,3 +89,29 @@ make -j"$(nproc)"
 sudo make install
 
 echo "provisioning complete; verify with: podman --runtime krun run --rm <image> true"
+
+# ---------------------------------------------------------------------------
+# CORRECTIONS discovered during the spike (see task_1fdc findings)
+# ---------------------------------------------------------------------------
+# a) Extra build deps needed beyond step 1:
+#      sudo apt-get install -y libclang-dev clang libjson-c-dev \
+#          autoconf automake libtool libyajl-dev libseccomp-dev libcap-dev \
+#          libsystemd-dev go-md2man
+#
+# b) ABI PIN (important): crun HEAD dlopen()s libkrun.so.1, but libkrun HEAD
+#    builds ABI 2. Build libkrun at v1.19.4:
+#      git -C libkrun checkout v1.19.4
+#
+# c) libkrun installs into /usr/local/lib64, which is NOT on Debian's linker
+#    path. Register it:
+#      echo /usr/local/lib64 | sudo tee /etc/ld.so.conf.d/libkrun.conf
+#      sudo ldconfig
+#
+# d) /dev/kvm access needs BOTH kvm-group membership AND podman's
+#    --group-add keep-groups (rootless podman drops supplementary groups in the
+#    userns; --device /dev/kvm alone is NOT sufficient). No setfacl required.
+#
+# Working invocation:
+#   podman run --rm --runtime /usr/local/bin/krun \
+#       --device /dev/kvm --group-add keep-groups --network none \
+#       -v <workspace>:/work:ro <reviewer-image> ...
