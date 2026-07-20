@@ -1,0 +1,5 @@
+# Build trees + logs are throwaway; provision.sh reproduces them.
+libkrunfw/
+libkrun/
+crun/
+*.log
