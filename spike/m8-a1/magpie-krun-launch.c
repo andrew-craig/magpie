@@ -45,6 +45,22 @@ int main(int argc, char *argv[])
     if ((err = krun_disable_implicit_vsock(ctx_id))) { errno = -err; perror("krun_disable_implicit_vsock"); return 1; }
     if ((err = krun_add_vsock(ctx_id, 0))) { errno = -err; perror("krun_add_vsock(0)"); return 1; }
 
+    /* Optional per-VM gateway channel: guest connects to vsock port -> libkrun
+     * bridges to this host UNIX socket (which the host side listens on). This is
+     * the krun_add_vsock_port2 HYBRID vsock the brief mandates. Configured via
+     * env so the launcher's argv contract stays unchanged. listen=false => guest
+     * initiates the connection. */
+    {
+        const char *uds = getenv("MAGPIE_VSOCK_UDS");
+        const char *port_s = getenv("MAGPIE_VSOCK_PORT");
+        if (uds && port_s) {
+            uint32_t port = (uint32_t) strtoul(port_s, NULL, 10);
+            if ((err = krun_add_vsock_port2(ctx_id, port, uds, false))) {
+                errno = -err; perror("krun_add_vsock_port2"); return 1;
+            }
+        }
+    }
+
     if ((err = krun_set_workdir(ctx_id, "/"))) { errno = -err; perror("krun_set_workdir"); return 1; }
 
     {

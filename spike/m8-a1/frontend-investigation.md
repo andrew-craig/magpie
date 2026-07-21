@@ -110,6 +110,36 @@ Architecture inputs this surfaces, for the CTO brief / Go-adoption epic (`epic_6
   the orchestrator-side privileged process; the gateway keeps its own uid and its socket is handed
   to the VM via `krun_add_vsock_port2`.
 
+## Addendum (2026-07-22) — guest-side vsock client in Rust: PROVEN end-to-end
+
+Question: can the guest-side vsock client (mandated Go in `epic_6955`) be Rust instead? Built and
+tested it, full round-trip on this host. Artifacts: `vsock-client/` (Cargo project),
+`magpie-vsock-client` binary, launcher extended with `krun_add_vsock_port2`, `vsock-host-listener.py`.
+
+- **Static musl binary — yes.** `cargo build --release --target aarch64-unknown-linux-musl` →
+  `file` reports **"statically linked", `ldd` "not a dynamic executable", 389 KB, stripped.** No
+  runtime deps, so it bakes into the reviewer image exactly like the mandated Go binary would. Uses
+  only the `libc` crate for `AF_VSOCK` (`socket`/`connect`/`sockaddr_vm`/`VMADDR_CID_HOST`).
+- **Runs inside the guest and does a real vsock round-trip — yes.** The launcher wires the per-VM
+  channel with `krun_add_vsock_port2(port, uds_path, listen=false)` (TSI still off). Host side is a
+  plain UNIX-socket listener; libkrun connects out to it when the guest dials the vsock port
+  (confirmed against `muxer.rs:578`). Observed:
+  ```
+  guest: vsock connect OK (cid=2 port=1234)
+  host : received b'PING from rust guest\n'
+  guest: vsock round-trip OK, host replied: PONG from host gateway (uid=1000)
+  ```
+  i.e. bidirectional guest↔host over vsock, network otherwise isolated.
+- Gotcha for the real forwarder (`task_b3f7`): the host must `shutdown(SHUT_WR)` + drain before
+  closing; an immediate `close()` after `sendall` raced the teardown and the guest saw EOF before
+  the reply (first attempt failed exactly this way — a forwarder bug we'd otherwise hit later).
+
+**Conclusion:** Rust satisfies the guest-side client's every requirement (static, self-contained,
+`AF_VSOCK`) as well as Go does. Combined with the launcher needing Rust/C anyway, this removes the
+last reason to keep Go on the guest side — a **TS + Rust** two-language stack is viable, retiring
+the Go mandate. This also de-risks **`task_a163`** (vsock transport spike) and **`task_b3f7`**
+(host-side forwarder): the channel shape and the per-VM HYBRID socket are now demonstrated.
+
 ## Not done / honest gaps
 - krunvm not installed or tested — assessment is from its design only.
 - The direct launcher is a boot/no-network proof only; it does **not** yet wire

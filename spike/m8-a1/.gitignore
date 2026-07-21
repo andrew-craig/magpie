@@ -7,3 +7,6 @@ crun/
 # front-end experiment artifacts (throwaway)
 rootfs/
 magpie-krun-launch
+
+# vsock round-trip test artifacts
+host-listener.out
