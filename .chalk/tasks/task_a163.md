@@ -19,12 +19,14 @@ Constraints (brief §6.1, mandated):
 - [ ] Per-VM HYBRID vsock — each job's VM gets its own host-side socket path (uds_path). Never a
       host-global vhost-vsock listener (shared CID namespace would make the virtual key the sole
       cross-job authenticator).
-- [ ] Confirm what the host side of the chosen VMM's vsock actually is (unix socket?) — this
-      decides whether the host-side forwarder can stay in Node or needs Go (feeds the Go
-      migration scope decision).
-- [ ] Guest side exercised with a throwaway AF_VSOCK client (Go) — informs the real guest-client
-      task.
-- [ ] Measure connection setup + streaming latency vs today's unix-socket path.
+- [x] Confirm what the host side of the chosen VMM's vsock actually is (unix socket?) — feeds the
+      RUST-1 language decision. DONE in M8-A1: with `krun_add_vsock_port2` the host side is a plain
+      UNIX socket that libkrun connects OUT to when the guest dials the vsock port (muxer.rs:578).
+- [x] Guest side exercised with a throwaway AF_VSOCK client — DONE in M8-A1, and in **Rust** (not
+      Go): static musl client did a full guest↔host round-trip (`spike/m8-a1/vsock-client/`, commit
+      `f47eaf3`). Informs the real guest-client task (`task_2d6c`).
+- [ ] Measure connection setup + streaming latency vs today's unix-socket path. (Round-trip works;
+      latency not yet measured — the remaining open item here.)
 
 Done when: a scripted end-to-end round-trip against the real gateway per-job socket passes and
 the findings (incl. host-side socket type) are written up here.

@@ -18,9 +18,11 @@ Constraints:
 - [ ] Per-VM hybrid vsock only — one host-side socket path (uds_path) per job, torn down with
       the job. NEVER a host-global vhost-vsock listener (shared CID namespace would demote the
       virtual key to the sole cross-job authenticator).
-- [ ] Language per the GO-1 decision + M8-A3 finding: if the VMM's host side is a plain unix
-      socket, implement in TypeScript inside the orchestrator (or gateway) and reuse existing
-      socket-lifecycle code; only reach for Go if Node can't serve the host side.
+- [ ] Language per the RUST-1 decision + M8-A3 finding: with hybrid vsock the host side IS a plain
+      unix socket (confirmed in M8-A1: libkrun connects out to it, muxer.rs:578), so TypeScript in
+      the orchestrator/gateway reusing existing socket-lifecycle code is viable. BUT if this
+      forwarder is co-located in the Rust launcher process (which links libkrun anyway), Rust is
+      the natural choice — decide against the launcher design rather than defaulting to Node.
 - [ ] Wire into pipeline.ts/gateway.ts: thread the per-job vsock socket path where the
       socket-dir mount path goes today; mint/revoke flow unchanged.
 - [ ] Lifecycle: created before VM boot, cleaned up on job end/timeout/crash (ties into orphan

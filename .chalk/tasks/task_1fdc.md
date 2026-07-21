@@ -291,9 +291,11 @@ direct-launcher path also exposes `krun_add_vsock_port2` (the per-VM HYBRID gate
 (vcpu/RAM) — i.e. three of the four caveats plus the gateway transport converge on one front-end
 choice. **Recommendation: adopt a direct-libkrun launcher rather than fighting crun's handler**
 (full options weighed in the doc). Architecture consequence for `epic_6955`: the host-side
-launcher naturally becomes C/Rust (libkrun is a C API), which cuts against a Node host-side
-forwarder; the guest-side vsock client stays Go as mandated. Also net-new: taking over
-OCI-image→rootfs prep that podman does for free today (feeds `task_08ec` + the effort estimate).
+launcher naturally becomes Rust (libkrun is a C ABI; Go+cgo is a poor fit for its non-returning
+entry point), which resolved the epic's open Go-vs-Rust question in favour of **Rust** — the
+guest-side vsock client was subsequently proven in Rust too (`f47eaf3`), so the native stack is
+TS + Rust, not Go. Also net-new: taking over OCI-image→rootfs prep that podman does for free today
+(feeds `task_08ec` + the effort estimate).
 
 ### Additional packaging findings for `task_67aa`
 - **crun/libkrun ABI skew:** crun HEAD `dlopen`s `libkrun.so.1`, but libkrun HEAD builds ABI 2
