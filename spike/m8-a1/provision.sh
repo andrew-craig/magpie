@@ -111,7 +111,22 @@ echo "provisioning complete; verify with: podman --runtime krun run --rm <image>
 #    --group-add keep-groups (rootless podman drops supplementary groups in the
 #    userns; --device /dev/kvm alone is NOT sufficient). No setfacl required.
 #
+# e) vCPU and guest RAM are set by krun-SPECIFIC ANNOTATIONS, not the podman
+#    --cpus/--memory flags (the handler ignores those; --memory even hard-errors
+#    on a cgroup-disabled host). Do NOT pass --cpus/--memory on the krun path.
+#      --annotation krun.cpus=<N>        # verified: guest nproc == N
+#      --annotation krun.ram_mib=<MiB>   # verified: sizes guest RAM, no cgroup needed
+#
+# f) --user is NOT honoured inside the guest (guest init never setuids; runs as
+#    uid=0). No runtime fix. Mitigation is image-side: entrypoint self-drops with
+#    su-exec before exec'ing the workload.
+#
+# g) --network none does NOT disable networking under krun — libkrun auto-enables
+#    TSI. No annotation disables it in v1.19.4; needs a patched handler
+#    (krun_add_vsock(ctx_id, 0)). Tracked as task_3b48.
+#
 # Working invocation:
 #   podman run --rm --runtime /usr/local/bin/krun \
 #       --device /dev/kvm --group-add keep-groups --network none \
+#       --annotation krun.cpus=2 --annotation krun.ram_mib=2048 \
 #       -v <workspace>:/work:ro <reviewer-image> ...

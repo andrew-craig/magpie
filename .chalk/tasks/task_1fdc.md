@@ -209,7 +209,7 @@ boundary. **crun #1894 does not bite us** — record this for `task_67aa` (insta
 | boots on **16 KB-page arm64** | **PASS** | 4 KB guest on 16 KB host, above |
 | `/dev/kvm` via kvm-group, no 0666 | **PASS** | group + `keep-groups`; no ACL needed |
 | read-only virtiofs `/work` | **PASS** | reads OK, `touch /work/EVIL` rejected |
-| guest-vCPU ceiling + boot timing | **PARTIAL** | timing below; `--cpus` NOT honoured |
+| guest-vCPU ceiling + boot timing | **PASS** | `krun.cpus=2`→nproc=2 (see caveats); timing below |
 | guest RAM ceiling VMM-enforced | **PASS** | containment test below |
 | written pass/fail per item | **DONE** | this section |
 
@@ -229,19 +229,35 @@ holds *even though this host's memory cgroup is disabled entirely* (`cgroup_disa
 micro-VM tier therefore removes `bug_df2d`'s failure mode rather than patching it — worth adding
 to the brief's argument for M8.
 
-### ⚠ Contract caveats — three flags SILENTLY IGNORED under krun
-This is the dangerous class (silent-ignore, not error) and the main new risk this spike surfaces:
+### ⚠ Contract caveats — RESOLVED for 2 of 3; the podman flags were the wrong lever
+Follow-up investigation (2026-07-21, two sonnet agents: empirical + upstream; full report in
+`spike/m8-a1/flag-investigation.md`) established that vCPU and RAM are configured through
+**krun-specific OCI annotations**, not the container-shaped podman flags. crun's krun handler
+(`crun/src/libcrun/handlers/krun.c:259-277`) reads `krun.cpus` / `krun.ram_mib` and, for CPU,
+never even looks at `resources.cpu` (the quota `--cpus` sets); documented in `crun/krun.1.md`.
 
-1. **`--user 1000:1000` is ignored — the guest process runs as `uid=0(root)`.** Verified
-   explicitly: asked for 1000:1000, got `uid=0(root) gid=0(root) groups=0(root)`. Mitigated in
-   that it is root *inside a VM* rather than root in a shared kernel namespace, so the blast
-   radius is the guest — but it is a real, silent divergence from today's shipped posture and
-   must be a conscious, documented decision rather than an accident.
-2. **`--cpus=2` is ignored** — guest saw `nproc=4` (all host cores).
-3. **`--memory` does not map to guest RAM.** It is still routed through *host cgroups*, so on this
-   host it hard-errors (`open 'memory.max': No such file`) rather than sizing the VM. Guest RAM
-   came from libkrun's own default. Sizing the guest will need an explicit libkrun/krun mechanism,
-   not the podman flag — **this affects `config.container.memory` plumbing in the C-phase.**
+1. **vCPU — SOLVED. Lever: `--annotation krun.cpus=N`.** VERIFIED on this host:
+   `--annotation krun.cpus=2` → guest `nproc=2` (vs 4 with `--cpus=2`). `--cpus` writes a cgroup
+   `cpu.max` the handler ignores; it otherwise falls back to `sched_getaffinity()`.
+2. **RAM — SOLVED, and this is the clean fix for `bug_df2d` on the microVM path. Lever:
+   `--annotation krun.ram_mib=N`.** VERIFIED: `--annotation krun.ram_mib=2048` → guest
+   `MemTotal ≈ 2033 MB`, **with no `--memory` flag and no host memory cgroup present.** The
+   annotation sizes guest RAM directly inside the VMM, bypassing cgroups entirely. `--memory` must
+   NOT be passed under krun (podman applies the cgroup write unconditionally before the handler
+   runs, so it hard-errors on this cgroup-disabled host regardless). C-phase action: map
+   `config.container.{cpus,memory}` to `krun.cpus` / `krun.ram_mib` annotations and stop emitting
+   `--cpus`/`--memory` on the krun path.
+3. **`--user` — genuinely NOT fixable via runtime config; confirmed a real libkrun limitation.**
+   The host-side VMM process *does* drop to the mapped rootless uid correctly
+   (`crun/src/libcrun/container.c:1674`, verified via `ps`). But the **guest's own init**
+   (`libkrun/src/init_blob/init/init.c`) never reads user/uid/gid from the OCI config and never
+   calls setuid — exhaustive grep, zero hits. libkrun's C API exposes `krun_setuid`/`krun_setgid`
+   but crun's handler never calls them (upstream gap, not our misuse). So the guest workload runs
+   as `uid=0` inside the VM. Blast radius is the guest VM, not a shared kernel. **Recommended
+   mitigation: have the reviewer image's own entrypoint self-drop privileges (e.g. `su-exec`)
+   before exec'ing Pi** — that code runs as guest-root under our control regardless of krun, and
+   restores non-root execution of the untrusted-input-handling process. Cheap, in our image, and
+   worth doing so the defence-in-depth posture matches today's.
 
 ### ⚠ `--network none` is NOT a bare netns under krun
 The guest has **`dummy0` plus a route to `203.0.113.0/24`** (RFC 5737 TEST-NET-3) — libkrun's TSI
@@ -249,12 +265,19 @@ The guest has **`dummy0` plus a route to `203.0.113.0/24`** (RFC 5737 TEST-NET-3
 
 Egress was **empirically blocked** (`net.connect` to `1.1.1.1:443` → `ENETUNREACH`, identical to
 the crun baseline), so this is not a live escape. **But the mechanism is weaker than M7's
-guarantee.** Design D's egress isolation rests on "no interfaces exist, as a property of the
-namespace"; under krun it rests on "an interface exists but has no route there". That is a
-configuration-dependent property — exactly what M7's "provable and config-independent" framing
-was meant to eliminate. `task_3b48` (TSI/passt built off + fail-closed in-guest assertion) is
-therefore **load-bearing, not a nice-to-have**, and should be treated as a merge blocker for the
-C-phase in the same spirit as CTO edit 1.
+guarantee, and the follow-up confirmed there is no cheap runtime fix.** TSI (transparent socket
+impersonation) is libkrun's *default*, auto-enabled whenever no explicit net device is added
+(`libkrun/src/libkrun/src/lib.rs:2954`: `enable_tsi = net.list.is_empty() && …`), and crun's
+handler only ever adds a device via the opt-in `krun.use_passt` annotation — which switches
+backend, doesn't disable networking. **No annotation, public API, or Cargo feature reachable
+through crun turns TSI off in v1.19.4.** (libkrun's C API *does* expose the knobs —
+`krun_add_vsock(ctx_id, 0)` or `krun_add_net_tap` disable TSI per the header — but crun never
+calls them.) So egress rests on "an interface exists but has no route there," a
+configuration-dependent property, where M7's Design D rests on "no interfaces exist, a property of
+the namespace." `task_3b48` (TSI off + fail-closed in-guest assertion) is therefore **load-bearing
+and a C-phase merge blocker**, and closing it will require a patched/forked krun handler (call
+`krun_add_vsock(ctx_id, 0)`) rather than configuration — a real, non-trivial scope item the CTO
+should see now.
 
 ### Additional packaging findings for `task_67aa`
 - **crun/libkrun ABI skew:** crun HEAD `dlopen`s `libkrun.so.1`, but libkrun HEAD builds ABI 2
