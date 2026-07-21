@@ -56,6 +56,6 @@ M8-B1 flag test) pin cross-language behavior.
 - [ ] Circulate this scope (incl. to the CTO, answering their question + the Go→Rust reversal with
       the spike evidence) and record the outcome.
 - [ ] Land a short docs/design/rust-adoption.md capturing scope, non-scope, and the boundary rule.
-- [ ] Open the host-side launcher task under `epic_59b1` (scope item 2).
+- [x] Open the host-side launcher task under `epic_59b1` (scope item 2). → `task_76d6` (M8-C0).
 
 Done when: scope is ratified and documented; downstream Rust tasks proceed against it.
