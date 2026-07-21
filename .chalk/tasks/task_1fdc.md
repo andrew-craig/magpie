@@ -279,6 +279,22 @@ and a C-phase merge blocker**, and closing it will require a patched/forked krun
 `krun_add_vsock(ctx_id, 0)`) rather than configuration — a real, non-trivial scope item the CTO
 should see now.
 
+**UPDATE (2026-07-21) — front-end investigation resolves the "how", see
+`spike/m8-a1/frontend-investigation.md`.** TSI-on is a property of *crun's shim*, not libkrun:
+libkrun's API exposes the off-switch (`krun_disable_implicit_vsock` + `krun_add_vsock(ctx,0)`),
+crun's handler just never calls it. PROVEN with a ~60-line direct-libkrun launcher
+(`magpie-krun-launch.c`) booting the real reviewer rootfs: with TSI off, `dummy0` goes
+`operstate=down` with **zero routes** (vs crun's `unknown` + `203.0.113.0/24` TSI route) — a
+provable, auditable no-network posture crun's shim structurally cannot produce. The **same**
+direct-launcher path also exposes `krun_add_vsock_port2` (the per-VM HYBRID gateway channel
+`task_a163`/`task_b3f7` need), `krun_setuid` (the `--user` gap above), and `krun_set_vm_config`
+(vcpu/RAM) — i.e. three of the four caveats plus the gateway transport converge on one front-end
+choice. **Recommendation: adopt a direct-libkrun launcher rather than fighting crun's handler**
+(full options weighed in the doc). Architecture consequence for `epic_6955`: the host-side
+launcher naturally becomes C/Rust (libkrun is a C API), which cuts against a Node host-side
+forwarder; the guest-side vsock client stays Go as mandated. Also net-new: taking over
+OCI-image→rootfs prep that podman does for free today (feeds `task_08ec` + the effort estimate).
+
 ### Additional packaging findings for `task_67aa`
 - **crun/libkrun ABI skew:** crun HEAD `dlopen`s `libkrun.so.1`, but libkrun HEAD builds ABI 2
   (`libkrun.so.2`) → `failed to open libkrun.so.1`. Fixed by building **libkrun `v1.19.4`**

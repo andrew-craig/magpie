@@ -3,3 +3,7 @@ libkrunfw/
 libkrun/
 crun/
 *.log
+
+# front-end experiment artifacts (throwaway)
+rootfs/
+magpie-krun-launch
