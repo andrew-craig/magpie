@@ -210,6 +210,88 @@ function buildContainerName(jobId: string): string {
   return `magpie-${sanitized.length > 0 ? sanitized : "job"}`;
 }
 
+/** Inputs to {@link buildReviewDockerArgs} — every per-job/per-host VALUE the hardened `docker run` argv is templated from, with no dependency on `process.getuid`/mount prep/spawn machinery. */
+export interface BuildReviewDockerArgsParams {
+  /** Sanitized `magpie-<jobId>` container name (see {@link buildContainerName}). */
+  containerName: string;
+  /** Host uid the container runs as (`process.getuid()` in production). */
+  uid: number;
+  /** Host gid the container runs as (`process.getgid()` in production). */
+  gid: number;
+  /** Host path bind-mounted read-only at `/work` (see container-mounts.ts's `prepareReviewMount`). */
+  mountDir: string;
+  /** Host path bind-mounted read-write at `/out` (see container-mounts.ts's `createOutputDir`). */
+  outDir: string;
+  /** Host path bind-mounted read-only at `/run/gw` (see `RunReviewParams.gatewaySocketDir`). */
+  gatewaySocketDir: string;
+  config: Config;
+}
+
+/**
+ * Pure builder for the hardened `docker run` argv this module ships today —
+ * this is Magpie's CTO-designated "crun floor" posture (see
+ * docs/design/cto-decision-brief.md's binding edit #3 and the M8 epic): the
+ * last-resort isolation tier that must never silently erode while
+ * milestone-8 work replaces `runReview`'s docker/crun-based launch with a
+ * micro-VM one. `reviewer-crun-floor-argv.test.ts` pins this EXACT return
+ * value byte-for-byte against a committed golden fixture so any flag
+ * addition/removal/reordering fails CI loudly, pointing at the fixture to
+ * consciously update on an intentional posture change.
+ *
+ * Deliberately takes only plain values (strings/numbers/the `Config`) and
+ * does no I/O, spawning, or uid lookup itself — {@link runReview} is the only
+ * production caller, supplying `process.getuid()`/`process.getgid()` and the
+ * already-prepared mount paths. Extracted verbatim from `runReview`'s former
+ * inline `dockerArgs` literal (see git history) with NO behavioral change:
+ * same flags, same order, same values, same trailing container args.
+ */
+export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): string[] {
+  const { containerName, uid, gid, mountDir, outDir, gatewaySocketDir, config } = params;
+  return [
+    "run",
+    "--rm",
+    "--name",
+    containerName,
+    "--user",
+    `${uid}:${gid}`,
+    "--read-only",
+    "--tmpfs",
+    "/tmp",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    `--memory=${config.container.memory}`,
+    `--cpus=${config.container.cpus}`,
+    `--pids-limit=${config.container.pidsLimit}`,
+    "--network",
+    "none",
+    "-v",
+    `${mountDir}:/work:ro`,
+    "-v",
+    `${outDir}:/out`,
+    // The per-job gateway socket directory (M7-1 — see
+    // `RunReviewParams.gatewaySocketDir`'s doc comment), mounted READ-ONLY:
+    // the container can reach the already-bound `gw.sock` inside it via
+    // `connect()` (unaffected by a read-only mount) but can't unlink/replace
+    // it. This is the container's only channel to the gateway now that it
+    // runs `--network none`.
+    "-v",
+    `${gatewaySocketDir}:/run/gw:ro`,
+    "-e",
+    "OPENROUTER_API_KEY",
+    // Non-secret (a fixed, deployment-wide gateway address, not a per-job
+    // credential — see this module's doc comment), so passed inline rather
+    // than name-only-via-env like OPENROUTER_API_KEY above.
+    "-e",
+    `OPENAI_BASE_URL=${config.gateway.containerBaseUrl}`,
+    "-i",
+    config.container.image,
+    "--provider",
+    "openrouter",
+    "--model",
+    config.llm.model,
+  ];
+}
+
 /**
  * Run Pi headless, inside a hardened review container, against a PR
  * checkout + diff, and return STRUCTURED review findings collected via the
@@ -356,49 +438,20 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // a property of the network namespace rather than any daemon-config-
   // dependent iptables rule. The mounted `/run/gw` directory (below) is
   // therefore the container's ONLY remaining path off itself.
-  const dockerArgs: string[] = [
-    "run",
-    "--rm",
-    "--name",
+  //
+  // The actual argv is assembled by the pure {@link buildReviewDockerArgs}
+  // (see its doc comment) so it can be unit-tested — including the M8-B1
+  // byte-for-byte golden/floor-invariant regression test — independently of
+  // this function's spawn/timeout/kill machinery.
+  const dockerArgs: string[] = buildReviewDockerArgs({
     containerName,
-    "--user",
-    `${process.getuid()}:${process.getgid()}`,
-    "--read-only",
-    "--tmpfs",
-    "/tmp",
-    "--cap-drop=ALL",
-    "--security-opt=no-new-privileges",
-    `--memory=${config.container.memory}`,
-    `--cpus=${config.container.cpus}`,
-    `--pids-limit=${config.container.pidsLimit}`,
-    "--network",
-    "none",
-    "-v",
-    `${mountDir}:/work:ro`,
-    "-v",
-    `${output.outDir}:/out`,
-    // The per-job gateway socket directory (M7-1 — see
-    // `RunReviewParams.gatewaySocketDir`'s doc comment), mounted READ-ONLY:
-    // the container can reach the already-bound `gw.sock` inside it via
-    // `connect()` (unaffected by a read-only mount) but can't unlink/replace
-    // it. This is the container's only channel to the gateway now that it
-    // runs `--network none`.
-    "-v",
-    `${params.gatewaySocketDir}:/run/gw:ro`,
-    "-e",
-    "OPENROUTER_API_KEY",
-    // Non-secret (a fixed, deployment-wide gateway address, not a per-job
-    // credential — see this module's doc comment), so passed inline rather
-    // than name-only-via-env like OPENROUTER_API_KEY above.
-    "-e",
-    `OPENAI_BASE_URL=${config.gateway.containerBaseUrl}`,
-    "-i",
-    config.container.image,
-    "--provider",
-    "openrouter",
-    "--model",
-    config.llm.model,
-  ];
+    uid: process.getuid(),
+    gid: process.getgid(),
+    mountDir,
+    outDir: output.outDir,
+    gatewaySocketDir: params.gatewaySocketDir,
+    config,
+  });
 
   const payload = buildPromptPayload({ prTitle, prBody, changedFiles, diff, incremental });
 
