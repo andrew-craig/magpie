@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [rust,supply-chain,ci]
-blocked_by: [decision_aa2d]
+blocked_by: []
 parent: epic_6955
 remote_task_url: null
 created_at: 2026-07-19T22:54:29Z
-updated_at: 2026-07-21T21:32:05Z
+updated_at: 2026-07-22T12:53:10Z
 ---
 CTO edit 4 names the supply chain explicitly: the vsock client is a new compiled binary inside
 the signed reviewer image — new supply-chain surface — so it must be built in OUR CI and covered

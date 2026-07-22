@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 2
 labels: [rust,testing]
-blocked_by: [decision_aa2d]
+blocked_by: []
 parent: epic_6955
 remote_task_url: null
 created_at: 2026-07-19T22:54:38Z
-updated_at: 2026-07-21T21:32:05Z
+updated_at: 2026-07-22T12:53:10Z
 ---
 Make the "leverage the tests we have" half of the migration strategy concrete: the existing
 TypeScript integration/e2e tests are the contract harness for every Node→Rust swap.

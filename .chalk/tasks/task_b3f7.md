@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [vsock,gateway]
-blocked_by: [task_a163,decision_aa2d]
+blocked_by: [task_a163]
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:58Z
-updated_at: 2026-07-19T22:54:58Z
+updated_at: 2026-07-22T12:53:10Z
 ---
 Net-new component from brief §6.1: bridges each job's per-VM vsock host socket to the gateway's
 per-job unix socket. The budget-capped virtual-key model is unchanged.

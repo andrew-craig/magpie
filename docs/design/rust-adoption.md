@@ -1,7 +1,8 @@
 # Design: Rust adoption — native components, build/signing, migration rule
 
-**Status:** Draft (pending CTO ratification — see `decision_aa2d` / RUST-1)
-**Author:** Andrew
+**Status:** Ratified by CTO 2026-07-22 (see `decision_aa2d` / RUST-1) — Rust adopted at the
+recommended scope; staffing confirmed not a constraint, so the Go fallback below is moot.
+**Author:** Claude
 **Date:** July 2026
 **Tracks:** `epic_6955` (Rust adoption), `epic_59b1` (Milestone 8 — rootless micro-VM sandbox)
 
@@ -37,8 +38,10 @@ Once Rust is required host-side for the launcher, running a *second* native lang
 socket-forwarding guest binary is pure toolchain tax. Fewer signed-artifact toolchains and one
 cross-compile/supply-chain lane is itself a security argument for an isolation product.
 
-**Staffing fallback (flag for CTO):** if the team lacks Rust fluency, the *guest client only* may
-fall back to Go — but the launcher stays Rust (or C), never Go+cgo.
+**Staffing fallback (resolved):** the fallback below was raised for the CTO in case the team
+lacked Rust fluency — the *guest client only* would fall back to Go, launcher always staying
+Rust/C. At ratification (2026-07-22) the CTO confirmed staffing is not a constraint, so **this
+fallback is retired: all in-scope native components are Rust.**
 
 ## Scope — Rust where Node is the wrong tool, at process boundaries only
 
@@ -98,7 +101,8 @@ NDJSON) — never an in-process rewrite of TypeScript logic.
 
 ## Open items
 
-- CTO ratification of this scope (`decision_aa2d`), including the Go→Rust reversal with the spike
-  evidence and the staffing fallback.
+- ~~CTO ratification of this scope (`decision_aa2d`), including the Go→Rust reversal and the
+  staffing fallback.~~ **Ratified 2026-07-22** at the recommended scope; staffing not a
+  constraint (Go fallback retired).
 - Launcher link mode (fully static vs dynamically linking libkrun) and the OCI-image→rootfs prep
   path (podman `export`→virtiofs vs `krun_set_root_disk` ext4) — both in `task_76d6` / `task_08ec`.

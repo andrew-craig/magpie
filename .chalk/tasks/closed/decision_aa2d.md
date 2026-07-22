@@ -2,14 +2,14 @@
 id: decision_aa2d
 title: RUST-1: decision — Rust migration scope beyond the vsock client, and the strangler/test strategy
 type: decision
-status: open
+status: closed
 priority: 1
 labels: [rust,decision]
 blocked_by: []
 parent: epic_6955
 remote_task_url: null
 created_at: 2026-07-19T22:54:20Z
-updated_at: 2026-07-21T21:32:05Z
+updated_at: 2026-07-22T12:53:10Z
 ---
 Ratify (with CTO visibility, since they asked) the answer to: "As we need a native language for
 the vsock client, what other code should be migrated, and in which language? How do we manage the

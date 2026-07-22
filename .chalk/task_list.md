@@ -5,7 +5,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 
 - **task_1fdc** · P1 · in_progress · M8-A1: libkrun-under-rootless-Podman spike — timeboxed 2 weeks incl. 16 KB-page arm64  (parent: epic_59b1)
 - **decision_06c2** · P1 · open · M8-A2: spike go/no-go — if libkrun fails, escalate to CTO; no auto-fallback to Firecracker-direct  (parent: epic_59b1)
-- **decision_aa2d** · P1 · open · RUST-1: decision — Rust migration scope beyond the vsock client, and the strangler/test strategy  (parent: epic_6955)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
