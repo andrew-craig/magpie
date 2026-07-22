@@ -1,0 +1,28 @@
+# Magpie's Rust cargo workspace (RUST-2 / task_2a18).
+#
+# Scope: see docs/design/rust-adoption.md "Build & signing". This workspace
+# exists alongside the npm workspaces at the repo root; it is the build lane
+# for Magpie's native (Rust) process-boundary components — today just the
+# scaffolding crates below, growing to hold the real guest-side vsock client
+# (task_2d6c) and the host-side libkrun launcher (task_76d6) as those land.
+[workspace]
+resolver = "2"
+members = [
+    "vsock-framing",
+    "vsock-client",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Reproducible, minimal release builds for the static-musl binaries shipped
+# out of this workspace. Profiles can only be set at the workspace root, so
+# member crates inherit this rather than declaring their own [profile.*].
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

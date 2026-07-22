@@ -1,0 +1,11 @@
+[package]
+name = "vsock-framing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared length-prefixed framing helpers for AF_VSOCK byte streams (scaffold crate — see docs/design/rust-adoption.md)."
+
+[lib]
+name = "vsock_framing"
+path = "src/lib.rs"

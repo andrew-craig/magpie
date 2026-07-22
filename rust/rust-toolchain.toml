@@ -1,0 +1,12 @@
+# Pinned toolchain for the rust/ workspace (RUST-2 / task_2a18). Rustup picks
+# this up automatically for any cargo/rustc invocation rooted under rust/,
+# both locally and in CI, so every build uses the exact same compiler.
+#
+# Pin is the toolchain already present on the M8-A1 spike host; bump
+# deliberately (and re-vendor Cargo.lock / re-run clippy) rather than
+# floating on `stable`.
+[toolchain]
+channel = "1.97.1"
+targets = ["aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
+components = ["clippy", "rustfmt"]
+profile = "minimal"

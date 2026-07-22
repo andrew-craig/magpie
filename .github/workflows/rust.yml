@@ -1,0 +1,201 @@
+# rust.yml — build/lint gate + signing lane for the rust/ cargo workspace
+# (RUST-2 / task_2a18).
+#
+# WHAT THIS DOES
+#   `lint` (every push/PR touching rust/**): cargo fmt --check, cargo clippy
+#   -D warnings, cargo test --workspace. This is the Rust-side equivalent of
+#   the existing TS lint/test gate — see package.json for that half.
+#
+#   `build`: release, statically-linked builds of the whole workspace for
+#   both product target arches. To avoid a musl cross-linker (and the
+#   "prebuilt third-party binary" supply-chain smell that comes with
+#   fetching one), each target builds NATIVELY on a GitHub-hosted runner of
+#   its own architecture — linux/amd64 on `ubuntu-24.04`, linux/arm64 on
+#   `ubuntu-24.04-arm` — rather than cross-compiling from a single runner.
+#   Every dependency (including the toolchain, pinned by rust-toolchain.toml)
+#   is fetched from its own pinned source and compiled in this job; nothing
+#   shipped in the final binaries is a fetched prebuilt artifact.
+#
+#   `sign` (tag `rust-v*` or manual dispatch only): cosign KEYLESS-signs
+#   (GitHub OIDC -> Fulcio, Rekor-logged — same model release-reviewer.yml
+#   uses for the image, no long-lived signing keys) every binary this
+#   workflow produces, and uploads the signatures as a workflow artifact.
+#
+# SCOPE NOTE (read before wiring this into a real release)
+#   Today `rust/` holds only scaffolding crates (`vsock-framing`, the
+#   `magpie-vsock-client` placeholder) — see docs/design/rust-adoption.md.
+#   Per that doc, a binary BAKED INTO the reviewer image is already covered
+#   by the image's digest pin + cosign signature and does not need signing
+#   here again; this workflow's `sign` job is for binaries shipped OUTSIDE
+#   the image (e.g. the future install-time KVM preflight probe, task_2f46,
+#   or the host-side libkrun launcher, task_76d6). The `sign` job signs the
+#   placeholder binary purely to prove that lane end-to-end; it is not
+#   itself a shippable artifact. Wiring the real guest-side client
+#   (task_2d6c) into docker/reviewer/Dockerfile, and the real external
+#   binaries into scripts/pack-host.sh + release-host.yml, is future work.
+
+name: rust
+
+on:
+  push:
+    branches: ["**"]
+    # `paths` only meaningfully filters ordinary branch pushes here — new
+    # tag refs (our `rust-v*` release tags) have no prior git state to diff
+    # against, so GitHub runs the workflow on tag creation regardless of
+    # which paths changed. That's intentional: a release tag must always
+    # get its lint/build/sign run, never be silently skipped by this filter.
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust.yml"
+    tags:
+      - "rust-v*"
+  pull_request:
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rustup (preinstalled on GitHub-hosted runners) reads rust/rust-toolchain.toml
+      # and installs the pinned channel + targets + components on first use;
+      # `rustup show` forces that install up front so it's not hidden inside
+      # the first cargo invocation's timing.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned toolchain + target
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - name: cargo build --release
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      # Fail closed if a future dependency (e.g. once task_2d6c/task_76d6
+      # land) accidentally drags in a dynamically-linked libc — the whole
+      # point of the musl targets is a fully static, portable binary.
+      #
+      # Keyed off `file`'s structural classification, NOT `ldd`'s exact
+      # wording: the two musl targets legitimately produce DIFFERENT static
+      # forms — aarch64 emits a plain "statically linked" ELF while x86_64
+      # emits a "static-pie linked" one — and both are fully static. The
+      # earlier `ldd | grep -v 'not a dynamic executable'` check false-
+      # positived on the static-PIE binary (its `ldd` output differs) and
+      # could false-negative on empty `ldd` output; `file` avoids both. We
+      # accept either static form and reject only a genuinely dynamic binary,
+      # failing closed on any unexpected classification.
+      - name: Verify static linking
+        run: |
+          set -euo pipefail
+          for bin in target/${{ matrix.target }}/release/*; do
+            [ -f "$bin" ] && [ -x "$bin" ] || continue
+            desc=$(file "$bin")
+            echo "$desc"
+            case "$desc" in
+              *"dynamically linked"*)
+                echo "::error::$bin is dynamically linked"; exit 1 ;;
+              *"statically linked"*|*"static-pie linked"*)
+                : ;; # fully static — either plain or PIE form is fine
+              *)
+                echo "::error::$bin: unexpected linkage classification (not confirmed static)"; exit 1 ;;
+            esac
+          done
+
+      # `path:` for actions/upload-artifact is repo-root-relative (the
+      # `defaults.run.working-directory: rust` above only applies to `run:`
+      # shell steps, not action inputs), hence the explicit `rust/` prefix.
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries-${{ matrix.target }}
+          path: |
+            rust/target/${{ matrix.target }}/release/magpie-vsock-client
+          if-no-files-found: error
+          retention-days: 14
+
+  sign:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/rust-v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for cosign keyless signing
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-binaries-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless sign-blob: mints a short-lived Fulcio cert off this workflow's
+      # OIDC identity and logs the signature in Rekor — no stored secrets.
+      # Adopters verify with:
+      #   cosign verify-blob \
+      #     --certificate-identity-regexp '^https://github.com/andrew-craig/magpie' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --signature <bin>.sig --certificate <bin>.pem <bin>
+      - name: Sign externally-shipped binaries (keyless)
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          for dir in rust-binaries-*; do
+            for bin in "$dir"/*; do
+              [ -f "$bin" ] || continue
+              echo "Signing $bin"
+              cosign sign-blob --yes \
+                --output-signature "$bin.sig" \
+                --output-certificate "$bin.pem" \
+                "$bin"
+            done
+          done
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-binary-signatures
+          path: |
+            artifacts/**/*.sig
+            artifacts/**/*.pem
+          if-no-files-found: error
+          retention-days: 90
