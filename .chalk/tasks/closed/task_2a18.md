@@ -2,14 +2,14 @@
 id: task_2a18
 title: RUST-2: Rust build + signing pipeline — cargo workspace, static cross-arch builds, cosign coverage in release CI
 type: task
-status: open
+status: closed
 priority: 1
 labels: [rust,supply-chain,ci]
 blocked_by: []
 parent: epic_6955
 remote_task_url: null
 created_at: 2026-07-19T22:54:29Z
-updated_at: 2026-07-22T12:53:10Z
+updated_at: 2026-07-22T20:59:51Z
 ---
 CTO edit 4 names the supply chain explicitly: the vsock client is a new compiled binary inside
 the signed reviewer image — new supply-chain surface — so it must be built in OUR CI and covered
@@ -37,3 +37,23 @@ Plan:
 
 Done when: CI produces signed, reproducible Rust binaries for both arches and the reviewer image
 build consumes them; documented in the release process.
+
+---
+
+## Review (2026-07-22) — delivered in PR #46 (branch `m8-rust-pipeline`)
+
+Scaffolding for the ratified TS+Rust stack: `rust/` cargo workspace (pinned toolchain 1.97.1 +
+both musl targets, committed `Cargo.lock`, zero third-party deps), the shared `vsock-framing` lib
+crate (real length-prefixed framing + 5 unit tests, `TODO(task_2d6c/76d6)`), a `magpie-vsock-client`
+placeholder proving a static-musl binary builds end-to-end, and `.github/workflows/rust.yml`
+(lint fmt/clippy `-D warnings`/test → native per-arch musl build with static-link verification →
+keyless cosign `sign-blob` gated to `rust-v*`).
+
+Tech-lead verification (re-run independently): `cargo fmt --check` clean, `clippy` 0 warnings,
+5/5 tests, aarch64-musl binary confirmed statically linked. First CI run: aarch64 + lint pass;
+x86_64 leg's static-link step false-positived on the legit `static-pie linked` musl binary — fixed
+by keying the check off `file`'s structural classification (accept `statically linked` /
+`static-pie linked`, reject `dynamically linked`, fail closed on unexpected) rather than `ldd`'s
+exact wording. This also resolved the Magpie self-review's robustness nit on the same step.
+
+Does NOT implement task_2d6c / task_76d6 (explicit TODOs). Closing this unblocks RUST-3 (task_9d2b).

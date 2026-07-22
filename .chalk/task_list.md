@@ -8,7 +8,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **epic_6955** · P1 · open · Rust adoption — vsock binaries, build/signing pipeline, migration strategy
 - **task_08ec** · P1 · open · M8-B2: rootless substrate — docker→rootless podman+crun port, orchestrator ⟂ gateway uid split preserved (merge blocker)  (parent: epic_59b1)
-- **task_2a18** · P1 · open · RUST-2: Rust build + signing pipeline — cargo workspace, static cross-arch builds, cosign coverage in release CI  (parent: epic_6955)
 - **task_2d6c** · P1 · open · M8-C1: guest-side vsock client — static Rust binary in the signed reviewer image (replaces forwarder.mjs)  (parent: epic_59b1)
 - **task_2f46** · P1 · open · M8-D1: tier preflight + isolation-ladder selection module  (parent: epic_59b1)
 - **task_39ff** · P1 · open · M8-C3: micro-VM tier end-to-end — port reviewer launch to krun under rootless podman (crun floor stays feature-flagged fallback)  (parent: epic_59b1)
