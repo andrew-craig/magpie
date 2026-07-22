@@ -1,0 +1,14 @@
+[package]
+name = "magpie-vsock-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Placeholder scaffold for the guest-side AF_VSOCK client (task_2d6c replaces this binary). Exists to prove the static-musl build/signing pipeline (task_2a18) end-to-end."
+
+[[bin]]
+name = "magpie-vsock-client"
+path = "src/main.rs"
+
+[dependencies]
+vsock-framing = { path = "../vsock-framing" }
