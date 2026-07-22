@@ -111,16 +111,31 @@ jobs:
       # Fail closed if a future dependency (e.g. once task_2d6c/task_76d6
       # land) accidentally drags in a dynamically-linked libc — the whole
       # point of the musl targets is a fully static, portable binary.
+      #
+      # Keyed off `file`'s structural classification, NOT `ldd`'s exact
+      # wording: the two musl targets legitimately produce DIFFERENT static
+      # forms — aarch64 emits a plain "statically linked" ELF while x86_64
+      # emits a "static-pie linked" one — and both are fully static. The
+      # earlier `ldd | grep -v 'not a dynamic executable'` check false-
+      # positived on the static-PIE binary (its `ldd` output differs) and
+      # could false-negative on empty `ldd` output; `file` avoids both. We
+      # accept either static form and reject only a genuinely dynamic binary,
+      # failing closed on any unexpected classification.
       - name: Verify static linking
         run: |
           set -euo pipefail
           for bin in target/${{ matrix.target }}/release/*; do
             [ -f "$bin" ] && [ -x "$bin" ] || continue
-            file "$bin"
-            if ldd "$bin" 2>&1 | grep -qv 'not a dynamic executable'; then
-              echo "::error::$bin is not statically linked"
-              exit 1
-            fi
+            desc=$(file "$bin")
+            echo "$desc"
+            case "$desc" in
+              *"dynamically linked"*)
+                echo "::error::$bin is dynamically linked"; exit 1 ;;
+              *"statically linked"*|*"static-pie linked"*)
+                : ;; # fully static — either plain or PIE form is fine
+              *)
+                echo "::error::$bin: unexpected linkage classification (not confirmed static)"; exit 1 ;;
+            esac
           done
 
       # `path:` for actions/upload-artifact is repo-root-relative (the
