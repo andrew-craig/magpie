@@ -33,9 +33,11 @@ Approval carries four binding edits — these are constraints on every task in t
    must not learn pre-submission whether the target runs the crun floor). Tier goes to /healthz
    and operator logs only.
 
-Also mandated: the guest-side vsock client is a **static Go binary, built in our CI, covered by
-the same cosign signing as the reviewer image** (Node has no native AF_VSOCK) — see the Go
-adoption epic for the pipeline and migration-scope decision.
+Also mandated: the guest-side vsock client is a **static native binary, built in our CI, covered by
+the same cosign signing as the reviewer image** (Node has no native AF_VSOCK). Language is **Rust**
+per the M8-A1 spike (was open Go-or-Rust; resolved to Rust — the host-side libkrun launcher forces
+a C-ABI-FFI language and the guest client is proven in Rust) — see the Rust adoption epic
+(`epic_6955`) for the pipeline and migration-scope decision.
 
 Task phases: A = gates/spikes → B = rootless substrate (merge-blocker constraints) →
 C = micro-VM tier → D = ladder/installer/surfacing/docs. gVisor stays deferred (CTO decision 4);

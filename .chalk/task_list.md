@@ -3,28 +3,27 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **decision_06c2** · P1 · open · M8-A2: spike go/no-go — if libkrun fails, escalate to CTO; no auto-fallback to Firecracker-direct  (parent: epic_59b1)
-- **decision_aa2d** · P1 · open · GO-1: decision — Go migration scope beyond the vsock client, and the strangler/test strategy  (parent: epic_6955)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
-- **epic_6955** · P1 · open · Go adoption — vsock binaries, build/signing pipeline, migration strategy
+- **epic_6955** · P1 · open · Rust adoption — vsock binaries, build/signing pipeline, migration strategy
 - **task_08ec** · P1 · open · M8-B2: rootless substrate — docker→rootless podman+crun port, orchestrator ⟂ gateway uid split preserved (merge blocker)  (parent: epic_59b1)
-- **task_1fdc** · P1 · open · M8-A1: libkrun-under-rootless-Podman spike — timeboxed 2 weeks incl. 16 KB-page arm64  (parent: epic_59b1)
-- **task_2a18** · P1 · open · GO-2: Go build + signing pipeline — module layout, static cross-arch builds, cosign coverage in release CI  (parent: epic_6955)
-- **task_2d6c** · P1 · open · M8-C1: guest-side vsock client — static Go binary in the signed reviewer image (replaces forwarder.mjs)  (parent: epic_59b1)
+- **task_2a18** · P1 · open · RUST-2: Rust build + signing pipeline — cargo workspace, static cross-arch builds, cosign coverage in release CI  (parent: epic_6955)
+- **task_2d6c** · P1 · open · M8-C1: guest-side vsock client — static Rust binary in the signed reviewer image (replaces forwarder.mjs)  (parent: epic_59b1)
 - **task_2f46** · P1 · open · M8-D1: tier preflight + isolation-ladder selection module  (parent: epic_59b1)
 - **task_39ff** · P1 · open · M8-C3: micro-VM tier end-to-end — port reviewer launch to krun under rootless podman (crun floor stays feature-flagged fallback)  (parent: epic_59b1)
 - **task_3b48** · P1 · open · M8-C4: no-network-by-construction — TSI/passt built off + fail-closed in-guest assertion  (parent: epic_59b1)
 - **task_67aa** · P1 · open · M8-D3: installer + systemd — rootless-Podman provisioning (subuid/subgid, linger, kvm group, AF_VSOCK)  (parent: epic_59b1)
+- **task_76d6** · P1 · open · M8-C0: host-side micro-VM launcher — direct libkrun (TSI-off no-network + per-VM vsock gateway port + setuid + vcpu/RAM)  (parent: epic_59b1)
 - **task_89c4** · P1 · open · M8-B1: floor-invariant regression test — crun tier flags byte-for-byte vs today's hardened posture  (parent: epic_59b1)
 - **task_92d7** · P1 · open · M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer  (parent: epic_59b1)
 - **task_a163** · P1 · open · M8-A3: vsock transport spike — guest↔host round-trip against the real per-job gateway socket  (parent: epic_59b1)
 - **task_b3f7** · P1 · open · M8-C2: host-side per-VM vsock↔gateway forwarder  (parent: epic_59b1)
+- **bug_df2d** · P2 · open · Reviewer --memory limit silently unenforced when memory cgroup is disabled
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
-- **task_9d2b** · P2 · open · GO-3: cross-language contract-test harness — TS integration tests as the boundary contract for Go binaries  (parent: epic_6955)
+- **task_9d2b** · P2 · open · RUST-3: cross-language contract-test harness — TS integration tests as the boundary contract for Rust binaries  (parent: epic_6955)
 - **task_df53** · P2 · open · M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)

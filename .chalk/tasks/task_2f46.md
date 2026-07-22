@@ -15,8 +15,8 @@ Brief §5 tier-honesty invariant. A module that probes the host and selects the 
 available tier: micro-VM (KVM) > gVisor (deferred, slot exists) > hardened crun.
 
 - [ ] KVM probe: actually open /dev/kvm and issue KVM_CREATE_VM — never CPU-ID registers, which
-      can misreport. (Probe binary is a Go candidate per GO-1 — the installer preflight must run
-      without Node.)
+      can misreport. (Probe binary is a Rust candidate per RUST-1 — the installer preflight must
+      run without Node.)
 - [ ] Probe podman/krun presence + version pins; leave a wired-but-empty gVisor slot (task_624d
       stays deferred per CTO decision 4).
 - [ ] Install-time preflight FAILS LOUD and requires explicit operator acknowledgement (e.g.
