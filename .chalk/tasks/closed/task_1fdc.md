@@ -2,14 +2,14 @@
 id: task_1fdc
 title: M8-A1: libkrun-under-rootless-Podman spike — timeboxed 2 weeks incl. 16 KB-page arm64
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [spike,gate,microvm]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:53:33Z
-updated_at: 2026-07-19T23:05:19Z
+updated_at: 2026-07-22T12:57:52Z
 ---
 The single pre-implementation gate (brief §7.1), approved with a HARD TIMEBOX: two weeks total,
 including the 16 KB-page arm64 box (the hardest case). The question it answers: does libkrun/krun
@@ -322,3 +322,39 @@ untested and the CTO should accept or reject that explicitly before the C-phase.
 3. **Build-from-source burden is itself a finding.** If shipping this means every self-hoster
     builds libkrun+crun from source, that is a distribution problem for M8-D and materially
     affects the effort estimate, independent of whether the boot succeeds.
+
+---
+
+## VERDICT (2026-07-22): PASS — libkrun confirmed, with documented caveats
+
+Written pass/fail against each §7.1 gate item. Evidence:
+`spike/m8-a1/flag-investigation.md` (contract/flags), `spike/m8-a1/frontend-investigation.md`
+(no-network + vsock), and the paired command output in both. All boot results verified on this
+host (RPi 5 / BCM2712 / `rpt-rpi-2712`), which **is** the 16 KB-page arm64 hard case.
+
+| Gate item | Result | Evidence |
+|---|---|---|
+| Rootless podman + krun boots the real reviewer image as a micro-VM | **PASS** | flag-investigation.md — real `magpie-reviewer` image booted via `podman --runtime krun`, digest-pinned |
+| Same on 16 KB-page arm64 | **PASS** | this host is 16 KB-page arm64; all boots done here (KVM stage-2 granule independent of guest 4 KB stage-1, confirmed empirically) |
+| `/dev/kvm` via kvm-group (no world-0666) | **PASS** | `sg kvm` / `--group-add keep-groups`; no `setfacl`/0666 needed |
+| Read-only virtiofs `/work` mount; reads work, writes rejected | **PASS** | flag-investigation.md contract checks |
+| vCPU ceiling + boot-to-userspace measured | **PASS** | `krun.cpus` annotation is the correct lever (podman `--cpus` maps to unused cgroup knob); LIBKRUN_MAX_VCPUS=16 |
+| Guest RAM ceiling VMM-enforced (memory-bomb containment) | **PASS** | `krun.mem`/`krun_set_vm_config` RAM ceiling |
+| Provable no-network (config-independent) | **PASS (via direct launcher)** | frontend-investigation.md — `krun_disable_implicit_vsock`+`krun_add_vsock(ctx,0)` → TSI off, dummy0 down/routeless; crun handler alone gives only config-dependent ENETUNREACH |
+| Per-VM gateway vsock channel | **PASS** | `krun_add_vsock_port2` + Rust guest client full round-trip (spike commit f47eaf3) |
+
+**Architectural consequence (already carried into the CTO brief / Rust epic):** provable
+no-network + non-root + the gateway channel are libkrun C-API calls crun's krun handler does not
+make, so the C-phase adopts a **direct-libkrun launcher** (`task_76d6`) rather than the crun
+handler — and that launcher forces Rust/C, which (with the proven Rust guest client) settled
+`decision_aa2d` to Rust.
+
+**Residual gaps (NOT gate failures, tracked forward):**
+- amd64 untested — no hardware on hand. Carry as a C-phase/CI validation item, not a blocker
+  (the CTO gate was specifically the 16 KB arm64 hard case, which passed).
+- krunvm not installed/tested — assessed from design as wrong-shape for per-job orchestration; no
+  need to test given the direct-launcher decision.
+- Direct launcher is a boot/no-network + vsock proof; wiring `krun_setuid` + a live gateway socket
+  end-to-end is the C-phase work (`task_76d6`/`task_a163`), not a spike gap.
+- Build-from-source burden (libkrun+libkrunfw+crun) is real and feeds the M8-D installer estimate
+  (`task_67aa`) — a distribution cost, not a gate fail.

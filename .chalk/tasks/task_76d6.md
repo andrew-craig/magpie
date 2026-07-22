@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [rust,microvm,libkrun]
-blocked_by: [decision_06c2,task_08ec]
+blocked_by: [task_08ec]
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-21T21:39:41Z
-updated_at: 2026-07-21T21:39:47Z
+updated_at: 2026-07-22T12:57:55Z
 ---
 Net-new component surfaced by the M8-A1 spike (`task_1fdc`,
 `spike/m8-a1/frontend-investigation.md`). The spike found that driving libkrun via crun's krun

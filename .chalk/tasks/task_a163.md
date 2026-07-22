@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [spike,vsock]
-blocked_by: [task_1fdc]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:53:52Z
-updated_at: 2026-07-19T22:53:52Z
+updated_at: 2026-07-22T12:57:52Z
 ---
 Brief §8 phase 2. Prove the gateway channel shape on the chosen VMM before porting the pipeline:
 guest → vsock → host-side per-job socket → gateway proxy plane, full LLM request/response
