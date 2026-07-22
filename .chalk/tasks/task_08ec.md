@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [security,merge-blocker,substrate]
-blocked_by: [task_89c4]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:03Z
-updated_at: 2026-07-19T22:54:03Z
+updated_at: 2026-07-22T21:02:13Z
 ---
 Adopt Proposal B's rootless substrate WITHOUT B's as-written secret regression. CTO edit 1 makes
 this a merge blocker: the orchestrator ⟂ gateway uid separation must hold in every tier from the

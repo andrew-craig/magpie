@@ -1,0 +1,58 @@
+# ci.yml — TypeScript workspace lint/typecheck/test gate for pull requests.
+#
+# Added with the M8-B1 floor-invariant regression test (task_89c4): CTO binding
+# edit #3 requires CI to fail on any drift of the reviewer's hardened "crun
+# floor" argv from its committed golden. That test
+# (packages/orchestrator/src/reviewer-crun-floor-argv.test.ts) only actually
+# gates merges if a workflow runs the suite on PRs — before this, the repo had
+# no PR-triggered TS test job (only the release-* workflows), so this file wires
+# `npm test` (vitest across all workspaces) + a typecheck into every PR that
+# touches the TypeScript packages.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Pin npm to match the release workflows (see release-host.yml) so
+      # lockfile handling is identical across CI jobs.
+      - name: Pin npm
+        run: npm install -g npm@11.17.0
+
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      # Typecheck (the orchestrator build is `tsc -p`), then run the full
+      # vitest suite across every workspace — this is what makes the M8-B1
+      # crun-floor golden test a real merge gate.
+      - name: Typecheck
+        run: npm run build
+
+      - name: Test
+        run: npm test
