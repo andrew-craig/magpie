@@ -2,14 +2,14 @@
 id: task_a163
 title: M8-A3: vsock transport spike — guest↔host round-trip against the real per-job gateway socket
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [spike,vsock]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:53:52Z
-updated_at: 2026-07-23T07:57:00Z
+updated_at: 2026-07-23T08:29:25Z
 ---
 Brief §8 phase 2. Prove the gateway channel shape on the chosen VMM before porting the pipeline:
 guest → vsock → host-side per-job socket → gateway proxy plane, full LLM request/response
