@@ -15,7 +15,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_67aa** · P1 · open · M8-D3: installer + systemd — rootless-Podman provisioning (subuid/subgid, linger, kvm group, AF_VSOCK)  (parent: epic_59b1)
 - **task_76d6** · P1 · open · M8-C0: host-side micro-VM launcher — direct libkrun (TSI-off no-network + per-VM vsock gateway port + setuid + vcpu/RAM)  (parent: epic_59b1)
 - **task_92d7** · P1 · open · M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer  (parent: epic_59b1)
-- **task_a163** · P1 · open · M8-A3: vsock transport spike — guest↔host round-trip against the real per-job gateway socket  (parent: epic_59b1)
 - **task_b3f7** · P1 · open · M8-C2: host-side per-VM vsock↔gateway forwarder  (parent: epic_59b1)
 - **bug_df2d** · P2 · open · Reviewer --memory limit silently unenforced when memory cgroup is disabled
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening

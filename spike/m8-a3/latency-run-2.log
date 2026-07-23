@@ -1,0 +1,18 @@
+# M8-A3 latency run 2026-07-23T07:57:02Z
+# host: Linux 6.12.93+rpt-rpi-2712 aarch64 pagesize=16384
+# params: conn_iters=500 stream_msgs=2000 msg_bytes=256
+# bench binary: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, BuildID[sha1]=c8311ea895e2153486459c8213d3876a4d01754e, stripped
+
+## baseline: host<->host unix socket
+RESULT unix connect setup count=500 min_us=2.61 median_us=3.69 p90_us=4.02 max_us=77.78 mean_us=3.95
+RESULT unix connect first_roundtrip count=500 min_us=8.28 median_us=10.11 p90_us=10.48 max_us=85.43 mean_us=10.65
+RESULT unix stream roundtrip count=2000 min_us=3.67 median_us=4.11 p90_us=4.18 max_us=294.06 mean_us=4.28
+DONE unix conn_iters=500 stream_msgs=2000 msg_bytes=256
+
+## vsock: guest -> vsock -> host per-job unix socket (libkrun microVM)
+RESULT vsock connect setup count=500 min_us=41.31 median_us=63.72 p90_us=77.19 max_us=35205.59 mean_us=249.88
+RESULT vsock connect first_roundtrip count=500 min_us=37.78 median_us=51.56 p90_us=61.74 max_us=6663.96 mean_us=65.26
+RESULT vsock stream roundtrip count=2000 min_us=26.37 median_us=27.30 p90_us=41.91 max_us=288.31 mean_us=32.17
+DONE vsock conn_iters=500 stream_msgs=2000 msg_bytes=256
+
+# done

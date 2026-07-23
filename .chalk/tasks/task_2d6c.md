@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [rust,vsock,supply-chain]
-blocked_by: [task_a163]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:48Z
-updated_at: 2026-07-22T20:59:51Z
+updated_at: 2026-07-23T08:29:25Z
 ---
 CTO edit 4: the guest-side vsock client is a named, owned deliverable — a static Rust binary
 (language per RUST-1 / `decision_aa2d`), built in our CI (RUST-2 pipeline), covered by the same

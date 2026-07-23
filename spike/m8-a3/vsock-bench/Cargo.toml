@@ -1,0 +1,13 @@
+[package]
+name = "magpie-vsock-bench"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"
