@@ -75,16 +75,18 @@ function formatError(dockerBin: string, err: unknown): string {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   if (code === "ENOENT") {
     return (
-      `docker preflight failed: "${dockerBin}" was not found on PATH. Magpie ` +
+      `container-runtime preflight failed: "${dockerBin}" was not found on PATH. Magpie ` +
       `containerizes every review job (see PLAN.md Milestone 3) and refuses to ` +
-      `start without a working docker (or docker-compatible, e.g. podman) CLI. ` +
-      `Install docker, or set [container] docker_bin in config.toml to its full path.`
+      `start without a working container runtime CLI. The default runtime is rootless ` +
+      `podman (M8-B2); install podman (or docker), or set [container] docker_bin in ` +
+      `config.toml to the runtime's full path.`
     );
   }
   const reason = err instanceof Error ? err.message : String(err);
   return (
-    `docker preflight failed: "${dockerBin} version" did not succeed (${reason}). ` +
-    `Is the docker daemon running, and can this user reach it? Magpie refuses to ` +
-    `start without a working docker installation (see PLAN.md Milestone 3).`
+    `container-runtime preflight failed: "${dockerBin} version" did not succeed (${reason}). ` +
+    `For rootless podman (the M8-B2 default) check the service user's subuid/subgid + linger ` +
+    `provisioning; for docker check the daemon is running and this user can reach it. Magpie ` +
+    `refuses to start without a working container runtime (see PLAN.md Milestone 3).`
   );
 }

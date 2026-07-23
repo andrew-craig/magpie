@@ -80,7 +80,8 @@ describe("loadConfig", () => {
     expect(config.container.memory).toBe("4g");
     expect(config.container.cpus).toBe("2");
     expect(config.container.pidsLimit).toBe(256);
-    expect(config.container.dockerBin).toBe("docker");
+    // M8-B2: the review-container runtime defaults to rootless podman.
+    expect(config.container.dockerBin).toBe("podman");
     expect(config.container).not.toHaveProperty("network");
     expect(config.gateway.baseUrl).toBe("http://127.0.0.1:4100");
     expect(config.gateway.containerBaseUrl).toBe("http://127.0.0.1:4000/v1");
