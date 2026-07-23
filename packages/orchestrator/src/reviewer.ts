@@ -365,7 +365,7 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
  */
 const HARDENED_FLAG_CHECKS: ReadonlyArray<{ label: string; ok: (argv: readonly string[]) => boolean }> = [
   { label: "--rm", ok: (a) => a.includes("--rm") },
-  { label: "--user <uid>:<gid>", ok: (a) => hasFlagWithValue(a, "--user") },
+  { label: "--user <non-root uid>:<gid>", ok: (a) => hasNonRootUser(a) },
   { label: "--read-only", ok: (a) => a.includes("--read-only") },
   { label: "--tmpfs /tmp", ok: (a) => hasPairedFlag(a, "--tmpfs", "/tmp") },
   { label: "--cap-drop=ALL", ok: (a) => a.includes("--cap-drop=ALL") },
@@ -387,6 +387,23 @@ const HARDENED_FLAG_CHECKS: ReadonlyArray<{ label: string; ok: (argv: readonly s
 function hasFlagWithValue(argv: readonly string[], flag: string): boolean {
   const i = argv.indexOf(flag);
   return i >= 0 && i + 1 < argv.length && !argv[i + 1].startsWith("-");
+}
+
+/**
+ * True iff `--user` is present with a value whose UID is non-root. The generic
+ * `hasFlagWithValue` only asserts `--user` is followed by *some* non-flag token,
+ * so a regression to `--user 0:0` (root inside the container) would pass it; the
+ * whole point of the flag is to drop out of root, so the preflight asserts the
+ * UID explicitly. The value is `<uid>[:<gid>]`; a bare `0`, `0:0`, or empty UID
+ * fails.
+ */
+function hasNonRootUser(argv: readonly string[]): boolean {
+  const i = argv.indexOf("--user");
+  if (i < 0 || i + 1 >= argv.length) return false;
+  const value = argv[i + 1];
+  if (value.startsWith("-")) return false;
+  const uid = value.split(":")[0];
+  return uid !== "" && uid !== "0";
 }
 
 /** True iff `flag` appears immediately followed by exactly `value` (e.g. `--network none`). */

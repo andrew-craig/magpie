@@ -125,6 +125,19 @@ describe("findMissingHardenedFlags", () => {
       },
       expectLabel: "--tmpfs /tmp",
     },
+    {
+      name: "--user regressed to root (0:0)",
+      mutate: (a) => a.map((t, i) => (a[i - 1] === "--user" ? "0:0" : t)),
+      expectLabel: "--user <non-root uid>:<gid>",
+    },
+    {
+      name: "--user dropped entirely",
+      mutate: (a) => {
+        const i = a.indexOf("--user");
+        return [...a.slice(0, i), ...a.slice(i + 2)];
+      },
+      expectLabel: "--user <non-root uid>:<gid>",
+    },
   ];
 
   for (const c of cases) {

@@ -116,6 +116,12 @@ async function main(): Promise<void> {
       port: config.server.port,
       concurrency: config.limits.concurrency,
       repoAllowlist: config.repoAllowlist,
+      // Surface which container runtime is active at startup. As of M8-B2 the
+      // default flipped `docker`→`podman` (rootless crun floor), so an operator
+      // upgrading with a config.toml that omits `docker_bin` silently switches
+      // runtimes; logging it here makes that visible in the boot line rather
+      // than only surfacing on the first failed review.
+      containerRuntime: config.container.dockerBin,
     }),
   );
 

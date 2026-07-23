@@ -64,6 +64,34 @@ function envReads(src: string): string[] {
   return [...names];
 }
 
+/**
+ * DYNAMIC reads of `process.env` that {@link envReads} cannot name-check, and
+ * that a future regression could use to smuggle a provider key past the
+ * allowlist grep above:
+ *   - destructuring:      `const { OPENROUTER_API_KEY } = process.env`
+ *   - variable-index:     `process.env[someName]` (index is not a string literal)
+ * The orchestrator has no legitimate need for either — every real read is a
+ * static `process.env.NAME`, and the one bulk access (`{ ...process.env }` in
+ * reviewer.ts, immediately stripped of all MAGPIE_* keys) is a spread, matched
+ * and excluded here. So we forbid the patterns outright rather than trying to
+ * resolve the name they'd read.
+ */
+function dynamicEnvReads(src: string): string[] {
+  const hits: string[] = [];
+  // Destructuring off process.env: `} = process.env` / `] = process.env`.
+  // (The spread `{ ...process.env }` has process.env on the RHS *inside* the
+  // braces, never `= process.env`, so it does not match.)
+  const destructure = /[}\]]\s*=\s*process\.env\b/g;
+  // Variable/computed index: `process.env[` NOT immediately followed by a
+  // string-literal key (which is the safe, name-checkable `envReads` form).
+  const computedIndex = /process\.env\[\s*(?!["'`])/g;
+  for (const re of [destructure, computedIndex]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) hits.push(m[0].trim());
+  }
+  return hits;
+}
+
 // The COMPLETE set of environment variables the orchestrator is permitted to
 // read. None is a provider/LLM credential. Adding a provider key here — or
 // reading one without listing it — fails this test.
@@ -88,6 +116,20 @@ describe("orchestrator ⟂ gateway uid split (merge-blocker grep assertion)", ()
       }
     }
     // A clear failure lists exactly what leaked in and where.
+    expect(offenders).toEqual([]);
+  });
+
+  it("no orchestrator source reads process.env dynamically (destructure / computed index)", () => {
+    // Closes the grep's evasion vectors: the allowlist assertion above only
+    // sees static `process.env.NAME` reads, so a provider key pulled via
+    // destructuring or a variable index would slip past it. Neither pattern is
+    // used anywhere legitimately, so any occurrence fails here.
+    const offenders: Array<{ file: string; pattern: string }> = [];
+    for (const file of orchestratorSourceFiles()) {
+      for (const pattern of dynamicEnvReads(readFileSync(file, "utf-8"))) {
+        offenders.push({ file, pattern });
+      }
+    }
     expect(offenders).toEqual([]);
   });
 
