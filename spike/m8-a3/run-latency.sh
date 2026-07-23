@@ -19,7 +19,10 @@
 set -euo pipefail
 
 SPIKE_A3="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPIKE_A1="$(cd "$SPIKE_A3/../m8-a1" && pwd)"
+# The heavy M8-A1 artifacts (launcher, rootfs, libkrun build) are gitignored and
+# live only in the primary checkout, not in a fresh worktree. Default to the
+# sibling m8-a1/ but allow SPIKE_A1 to point at the primary checkout's copy.
+SPIKE_A1="${SPIKE_A1:-$(cd "$SPIKE_A3/../m8-a1" && pwd)}"
 
 LAUNCH="$SPIKE_A1/magpie-krun-launch"
 ROOTFS="$SPIKE_A1/rootfs"
