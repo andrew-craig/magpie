@@ -142,11 +142,23 @@ cpus = "2"
 # Default: 256
 pids_limit = 256
 
-# Path to the docker CLI binary used to run review containers. Override this
-# on hosts where `docker` isn't on PATH, or where a docker-compatible CLI
-# (e.g. podman) is used instead.
-# Default: "docker"
-docker_bin = "docker"
+# Path (or PATH name) of the CLI used to run review containers. As of
+# Milestone 8 (M8-B2) this defaults to `podman`, run ROOTLESS: no root daemon
+# and no `docker` group, so a compromised orchestrator can't reach a
+# root-privileged runtime. The one rootless-only difference — `--userns=keep-id`,
+# so the container can write findings back to the orchestrator's own uid — is
+# added automatically when this binary's basename is `podman`; every hardened
+# flag (`--cap-drop=ALL`, `--read-only`, `--network none`, `--pids-limit`, …) is
+# identical to the docker path. Set this to `docker` (or a docker-compatible
+# CLI / full path) to use the rootful docker runtime instead.
+#   Rootless podman prerequisites (installer automation is M8-D3): the service
+#   user needs /etc/subuid + /etc/subgid ranges and `loginctl enable-linger`.
+#   Note also that `--memory` requires the `memory` cgroup v2 controller to be
+#   delegated to the user; where it is absent (e.g. some Raspberry Pi kernels
+#   boot with the memory controller disabled) crun fails closed rather than
+#   silently ignoring the limit the way rootful docker does.
+# Default: "podman"
+docker_bin = "podman"
 
 # NOTE: there is deliberately no `network` field. As of Milestone 7 (Design D,
 # DISTRIBUTION.md §2) the review container is ALWAYS launched with

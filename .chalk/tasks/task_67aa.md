@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [distribution,installer]
-blocked_by: [task_08ec,task_2f46]
+blocked_by: [task_2f46]
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:58Z
-updated_at: 2026-07-19T22:55:58Z
+updated_at: 2026-07-23T08:28:41Z
 ---
 Absorb Proposal C's distribution ambition on the rootless substrate (brief §5): the installer
 makes rootless-Podman setup feel one-command, without C's nested-sandbox weakness.

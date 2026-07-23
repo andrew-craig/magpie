@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createOutputDir, prepareReviewMount } from "./container-mounts.js";
+import {
+  assertGitStripped,
+  createOutputDir,
+  GitNotStrippedError,
+  prepareReviewMount,
+} from "./container-mounts.js";
 
 let root: string;
 
@@ -84,6 +89,54 @@ describe("prepareReviewMount", () => {
     await expect(prepareReviewMount("")).rejects.toThrow(
       /prepareReviewMount requires an absolute workspace path/,
     );
+  });
+
+  // Mount-prep posture (task_bfaf): the argv golden pins the `:/work:ro`
+  // FLAG, but not the fact that the prepared directory actually has NO `.git`
+  // — pin that posture here so a strip that silently stops working can't slip
+  // a live `.git` into the read-only /work mount.
+  it("strips ALL of .git, including nested objects/HEAD, leaving no git state behind", async () => {
+    const dir = await makeFakeWorkspace();
+
+    await prepareReviewMount(dir);
+
+    expect(existsSync(join(dir, ".git"))).toBe(false);
+    expect(existsSync(join(dir, ".git", "HEAD"))).toBe(false);
+    expect(existsSync(join(dir, ".git", "objects", "pack-fake"))).toBe(false);
+  });
+});
+
+describe("assertGitStripped (task_bfaf fail-closed mount-prep preflight)", () => {
+  it("resolves silently for a prepared (.git-stripped) mount", async () => {
+    const dir = await makeFakeWorkspace();
+    await prepareReviewMount(dir);
+
+    await expect(assertGitStripped(dir)).resolves.toBeUndefined();
+  });
+
+  it("resolves for a directory that never had a .git", async () => {
+    const dir = join(root, "clean");
+    await mkdir(dir);
+    await writeFile(join(dir, "file.txt"), "x\n");
+
+    await expect(assertGitStripped(dir)).resolves.toBeUndefined();
+  });
+
+  it("FAILS CLOSED (throws GitNotStrippedError) when a .git dir is still present", async () => {
+    // A workspace whose .git was NOT stripped (prepareReviewMount not run, or
+    // a .git that re-materialised) must be refused before it can be mounted.
+    const dir = await makeFakeWorkspace();
+
+    await expect(assertGitStripped(dir)).rejects.toBeInstanceOf(GitNotStrippedError);
+    await expect(assertGitStripped(dir)).rejects.toThrow(/still contains a \.git/);
+  });
+
+  it("also fails closed when .git is a file (e.g. a git worktree/submodule pointer)", async () => {
+    const dir = join(root, "gitfile");
+    await mkdir(dir);
+    await writeFile(join(dir, ".git"), "gitdir: /elsewhere\n");
+
+    await expect(assertGitStripped(dir)).rejects.toBeInstanceOf(GitNotStrippedError);
   });
 });
 

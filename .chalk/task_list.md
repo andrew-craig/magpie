@@ -7,7 +7,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
 - **epic_6955** · P1 · open · Rust adoption — vsock binaries, build/signing pipeline, migration strategy
-- **task_08ec** · P1 · open · M8-B2: rootless substrate — docker→rootless podman+crun port, orchestrator ⟂ gateway uid split preserved (merge blocker)  (parent: epic_59b1)
 - **task_2d6c** · P1 · open · M8-C1: guest-side vsock client — static Rust binary in the signed reviewer image (replaces forwarder.mjs)  (parent: epic_59b1)
 - **task_2f46** · P1 · open · M8-D1: tier preflight + isolation-ladder selection module  (parent: epic_59b1)
 - **task_39ff** · P1 · open · M8-C3: micro-VM tier end-to-end — port reviewer launch to krun under rootless podman (crun floor stays feature-flagged fallback)  (parent: epic_59b1)
@@ -21,7 +20,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
 - **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **task_9d2b** · P2 · open · RUST-3: cross-language contract-test harness — TS integration tests as the boundary contract for Rust binaries  (parent: epic_6955)
-- **task_bfaf** · P2 · open · M8-B1b: runtime crun-floor preflight assertion + mount-prep/.git-strip coverage  (parent: epic_59b1)
 - **task_df53** · P2 · open · M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)

@@ -77,8 +77,9 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import type { Config } from "./config.js";
-import { createOutputDir, prepareReviewMount } from "./container-mounts.js";
+import { assertGitStripped, createOutputDir, prepareReviewMount } from "./container-mounts.js";
 import { parseFindings, type Finding } from "./findings.js";
 
 /** Grace period between SIGTERM and SIGKILL when a job times out. */
@@ -210,6 +211,33 @@ function buildContainerName(jobId: string): string {
   return `magpie-${sanitized.length > 0 ? sanitized : "job"}`;
 }
 
+/**
+ * True when `dockerBin` is the rootless-Podman CLI (basename exactly `podman`),
+ * as opposed to `docker` or any other docker-compatible client. This is the
+ * M8-B2 rootless-substrate discriminator: Podman is Magpie's DEFAULT runtime as
+ * of M8-B2 (`config.container.dockerBin` defaults to `"podman"`), run rootless
+ * as an unprivileged user with no root daemon and no `docker` group — the whole
+ * point of the M8 "crun floor" tier (see docs/design/cto-decision-brief.md §5).
+ *
+ * The ONE argv consequence is `--userns=keep-id` (see
+ * {@link buildReviewDockerArgs}): rootless Podman runs the container inside a
+ * user namespace where the host uid we pass via `--user <uid>:<gid>` would
+ * otherwise map through the subuid range to a high, unrelated host uid — so
+ * files the container writes to the `/out` bind mount come back owned by that
+ * mapped uid and are UNREADABLE by the orchestrator, silently failing every
+ * review with "pi did not call report_findings" (empirically reproduced on this
+ * host — see task_08ec). `--userns=keep-id` maps the invoking user's uid/gid
+ * straight through so `/out/findings.json` is written back owned by the
+ * orchestrator, exactly as under rootful docker. Real `docker` HARD-ERRORS on
+ * `--userns=keep-id`, so this flag is added ONLY for a `podman` binary; the
+ * docker path (and thus the M8-B1 floor golden, whose fixed config uses
+ * `dockerBin:"docker"`) is unaffected. Matched by basename so a full path like
+ * `/usr/bin/podman` still counts.
+ */
+export function isPodmanBinary(dockerBin: string): boolean {
+  return basename(dockerBin) === "podman";
+}
+
 /** Inputs to {@link buildReviewDockerArgs} — every per-job/per-host VALUE the hardened `docker run` argv is templated from, with no dependency on `process.getuid`/mount prep/spawn machinery. */
 export interface BuildReviewDockerArgsParams {
   /** Sanitized `magpie-<jobId>` container name (see {@link buildContainerName}). */
@@ -224,6 +252,18 @@ export interface BuildReviewDockerArgsParams {
   outDir: string;
   /** Host path bind-mounted read-only at `/run/gw` (see `RunReviewParams.gatewaySocketDir`). */
   gatewaySocketDir: string;
+  /**
+   * The actual runtime binary this argv will be handed to (see
+   * {@link RunReviewParams.piBinary} / `config.container.dockerBin`). Used ONLY
+   * to decide whether to inject the rootless-Podman `--userns=keep-id` shim
+   * (see {@link isPodmanBinary} and {@link buildReviewDockerArgs}). Optional —
+   * defaults to `config.container.dockerBin`, so callers (e.g. the M8-B1 floor
+   * golden test) that don't set it get the runtime named in the config. In
+   * production {@link runReview} passes the resolved binary (which honours the
+   * `piBinary` override) so keep-id tracks the binary actually spawned, not
+   * whatever the config default happens to be.
+   */
+  dockerBin?: string;
   config: Config;
 }
 
@@ -247,6 +287,15 @@ export interface BuildReviewDockerArgsParams {
  */
 export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): string[] {
   const { containerName, uid, gid, mountDir, outDir, gatewaySocketDir, config } = params;
+  const dockerBin = params.dockerBin ?? config.container.dockerBin;
+  // Rootless-Podman uid-mapping shim (M8-B2) — see isPodmanBinary's doc comment
+  // for the full rationale. Injected ONLY for a `podman` binary (real docker
+  // hard-errors on it), so the docker path — and the M8-B1 floor golden, which
+  // pins a `dockerBin:"docker"` config — is byte-for-byte unchanged. This is a
+  // uid-mapping shim, NOT a hardening flag: it maps the host uid straight
+  // through so the container can write `/out/findings.json` back to the
+  // orchestrator's own uid; every hardened flag below is identical regardless.
+  const usernsFlags = isPodmanBinary(dockerBin) ? ["--userns=keep-id"] : [];
   return [
     "run",
     "--rm",
@@ -254,6 +303,7 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
     containerName,
     "--user",
     `${uid}:${gid}`,
+    ...usernsFlags,
     "--read-only",
     "--tmpfs",
     "/tmp",
@@ -290,6 +340,102 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
     "--model",
     config.llm.model,
   ];
+}
+
+/**
+ * The hardened-flag invariants every review-container launch MUST satisfy — the
+ * runtime counterpart to the M8-B1 byte-for-byte floor golden
+ * (`reviewer-crun-floor-argv.test.ts`), folded in from task_bfaf per CTO
+ * binding edit #3's "CI **or preflight**" language. The golden is a build-time
+ * tripwire against source drift; this is a RUNTIME, defence-in-depth assertion
+ * that runs on the real, fully-templated argv immediately before spawn, so a
+ * launch that somehow lost a hardened flag (a bad future refactor, a
+ * merge/rebase mistake below the golden's fixed test config, an unexpected
+ * runtime value) FAILS CLOSED with a loud log rather than silently running an
+ * under-hardened container over untrusted PR content.
+ *
+ * Each entry is a human-readable label plus a predicate over the argv. The
+ * checks are intentionally value-aware where the value is the security property
+ * (`--network none`, `--tmpfs /tmp`, the three mounts' ro/rw-ness and targets,
+ * `-e OPENROUTER_API_KEY` name-only) and prefix-based where only presence +
+ * shape matters (`--memory=`, `--cpus=`, `--pids-limit=`, `--user`). Runtime
+ * shims that are NOT hardening flags (e.g. Podman's `--userns=keep-id`) are
+ * deliberately NOT asserted here — this guards the hardened posture, not the
+ * substrate.
+ */
+const HARDENED_FLAG_CHECKS: ReadonlyArray<{ label: string; ok: (argv: readonly string[]) => boolean }> = [
+  { label: "--rm", ok: (a) => a.includes("--rm") },
+  { label: "--user <non-root uid>:<gid>", ok: (a) => hasNonRootUser(a) },
+  { label: "--read-only", ok: (a) => a.includes("--read-only") },
+  { label: "--tmpfs /tmp", ok: (a) => hasPairedFlag(a, "--tmpfs", "/tmp") },
+  { label: "--cap-drop=ALL", ok: (a) => a.includes("--cap-drop=ALL") },
+  { label: "--security-opt=no-new-privileges", ok: (a) => a.includes("--security-opt=no-new-privileges") },
+  { label: "--memory=<limit>", ok: (a) => a.some((t) => t.startsWith("--memory=") && t.length > "--memory=".length) },
+  { label: "--cpus=<limit>", ok: (a) => a.some((t) => t.startsWith("--cpus=") && t.length > "--cpus=".length) },
+  {
+    label: "--pids-limit=<n>",
+    ok: (a) => a.some((t) => t.startsWith("--pids-limit=") && t.length > "--pids-limit=".length),
+  },
+  { label: "--network none", ok: (a) => hasPairedFlag(a, "--network", "none") },
+  { label: "read-only /work bind mount (…:/work:ro)", ok: (a) => hasMount(a, "/work", true) },
+  { label: "writable /out bind mount (…:/out)", ok: (a) => hasMount(a, "/out", false) },
+  { label: "read-only /run/gw bind mount (…:/run/gw:ro)", ok: (a) => hasMount(a, "/run/gw", true) },
+  { label: "-e OPENROUTER_API_KEY (name-only, never a value)", ok: (a) => hasPairedFlag(a, "-e", "OPENROUTER_API_KEY") },
+];
+
+/** True iff `flag` appears immediately followed by a non-flag value token (e.g. `--user 1000:1000`). */
+function hasFlagWithValue(argv: readonly string[], flag: string): boolean {
+  const i = argv.indexOf(flag);
+  return i >= 0 && i + 1 < argv.length && !argv[i + 1].startsWith("-");
+}
+
+/**
+ * True iff `--user` is present with a value whose UID is non-root. The generic
+ * `hasFlagWithValue` only asserts `--user` is followed by *some* non-flag token,
+ * so a regression to `--user 0:0` (root inside the container) would pass it; the
+ * whole point of the flag is to drop out of root, so the preflight asserts the
+ * UID explicitly. The value is `<uid>[:<gid>]`; a bare `0`, `0:0`, or empty UID
+ * fails.
+ */
+function hasNonRootUser(argv: readonly string[]): boolean {
+  const i = argv.indexOf("--user");
+  if (i < 0 || i + 1 >= argv.length) return false;
+  const value = argv[i + 1];
+  if (value.startsWith("-")) return false;
+  const uid = value.split(":")[0];
+  return uid !== "" && uid !== "0";
+}
+
+/** True iff `flag` appears immediately followed by exactly `value` (e.g. `--network none`). */
+function hasPairedFlag(argv: readonly string[], flag: string, value: string): boolean {
+  return argv.some((tok, i) => tok === flag && argv[i + 1] === value);
+}
+
+/**
+ * True iff some `-v <src>:<target>[:ro]` bind mount targets `target` with the
+ * required read-only-ness. `requireReadOnly` demands a trailing `:ro`;
+ * `!requireReadOnly` demands its ABSENCE (a writable mount like `/out` must not
+ * be silently `:ro`). Only accepts the mount when it's the value of a `-v` flag,
+ * not an incidental substring elsewhere in the argv.
+ */
+function hasMount(argv: readonly string[], target: string, requireReadOnly: boolean): boolean {
+  return argv.some((tok, i) => {
+    if (argv[i - 1] !== "-v") return false;
+    const parts = tok.split(":");
+    const isReadOnly = parts[parts.length - 1] === "ro";
+    const mountTarget = isReadOnly ? parts[parts.length - 2] : parts[parts.length - 1];
+    return mountTarget === target && isReadOnly === requireReadOnly;
+  });
+}
+
+/**
+ * Returns the labels of any hardened flags MISSING from `argv` (empty array ⇒
+ * the full hardened posture is present). See {@link HARDENED_FLAG_CHECKS}. Pure
+ * — {@link runReview} calls it just before spawn and fails the job closed (with
+ * a loud log) if it returns anything non-empty.
+ */
+export function findMissingHardenedFlags(argv: readonly string[]): string[] {
+  return HARDENED_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
 }
 
 /**
@@ -450,8 +596,38 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     mountDir,
     outDir: output.outDir,
     gatewaySocketDir: params.gatewaySocketDir,
+    dockerBin,
     config,
   });
+
+  // Runtime fail-closed preflight (task_bfaf / CTO edit #3 "or preflight" leg),
+  // defence-in-depth over the M8-B1 build-time floor golden. Assert the fully-
+  // templated argv still carries the complete hardened posture (and that the
+  // `.git`-stripped `/work` mount really has no `.git`) BEFORE we spawn a
+  // container over untrusted PR content — never launch an under-hardened
+  // sandbox. Both checks resolve `{ ok: false }` (never throw) per this
+  // module's contract, and log loudly so an operator sees exactly which
+  // invariant regressed.
+  const missingFlags = findMissingHardenedFlags(dockerArgs);
+  if (missingFlags.length > 0) {
+    console.error(
+      `[reviewer] FAIL-CLOSED: refusing to launch review container — hardened flag preflight ` +
+        `failed, missing: ${missingFlags.join(", ")}. This is a posture regression (see ` +
+        `reviewer.ts findMissingHardenedFlags / the M8-B1 floor golden); no container was started.`,
+    );
+    await output.cleanup().catch(() => {});
+    return { ok: false, reason: `hardened-flag preflight failed: missing ${missingFlags.join(", ")}` };
+  }
+  try {
+    await assertGitStripped(mountDir);
+  } catch (err) {
+    console.error(
+      `[reviewer] FAIL-CLOSED: refusing to launch review container — /work mount is not ` +
+        `.git-stripped (${errorMessage(err)}); no container was started.`,
+    );
+    await output.cleanup().catch(() => {});
+    return { ok: false, reason: `review mount preflight failed: ${errorMessage(err)}` };
+  }
 
   const payload = buildPromptPayload({ prTitle, prBody, changedFiles, diff, incremental });
 

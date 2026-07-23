@@ -95,7 +95,17 @@ const rawConfigSchema = z
         memory: z.string().min(1).default("4g"),
         cpus: z.string().min(1).default("2"),
         pids_limit: z.number().int().positive().default(256),
-        docker_bin: z.string().min(1).default("docker"),
+        // M8-B2: the review-container runtime. Defaults to `podman` (rootless,
+        // no root daemon, no `docker` group) — the M8 "crun floor" rootless
+        // substrate (docs/design/cto-decision-brief.md §5). Any docker-
+        // compatible CLI still works via this seam (set it to `docker` or a
+        // full path). reviewer.ts keys the one rootless-only argv difference —
+        // `--userns=keep-id` — off whether this binary's basename is `podman`
+        // (see isPodmanBinary), so a `docker` value reproduces the exact
+        // pre-M8-B2 argv. NOTE: running podman rootless as the `magpie` service
+        // user needs subuid/subgid + linger provisioning; that installer/
+        // systemd work is M8-D3 (task_67aa).
+        docker_bin: z.string().min(1).default("podman"),
       })
       .strict()
       .prefault({}),
@@ -181,7 +191,7 @@ export interface Config {
     cpus: string;
     /** `docker run --pids-limit`. */
     pidsLimit: number;
-    /** Path to the docker (or docker-compatible, e.g. podman) CLI binary. */
+    /** Path to the review-container runtime CLI. Defaults to `podman` (rootless; M8-B2); any docker-compatible CLI works. See config schema above. */
     dockerBin: string;
   };
   gateway: {

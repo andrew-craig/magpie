@@ -1,5 +1,11 @@
 // Best-effort orphan-container cleanup for the magpie orchestrator (M3-D).
 //
+// Runtime-neutral: this reaps orphans via the same `config.container.dockerBin`
+// seam the launcher uses, and the four verbs it needs — `version`,
+// `ps -aq --filter name=magpie-`, `kill`, `rm -f` — are byte-identical under
+// rootless podman (the M8-B2 default) and docker, so the docker→podman port
+// needs NO change here (empirically confirmed against podman 4.3.1).
+//
 // Every review job's container is normally removed by `docker run --rm`
 // (see reviewer.ts) the instant it exits, and the timeout/abort path
 // additionally `docker kill`s it directly (also reviewer.ts). Neither of

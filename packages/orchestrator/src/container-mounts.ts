@@ -6,7 +6,7 @@
 // results into the actual `docker run` args; this module doesn't know or
 // care what container consumes its output.
 
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -56,6 +56,45 @@ export async function prepareReviewMount(workspaceDir: string): Promise<string> 
   }
   await rm(join(workspaceDir, ".git"), { recursive: true, force: true });
   return workspaceDir;
+}
+
+/**
+ * Thrown by {@link assertGitStripped} when a `.git` entry is still present in a
+ * directory about to be bind-mounted read-only at `/work`.
+ */
+export class GitNotStrippedError extends Error {
+  constructor(mountDir: string) {
+    super(
+      `review mount ${mountDir} still contains a .git directory — refusing to mount it into the ` +
+        `review container (a live .git could trigger a lazy blob fetch or a git invocation that ` +
+        `reaches origin; see prepareReviewMount and PLAN.md §4)`,
+    );
+    this.name = "GitNotStrippedError";
+  }
+}
+
+/**
+ * Fail-closed runtime assertion (task_bfaf) that `mountDir` has NO `.git` entry
+ * — the mount-preparation counterpart to reviewer.ts's `findMissingHardenedFlags`
+ * argv preflight, extending the pinned hardened posture beyond the `docker run`
+ * argv (which the M8-B1 golden covers) to the `.git`-stripped read-only `/work`
+ * mount (which it does not). {@link prepareReviewMount} strips `.git`; this
+ * re-checks it immediately before launch so a strip that silently did not take
+ * effect (a permission error swallowed upstream, a `.git` re-materialised by a
+ * concurrent process, a future refactor that drops the strip) FAILS the job
+ * closed instead of mounting a live `.git` into the reviewer. Throws
+ * {@link GitNotStrippedError} if `.git` is present; resolves silently otherwise.
+ */
+export async function assertGitStripped(mountDir: string): Promise<void> {
+  try {
+    await access(join(mountDir, ".git"));
+  } catch {
+    // `.git` is absent (access rejected) — the required posture. This is the
+    // success path.
+    return;
+  }
+  // `access` resolved ⇒ `.git` still exists ⇒ posture violated.
+  throw new GitNotStrippedError(mountDir);
 }
 
 /** Result of {@link createOutputDir}. */

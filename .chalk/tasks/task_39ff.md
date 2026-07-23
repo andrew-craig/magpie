@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [microvm,security]
-blocked_by: [task_08ec,task_2d6c,task_b3f7,task_76d6]
+blocked_by: [task_2d6c,task_b3f7,task_76d6]
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:10Z
-updated_at: 2026-07-22T12:57:55Z
+updated_at: 2026-07-23T08:28:41Z
 ---
 Brief §8 phase 3: the core port. Launch the reviewer as a rootless KVM micro-VM (podman +
 krun OCI runtime) end-to-end, with the hardened crun tier remaining as the feature-flagged
