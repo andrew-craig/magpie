@@ -85,3 +85,61 @@ Deferred / out of scope (documented):
       controller (bug_df2d). Mechanics proven with a hardened-minus-`--memory` rootless run.
 - [ ] systemd/install rootless provisioning (drop docker group, `--user` unit, subuid/linger) = M8-D3
       (task_67aa).
+
+---
+
+## Review (2026-07-23) — branch `m8-b2-rootless-substrate` (NOT pushed; no PR — CTO-gated)
+
+Ported the reviewer launch path from rootful docker to **rootless podman + crun as the default
+runtime**, keeping the exact hardened flag set, uid split provably intact, and folded in task_bfaf.
+
+**podman is now the default** (`config.container.dockerBin` default `docker` → `podman`;
+config.example.toml + comments updated). docker stays fully supported via the same seam.
+
+**The one rootless argv change — `--userns=keep-id` — is added CONDITIONALLY (podman only).**
+Empirically required on this host: with rootless podman, `--user <hostuid>` maps through the subuid
+range so `/out` writes get EPERM (silently failing every review); `keep-id` maps the invoking uid
+straight through so `/out/findings.json` comes back owned by the orchestrator. Real docker
+hard-errors on the flag, so it is gated on `isPodmanBinary(basename===podman)`. Consequence for the
+merge-blocker floor test: the **M8-B1 docker floor golden is byte-for-byte UNCHANGED and green**
+(its fixed config uses `dockerBin:"docker"`), and a **new podman golden** pins the shipped-default
+posture (= floor golden + exactly `--userns=keep-id`, adjacent to `--user`). Both drift-protected.
+
+**Files changed:** `reviewer.ts` (isPodmanBinary, conditional keep-id, `findMissingHardenedFlags`
+runtime preflight + `assertGitStripped` wired fail-closed before spawn), `container-mounts.ts`
+(`assertGitStripped` + `GitNotStrippedError`), `config.ts` + `config.example.toml` (podman default),
+`config.test.ts` (default assertion), `docker.ts` + `orphan-cleanup.ts` (runtime-neutral messaging;
+their argv is byte-identical under podman — no change needed). New tests: `reviewer-podman-argv`
+(+golden), `reviewer-hardened-preflight`, `uid-split`, container-mounts posture cases.
+
+**task_bfaf folded in:** (1) runtime fail-closed preflight `findMissingHardenedFlags` asserts the
+full hardened posture on the real templated argv immediately before spawn (loud log + `{ok:false}`,
+never launches under-hardened); (2) `assertGitStripped` extends the pinned posture to the mount prep
+(the `.git`-stripped `/work`) the golden doesn't cover.
+
+**uid split (merge blocker):** grep assertion `uid-split.test.ts` proves the orchestrator reads
+only 4 allowlisted `MAGPIE_*` env vars, never a provider/LLM-key-shaped var; Config has no
+provider-key field; reviewer.ts injects only the per-job gateway VIRTUAL key; positive control
+confirms the real `MAGPIE_GATEWAY_OPENROUTER_KEY` lives in the separate gateway package. uid layout
+documented in the test header. No commit routes gateway creds through the orchestrator.
+
+**Tests:** full `npm test` green — gateway 66, orchestrator 282, review-extension 11. tsc clean,
+build clean. Negative control verified: dropping `--cap-drop=ALL` fails the floor golden + podman
+golden + runtime preflight, then reverted.
+
+**Live rootless-podman e2e — PARTIAL / full-pipeline DEFERRED.** Launcher mechanics PROVEN on real
+rootless podman 4.3.1 + crun (as uid 1000): the exact hardened flag set (minus `--memory`) launches;
+keep-id → `/out/findings.json` written back owned by the orchestrator uid; `/work` + rootfs
+read-only reject writes; `/run/gw` mounts; only `lo` present (`--network none`). **Full end-to-end
+pipeline (real magpie-reviewer image + gateway + GitHub App) deferred**, blocked on this host by
+(a) `--memory` failing CLOSED under rootless crun because the kernel boots `cgroup_disable=memory`
+so the `memory` controller isn't delegated (pre-existing **bug_df2d**, a host gap, NOT a port
+defect — I did NOT drop `--memory`), and (b) standing up the full gateway/GitHub-App/reviewer-image
+stack non-interactively. To run it: a host with the `memory` cgroup v2 controller delegated to the
+service user + subuid/subgid + linger (M8-D3/task_67aa installer work).
+
+**Open risks:** (1) bug_df2d — hosts without the memory controller can't run the full hardened argv
+rootless; a cgroup-memory preflight (the shelved M6-E `cgroup-preflight.ts`) would fail-fast with a
+clear message; deferred to M8-D3. (2) The systemd unit still grants the docker group / isn't a
+rootless `--user` unit — flipping the config default to podman without the M8-D3 systemd work means
+a redeploy needs that provisioning to actually run rootless; called out in config.example.toml.
