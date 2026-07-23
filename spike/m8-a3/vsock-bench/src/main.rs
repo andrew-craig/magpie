@@ -177,8 +177,11 @@ fn summarize(transport: &str, phase: &str, metric: &str, mut samples: Vec<i128>)
 }
 
 fn serve(path: &str) -> ! {
+    // `unlink` needs a NUL-terminated C string; `path.as_ptr()` on a &str is
+    // NOT terminated (UB — reads past the end, could unlink an unrelated path).
+    let cpath = std::ffi::CString::new(path).expect("socket path has no interior NUL");
     unsafe {
-        let _ = libc::unlink(path.as_ptr() as *const libc::c_char); // best-effort
+        let _ = libc::unlink(cpath.as_ptr()); // best-effort
         let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if fd < 0 {
             die("server socket", 30);
