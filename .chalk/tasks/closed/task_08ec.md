@@ -2,14 +2,14 @@
 id: task_08ec
 title: M8-B2: rootless substrate — docker→rootless podman+crun port, orchestrator ⟂ gateway uid split preserved (merge blocker)
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [security,merge-blocker,substrate]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:03Z
-updated_at: 2026-07-23T01:44:24Z
+updated_at: 2026-07-23T08:28:41Z
 ---
 Adopt Proposal B's rootless substrate WITHOUT B's as-written secret regression. CTO edit 1 makes
 this a merge blocker: the orchestrator ⟂ gateway uid separation must hold in every tier from the

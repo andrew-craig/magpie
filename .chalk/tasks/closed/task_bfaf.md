@@ -2,14 +2,14 @@
 id: task_bfaf
 title: M8-B1b: runtime crun-floor preflight assertion + mount-prep/.git-strip coverage
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-22T21:02:13Z
-updated_at: 2026-07-22T21:02:13Z
+updated_at: 2026-07-23T08:28:41Z
 ---
 
 
