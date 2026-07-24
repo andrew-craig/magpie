@@ -2,14 +2,14 @@
 id: bug_df2d
 title: Reviewer --memory limit silently unenforced when memory cgroup is disabled
 type: bug
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-19T22:42:45Z
-updated_at: 2026-07-23T12:45:16Z
+updated_at: 2026-07-24T13:04:40Z
 ---
 
 ## Problem
