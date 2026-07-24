@@ -118,6 +118,33 @@ const mintResponseSchema = z
   .strict();
 
 /**
+ * Validates the gateway's `DELETE /admin/keys/:id` response shape (M5-D — see
+ * admin-server.ts's doc comment and packages/gateway/README.md's management-
+ * plane section). Same defensive-parse rationale as {@link mintResponseSchema}.
+ */
+const revokeResponseSchema = z
+  .object({
+    id: z.string().min(1),
+    revoked: z.boolean(),
+    spentUsd: z.number().optional(),
+    budgetUsd: z.number().optional(),
+  })
+  .strict();
+
+/**
+ * The gateway's authoritative final-spend snapshot for a just-revoked key
+ * (M5-D). Threaded into pipeline.ts's telemetry record as the COST figure of
+ * record, ahead of Pi's own self-reported usage (see reviewer.ts's
+ * `ReviewUsage`) — Pi's number is what the model claims it used; this is what
+ * the gateway actually debited against the key's budget from OpenRouter's own
+ * `usage.cost` (see packages/gateway/src/upstream.ts's `determineCost`).
+ */
+export interface GatewayKeyRevocation {
+  spentUsd: number;
+  budgetUsd: number;
+}
+
+/**
  * Per-call timeout for the loopback HTTP calls to the gateway's management
  * plane. The gateway is a local process answering trivial in-memory
  * mint/revoke operations, so a call that takes longer than this is hung, not
@@ -211,16 +238,26 @@ export async function mintGatewayKey(
  *
  * `DELETE {gateway.baseUrl}/admin/keys/:id` with `Authorization: Bearer
  * <masterKey>`. BEST-EFFORT and NEVER THROWS (see module doc comment): any
- * failure — unreachable gateway, unexpected status — is logged via `logger`
- * and swallowed. Safe to call more than once for the same id (the gateway's
+ * failure — unreachable gateway, unexpected status, unparseable/wrong-shaped
+ * body — is logged via `logger` and swallowed, resolving `undefined` rather
+ * than rejecting. Safe to call more than once for the same id (the gateway's
  * revoke endpoint is itself idempotent) and safe to call for an id that never
  * existed or has already expired.
+ *
+ * Resolves the key's final spend snapshot (M5-D — see admin-server.ts's
+ * `DELETE` response shape and {@link GatewayKeyRevocation}) on a well-formed
+ * `200 { revoked: true, ... }` response, or `undefined` on EVERY other
+ * outcome: an unknown/already-revoked id (`revoked: false`, no spend to
+ * report), a non-2xx status, an unreachable gateway, or a response that
+ * doesn't parse against {@link revokeResponseSchema}. Callers (pipeline.ts)
+ * must treat a missing spend as "gateway cost unavailable for this job", not
+ * as an error — the job's own outcome is never affected by this.
  */
 export async function revokeGatewayKey(
   gateway: GatewayAuthConfig,
   id: string,
   logger: GatewayLogger = consoleLogger,
-): Promise<void> {
+): Promise<GatewayKeyRevocation | undefined> {
   const url = joinUrl(gateway.gateway.baseUrl, `/admin/keys/${encodeURIComponent(id)}`);
   try {
     const res = await fetch(url, {
@@ -228,12 +265,36 @@ export async function revokeGatewayKey(
       headers: { authorization: `Bearer ${gateway.secrets.gatewayMasterKey}` },
       signal: AbortSignal.timeout(GATEWAY_REQUEST_TIMEOUT_MS),
     });
-    if (res.status !== 204) {
+    if (res.status !== 200) {
       const detail = await safeReadErrorDetail(res);
       logger.error({ event: "gateway-key-revoke-failed", id, status: res.status, detail });
+      return undefined;
     }
+
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch (err) {
+      logger.error({ event: "gateway-key-revoke-unparseable-response", id, error: errorMessage(err) });
+      return undefined;
+    }
+
+    const parsed = revokeResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      const detail = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+      logger.error({ event: "gateway-key-revoke-unexpected-response-shape", id, detail });
+      return undefined;
+    }
+
+    if (!parsed.data.revoked || parsed.data.spentUsd === undefined || parsed.data.budgetUsd === undefined) {
+      // Unknown/already-revoked id — nothing to report, not an error.
+      return undefined;
+    }
+
+    return { spentUsd: parsed.data.spentUsd, budgetUsd: parsed.data.budgetUsd };
   } catch (err) {
     logger.error({ event: "gateway-key-revoke-failed", id, error: errorMessage(err) });
+    return undefined;
   }
 }
 
@@ -270,6 +331,6 @@ export function revokeGatewayKeyFromConfig(
   config: Pick<Config, "gateway" | "secrets">,
   id: string,
   logger?: GatewayLogger,
-): Promise<void> {
+): Promise<GatewayKeyRevocation | undefined> {
   return revokeGatewayKey(config, id, logger);
 }

@@ -200,7 +200,7 @@ export interface ReviewUsage {
  */
 export type ReviewResult =
   | { ok: true; summary: string; findings: Finding[]; verdict: "approve" | "comment"; usage?: ReviewUsage }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; usage?: ReviewUsage };
 
 /** Docker's allowed container/name-component charset. */
 const DOCKER_NAME_UNSAFE_RE = /[^a-zA-Z0-9_.-]/g;
@@ -800,13 +800,25 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         stdoutBuffer = "";
       }
 
+      // Best-effort usage/cost telemetry (M5-D, task_8a10) for the three
+      // early-exit failure paths below (timeout, abort, non-zero exit): these
+      // return before the code===0 branch's own `usage` computation (which
+      // relies on `agentEndMessages`/a clean finish that never arrived here),
+      // but whatever assistant turns DID stream over stdout before the kill
+      // are still in `assistantMessages` — summarize those directly so a
+      // run that burned real tokens/cost before being killed still reports
+      // it, rather than silently dropping the only signal for exactly the
+      // "runaway cost" cases this telemetry exists to surface. `undefined`
+      // when no assistant turn was ever parsed (see summarizeUsage).
+      const earlyUsage = summarizeUsage(assistantMessages);
+
       if (timedOut) {
-        finish({ ok: false, reason: `timeout after ${jobTimeoutSeconds}s` });
+        finish({ ok: false, reason: `timeout after ${jobTimeoutSeconds}s`, usage: earlyUsage });
         return;
       }
 
       if (aborted) {
-        finish({ ok: false, reason: "aborted" });
+        finish({ ok: false, reason: "aborted", usage: earlyUsage });
         return;
       }
 
@@ -816,6 +828,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         finish({
           ok: false,
           reason: `review container exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
+          usage: earlyUsage,
         });
         return;
       }
@@ -874,16 +887,16 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             const last = messages[messages.length - 1];
             if (last && (last.stopReason === "error" || last.errorMessage)) {
               const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
-              finish({ ok: false, reason: `pi review failed: ${detail}` });
+              finish({ ok: false, reason: `pi review failed: ${detail}`, usage });
               return;
             }
-            finish({ ok: false, reason: "pi did not call report_findings" });
+            finish({ ok: false, reason: "pi did not call report_findings", usage });
             return;
           }
 
           const parsed = parseFindings(findingsRaw);
           if (!parsed.ok) {
-            finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}` });
+            finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}`, usage });
             return;
           }
 

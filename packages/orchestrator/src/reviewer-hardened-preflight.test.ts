@@ -36,6 +36,7 @@ const CONFIG: Config = {
     perJobBudgetUsd: 0.5,
     ttlMarginSeconds: 120,
   },
+  telemetry: { path: "/tmp/magpie-telemetry-test.jsonl" },
   secrets: { webhookSecret: "w", githubPrivateKey: "k", gatewayMasterKey: "m" },
 };
 
