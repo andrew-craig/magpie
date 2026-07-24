@@ -70,6 +70,52 @@ set -euo pipefail
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (-e OPENROUTER_API_KEY=...) -- see docker/reviewer/README.md}"
 : "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set (-e OPENAI_BASE_URL=<gateway proxy URL>) -- see docker/reviewer/README.md}"
+# Non-secret operator config choice (see reviewer.ts's buildReviewDockerArgs
+# and packages/orchestrator/src/config.ts's container.require_memory_limit),
+# always set by reviewer.ts as of bug_df2d -- default to the fail-closed
+# value if somehow unset (e.g. an older orchestrator, or this image run by
+# hand) so an *absent* env var can never accidentally mean "run unconfined".
+: "${MAGPIE_REQUIRE_MEMORY_LIMIT:=true}"
+
+# ---------------------------------------------------------------------------
+# bug_df2d: fail-closed in-container memory-ceiling assertion. reviewer.ts
+# passes `--memory=<config.container.memory>` on every `docker/podman run` of
+# this image -- the hard cap bounding how much host RAM a single, possibly
+# prompt-injected review job can consume. That flag only does anything if the
+# kernel's cgroup v2 `memory` controller was actually available and delegated
+# when the container was created; some hosts don't have it (e.g. Raspberry Pi
+# firmware defaults boot with `cgroup_disable=memory`), in which case Docker
+# silently ACCEPTS the flag and discards it (a stderr warning on the HOST,
+# invisible from in here) instead of erroring. packages/orchestrator/src/
+# cgroup-preflight.ts already checks this on the HOST at orchestrator
+# startup, before any container is even launched -- this is the
+# defence-in-depth backstop that checks the ACTUAL enforced state from
+# INSIDE the container that matters, per job, in case that startup check was
+# ever wrong (or the controller was revoked/un-delegated after startup).
+#
+# Cgroup v2's per-cgroup memory ceiling is exposed at /sys/fs/cgroup/memory.max
+# inside the container's own cgroup namespace (visible regardless of the
+# --read-only root filesystem, since /sys/fs/cgroup is never part of it). Its
+# value is either a finite byte count (the limit is enforced) or the literal
+# string "max" (no limit -- i.e. NOT enforced, whether because --memory was
+# never passed or because the host silently discarded it). A cgroup v1 host
+# (or any host where this file doesn't exist at all) can't be verified this
+# way either, so it is conservatively treated the exact same way: unverifiable
+# is not enforced.
+magpie_memory_max_raw=""
+if [ -r /sys/fs/cgroup/memory.max ]; then
+  magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+fi
+
+if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
+  magpie_memory_unenforced_detail="/sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} -- the --memory limit this container was launched with is NOT being enforced by the kernel"
+  if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
+    echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
+  else
+    echo "magpie-reviewer: refusing to run: ${magpie_memory_unenforced_detail}. Set [container] require_memory_limit = false in the orchestrator's config.toml if you understand the risk and want to run anyway (see INSTALL.md/QUICKSTART.md for how to enable the memory controller on your host instead). Aborting before Pi starts." >&2
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # M4-E: fail-closed startup confinement assertions. PLAN.md milestone 4's
