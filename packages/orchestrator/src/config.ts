@@ -93,6 +93,19 @@ const rawConfigSchema = z
             "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed",
           ),
         memory: z.string().min(1).default("4g"),
+        // Whether Magpie refuses to start (and refuses to launch review
+        // containers — see reviewer.ts's MAGPIE_REQUIRE_MEMORY_LIMIT env var)
+        // when the kernel's cgroup v2 `memory` controller is unavailable, so
+        // the `memory` limit above would otherwise be silently unenforced
+        // (see cgroup-preflight.ts and bug_df2d). Some hosts boot with the
+        // controller disabled (e.g. Raspberry Pi firmware defaults ship
+        // `cgroup_disable=memory` — see INSTALL.md/QUICKSTART.md); set this
+        // to `false` on such a host to run anyway, accepting an unenforced
+        // memory ceiling, rather than being unable to start Magpie at all.
+        // Default `true`: fail closed, matching Magpie's asserted-confinement
+        // posture (M7 "Design D") — a hardening flag that can silently become
+        // a no-op is exactly the class of gap that posture exists to catch.
+        require_memory_limit: z.boolean().default(true),
         cpus: z.string().min(1).default("2"),
         pids_limit: z.number().int().positive().default(256),
         // M8-B2: the review-container runtime. Defaults to `podman` (rootless,
@@ -187,6 +200,13 @@ export interface Config {
     image: string;
     /** `docker run --memory` limit, e.g. "4g". */
     memory: string;
+    /**
+     * Whether Magpie fails closed (refuses to start, refuses to launch review
+     * containers) when the cgroup v2 `memory` controller is unavailable, so
+     * `memory` above would be silently unenforced. See cgroup-preflight.ts.
+     * Default `true`.
+     */
+    requireMemoryLimit: boolean;
     /** `docker run --cpus` limit, e.g. "2". */
     cpus: string;
     /** `docker run --pids-limit`. */
@@ -472,6 +492,7 @@ export function loadConfig(configPath?: string): Config {
     container: {
       image: data.container.image,
       memory: data.container.memory,
+      requireMemoryLimit: data.container.require_memory_limit,
       cpus: data.container.cpus,
       pidsLimit: data.container.pids_limit,
       dockerBin: data.container.docker_bin,

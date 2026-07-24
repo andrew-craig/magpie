@@ -98,6 +98,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
     container: {
       image: "magpie-reviewer:0.1.0",
       memory: "4g",
+      requireMemoryLimit: true,
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",
@@ -294,6 +295,14 @@ describe("runReview", () => {
     const baseUrlIdx = argv.indexOf("OPENAI_BASE_URL=http://127.0.0.1:4000/v1");
     expect(baseUrlIdx).toBeGreaterThan(0);
     expect(argv[baseUrlIdx - 1]).toBe("-e");
+
+    // -e MAGPIE_REQUIRE_MEMORY_LIMIT=<true|false> (bug_df2d): non-secret, so
+    // passed inline like OPENAI_BASE_URL — lets the in-container `memory.max`
+    // assertion (docker/reviewer/entrypoint.sh) honour the same escape hatch
+    // as the orchestrator-host-level startup preflight (cgroup-preflight.ts).
+    const requireMemoryLimitIdx = argv.indexOf("MAGPIE_REQUIRE_MEMORY_LIMIT=true");
+    expect(requireMemoryLimitIdx).toBeGreaterThan(0);
+    expect(argv[requireMemoryLimitIdx - 1]).toBe("-e");
   });
 
   it("passes the provider key via env (bare -e OPENROUTER_API_KEY) and never as an argv token", async () => {
