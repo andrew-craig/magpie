@@ -101,14 +101,24 @@ set -euo pipefail
 # never passed or because the host silently discarded it). A cgroup v1 host
 # (or any host where this file doesn't exist at all) can't be verified this
 # way either, so it is conservatively treated the exact same way: unverifiable
-# is not enforced.
+# is not enforced. NOTE: Magpie requires the cgroup v2 unified hierarchy (its
+# default rootless-Podman runtime does too) -- on a legacy cgroup v1 host the
+# per-container ceiling lives elsewhere (memory.limit_in_bytes) and is NOT read
+# here, so v1 is intentionally reported as unverifiable; see INSTALL.md.
+#
+# CGROUPNS ASSUMPTION: this reads the container's OWN cgroup's memory.max, which
+# is only what /sys/fs/cgroup/memory.max resolves to under a PRIVATE cgroup
+# namespace -- the cgroup v2 default for both docker and podman, and what Magpie
+# uses (it never passes --cgroupns=host). Under --cgroupns=host this would read
+# the host ROOT cgroup's memory.max ("max") and false-positive; don't add that
+# flag without revisiting this check.
 magpie_memory_max_raw=""
 if [ -r /sys/fs/cgroup/memory.max ]; then
   magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
 fi
 
 if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
-  magpie_memory_unenforced_detail="/sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} -- the --memory limit this container was launched with is NOT being enforced by the kernel"
+  magpie_memory_unenforced_detail="could not verify an enforced memory ceiling: /sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} (expected a finite byte count). The --memory limit this container was launched with is either unenforced (the host silently discarded it) or unverifiable here (e.g. a legacy cgroup v1 host -- Magpie requires the cgroup v2 unified hierarchy)"
   if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
     echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
   else

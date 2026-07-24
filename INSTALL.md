@@ -115,6 +115,14 @@ podman/crun instead fails every job at container creation). Magpie therefore
 require_memory_limit = true`), and the reviewer container re-checks it per
 job — see the bug this closes and `config.example.toml`.
 
+> **cgroup v2 required.** Magpie assumes the **cgroup v2 unified hierarchy**
+> (its default rootless-Podman runtime requires it anyway). On a legacy
+> cgroup v1 host `/sys/fs/cgroup/cgroup.controllers` won't exist and the
+> memory ceiling is verified differently (`memory.limit_in_bytes`), which
+> Magpie does **not** check — so a v1 host is reported as unverifiable and,
+> by default, fails the same startup/per-job guard. Run on a v2 host, or use
+> the `require_memory_limit = false` escape hatch below at your own risk.
+
 **Raspberry Pi caveat.** Pi firmware boots with `cgroup_disable=memory` on
 the kernel command line by default, which turns the controller off. To enable
 it, append `cgroup_enable=memory cgroup_memory=1` to the single line in

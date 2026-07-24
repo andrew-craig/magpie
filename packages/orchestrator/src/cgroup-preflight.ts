@@ -148,6 +148,19 @@ async function checkMemoryController(readFileFn: ReadFileFn): Promise<Controller
   // authoritative "is this possible at all" signal) — just skip the more
   // precise delegation check rather than false-failing on, say, a
   // permissions quirk reading our own cgroup file.
+  //
+  // TOPOLOGY CAVEAT: this inspects the ORCHESTRATOR process's own cgroup, which
+  // is NOT necessarily the cgroup subtree the review-container's cgroup is
+  // created in — under the default rootless-Podman runtime the container cgroup
+  // lands under the invoking user's slice, and the shipped magpie.service runs
+  // as a system unit (User=magpie, no Delegate=). So this delegation sub-check
+  // is a best-effort early hint, NOT authoritative: the root-level check above
+  // is the real "is this possible at all" gate, and docker/reviewer/
+  // entrypoint.sh's per-job memory.max assertion observes the ACTUAL enforced
+  // state from inside the real container regardless of where its cgroup lives.
+  // Kept because it cheaply catches the common same-slice misconfiguration; if
+  // it ever false-fails on a rootless topology, container.require_memory_limit
+  // = false is the operator escape hatch.
   let selfRaw: string;
   try {
     selfRaw = await readFileFn(SELF_CGROUP_PATH);
