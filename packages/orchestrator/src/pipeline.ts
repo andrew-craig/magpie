@@ -185,6 +185,8 @@ export interface JobOutcomeClassificationInputs {
   diffTooLarge: boolean;
   /** The gateway's final spend for this job's key, if one was minted and revoke reported it (see gateway.ts's `GatewayKeyRevocation`). */
   gatewaySpend?: TelemetryGatewaySpend;
+  /** True when the job body threw (and rethrew — the queue still marks it failed). A throw AFTER a successful `runReview` (e.g. `publishReview` raising on a GitHub API error) must never be recorded as `success`; see the `reviewResult.ok` branch below. */
+  threw?: boolean;
 }
 
 /**
@@ -203,7 +205,14 @@ export interface JobOutcomeClassificationInputs {
 export function classifyJobOutcome(inputs: JobOutcomeClassificationInputs): JobOutcome {
   if (inputs.earlyOutcome) return inputs.earlyOutcome;
   if (!inputs.reviewResult) return "error";
-  if (inputs.reviewResult.ok) return inputs.diffTooLarge ? "diff-too-large" : "success";
+  if (inputs.reviewResult.ok) {
+    // A genuine success/skip — UNLESS a later step threw. `reviewResult` is
+    // captured right after `runReview` returns, BEFORE publish/anchor/minimize;
+    // if any of those throws, the job fails (and the queue is told so via the
+    // rethrow) and must NOT be recorded as `success`. See `threw`.
+    if (inputs.threw) return "error";
+    return inputs.diffTooLarge ? "diff-too-large" : "success";
+  }
 
   const { reason } = inputs.reviewResult;
   if (reason === "aborted") return "aborted";
@@ -623,7 +632,16 @@ export function createReviewPipeline(
           // comment here too would double-handle the same job. `runReview` above
           // itself resolves promptly once `signal` aborts (never throws), so this
           // check catches that case before we ever call `publishReview`.
-          if (signal.aborted) return;
+          if (signal.aborted) {
+            // A genuine {ok:true} result is being DISCARDED unpublished because
+            // the job was aborted — record it as `aborted`, not `success`
+            // (classifyJobOutcome would otherwise see reviewResult.ok and call
+            // it success). A FAILED result already classifies itself more
+            // specifically from its own reason (timeout-kill/aborted/error), so
+            // leave earlyOutcome unset in that case.
+            if (result.ok) earlyOutcome = "aborted";
+            return;
+          }
 
           logger.info({
             event: "publishing-review",
@@ -734,14 +752,17 @@ export function createReviewPipeline(
       // on success AND, as of M5-D, on reviewer.ts's failure/kill paths);
       // `costUsd` is the gateway's authoritative spend when available, else
       // Pi's self-reported cost, else 0 (see telemetry.ts's COST OF RECORD).
-      const outcome = classifyJobOutcome({ earlyOutcome, reviewResult, diffTooLarge, gatewaySpend });
+      const threw = thrownReason !== undefined;
+      const outcome = classifyJobOutcome({ earlyOutcome, reviewResult, diffTooLarge, gatewaySpend, threw });
       const usage = reviewResult?.usage;
+      // Prefer the actual thrown error's message when the job threw — even if
+      // `reviewResult` is a failed result, the throw (e.g. a publish error) is
+      // the more proximate cause of this exit than the earlier review reason.
       const reason =
         outcome === "success"
           ? undefined
-          : reviewResult && !reviewResult.ok
-            ? reviewResult.reason
-            : (thrownReason ?? earlyOutcome ?? outcome);
+          : (thrownReason ??
+            (reviewResult && !reviewResult.ok ? reviewResult.reason : (earlyOutcome ?? outcome)));
       const costUsd = gatewaySpend?.spentUsd ?? usage?.costUsd ?? 0;
       await recordJobTelemetry({
         record: {

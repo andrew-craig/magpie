@@ -7,7 +7,9 @@
 // packages/gateway/src/admin-server.ts, which this module is written against
 // exactly: `POST /admin/keys` mints a fresh, budget-capped, TTL-limited
 // virtual key (`201 { id, key, socketDir }`); `DELETE /admin/keys/:id`
-// revokes one, idempotently (`204`, even for an unknown/already-revoked id).
+// revokes one, idempotently (`200 { id, revoked, spentUsd?, budgetUsd? }`,
+// even for an unknown/already-revoked id — `revoked: false` and no spend
+// fields in that case; see the M5-D final-spend snapshot on `revokeGatewayKey`).
 // This module is the orchestrator-side half of that contract: mint one fresh
 // virtual key per review job (mirrors github.ts's "mint fresh per job, no
 // cross-job cache" principle) and revoke it during the pipeline's cleanup, on

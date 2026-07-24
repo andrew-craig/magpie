@@ -1544,6 +1544,47 @@ describe("per-job cost telemetry (M5-D)", () => {
     expect(record.outcome).toBe("error");
     expect(record.reason).toMatch(/clone failed/);
   });
+
+  it("records a throw AFTER a successful review as outcome:'error' (a failed publish must not read as 'success')", async () => {
+    const { octokit, createReview, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    // The review runs and succeeds, but publishing it to GitHub fails — a
+    // real, common failure (rate limit, 422, network). publishReviewWithFindings
+    // has a two-level fallback (createReview retry, then issues.createComment),
+    // so reject all three to model an unusable publish path. The job must throw
+    // (so the queue marks it failed) AND telemetry must record 'error', not
+    // 'success', even though a valid {ok:true} reviewResult was captured.
+    createReview.mockRejectedValue(new Error("publish boom: 422"));
+    createComment.mockRejectedValue(new Error("publish boom: 422"));
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("All good."));
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.031, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).rejects.toThrow(/publish boom/);
+
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("error");
+    // The proximate cause (the thrown publish error) is the reason, not a
+    // stale review-success signal — and cost is still the gateway's spend.
+    expect(record.reason).toMatch(/publish boom/);
+    expect(record.costUsd).toBe(0.031);
+  });
 });
 
 // classifyJobOutcome is pure/exported — cover every distinct outcome class
@@ -1565,6 +1606,13 @@ describe("classifyJobOutcome (M5-D)", () => {
   it("ok result -> success, or diff-too-large when it's the synthesized skip", () => {
     expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: false })).toBe("success");
     expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: true })).toBe("diff-too-large");
+  });
+
+  it("a throw AFTER a successful review is 'error', never 'success' (e.g. publish failed)", () => {
+    // reviewResult is captured before publish; if a later stage throws, the
+    // job failed and must not be recorded as success/diff-too-large.
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: false, threw: true })).toBe("error");
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: true, threw: true })).toBe("error");
   });
 
   it("timeout and abort failure reasons are classified distinctly", () => {
