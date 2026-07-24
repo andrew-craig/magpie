@@ -2,14 +2,14 @@
 id: task_8a10
 title: M5-D: cost logging + per-job telemetry
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_d6c1
 remote_task_url: null
 created_at: 2026-07-10T21:52:34Z
-updated_at: 2026-07-23T12:43:41Z
+updated_at: 2026-07-24T13:04:28Z
 ---
 Wave 1 (parallel; independent of M5-B/C). PLAN.md §6 post-hoc cost logging.
 
