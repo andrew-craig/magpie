@@ -97,6 +97,34 @@ points (default `/etc/magpie/github-app.private-key.pem`), readable by
 sudo install -o magpie -g magpie -m 0600 app.pem /etc/magpie/github-app.private-key.pem
 ```
 
+## 6a. Host requirement: cgroup v2 memory controller
+
+Every review runs in a container launched with `--memory` (see
+`config.toml`'s `[container] memory`) so a single, possibly prompt-injected
+review job can't exhaust host RAM. That limit is only real if your kernel's
+cgroup v2 **`memory` controller** is enabled. Check:
+
+```
+cat /sys/fs/cgroup/cgroup.controllers   # the list must include `memory`
+```
+
+If `memory` is missing, the limit would be silently unenforced (rootful
+Docker accepts `--memory` and discards it with only a warning; rootless
+podman/crun instead fails every job at container creation). Magpie therefore
+**refuses to start** in that state by default (`[container]
+require_memory_limit = true`), and the reviewer container re-checks it per
+job — see the bug this closes and `config.example.toml`.
+
+**Raspberry Pi caveat.** Pi firmware boots with `cgroup_disable=memory` on
+the kernel command line by default, which turns the controller off. To enable
+it, append `cgroup_enable=memory cgroup_memory=1` to the single line in
+`/boot/firmware/cmdline.txt` (Raspberry Pi OS Bookworm; older images use
+`/boot/cmdline.txt`) — a later `cgroup_enable=memory` overrides the
+firmware's `cgroup_disable=memory` — then reboot and re-check the command
+above. If you must run without an enforced ceiling (e.g. you can't reboot
+right now), set `[container] require_memory_limit = false` in
+`/etc/magpie/config.toml`, accepting that a runaway review can OOM the host.
+
 ## 7. Start
 
 Boot order matters: the gateway must be up before the orchestrator (it mints
