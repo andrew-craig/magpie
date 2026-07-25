@@ -77,7 +77,6 @@
 //! (or that otherwise doesn't need `sg`/`newgrp` per invocation), which
 //! avoids this wrinkle entirely — it's specific to ad-hoc/interactive
 //! invocation, not the production shape.
-//!     only consumes already-prepared paths/ids via its CLI contract.
 //!
 //! # Exit codes
 //!
