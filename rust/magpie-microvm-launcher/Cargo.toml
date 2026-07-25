@@ -1,0 +1,48 @@
+[package]
+name = "magpie-microvm-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Host-side production launcher (M8-C0 / task_76d6) that links libkrun's C ABI directly to boot the Magpie reviewer image as a rootless, TSI-off, per-VM-vsock-gated micro-VM. Supersedes the `podman --runtime krun` front-end, which cannot reach these calls (see spike/m8-a1/frontend-investigation.md)."
+build = "build.rs"
+
+# DYNAMIC LINKING, NOT STATIC-MUSL (read before touching this file or
+# .github/workflows/rust.yml):
+#
+# Every other crate in this workspace builds a fully static musl binary (see
+# rust/Cargo.toml's workspace doc comment and rust.yml's "Verify static
+# linking" step) because they ship INSIDE the reviewer image or as a
+# standalone artifact with no host runtime dependency. This crate is
+# different: it is the ORCHESTRATOR-SIDE privileged process, and its entire
+# job is to link against `libkrun.so` — a host runtime library (see
+# spike/m8-a1/provision.sh) that must already be installed on the machine
+# running Magpie, the same way `docker`/`podman` must be installed today.
+# There is no static-musl build of libkrun to link against; treating this
+# crate as another static-binary product would be a category error.
+# Consequently:
+#   - It targets `aarch64-unknown-linux-gnu` (or `x86_64-unknown-linux-gnu`),
+#     NOT the `*-unknown-linux-musl` targets pinned in rust-toolchain.toml
+#     for the rest of the workspace.
+#   - `build.rs` in this crate adds `-L/usr/local/lib64 -lkrun` (see its own
+#     doc comment for why that path isn't on the linker's default search
+#     list even though it IS on the dynamic loader's, via
+#     /etc/ld.so.conf.d/libkrun.conf).
+#   - CI (`.github/workflows/rust.yml`) EXCLUDES this crate from the
+#     workspace-wide lint/build commands, because GitHub-hosted runners
+#     don't have libkrun installed and would fail to link it — see that
+#     file's comments for the exact exclusion and the follow-up this leaves
+#     (a libkrun-equipped self-hosted runner), which is out of this task's
+#     scope.
+
+[[bin]]
+name = "magpie-krun-launch"
+path = "src/main.rs"
+
+[dependencies]
+# Only dependency in the whole crate: uid_t/gid_t types, getrlimit/setrlimt,
+# and the vsock-adjacent libc primitives already used by vsock-client. No
+# CLI-parsing crate (e.g. clap) — the flag grammar here is small and fully
+# unit-tested by hand (see src/cli.rs), and this is a privileged component
+# where a smaller dependency tree is itself a security property.
+libc = "0.2"

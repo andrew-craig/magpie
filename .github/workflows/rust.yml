@@ -22,17 +22,32 @@
 #   workflow produces, and uploads the signatures as a workflow artifact.
 #
 # SCOPE NOTE (read before wiring this into a real release)
-#   Today `rust/` holds only scaffolding crates (`vsock-framing`, the
-#   `magpie-vsock-client` placeholder) — see docs/design/rust-adoption.md.
-#   Per that doc, a binary BAKED INTO the reviewer image is already covered
-#   by the image's digest pin + cosign signature and does not need signing
-#   here again; this workflow's `sign` job is for binaries shipped OUTSIDE
-#   the image (e.g. the future install-time KVM preflight probe, task_2f46,
-#   or the host-side libkrun launcher, task_76d6). The `sign` job signs the
+#   Today `rust/` holds the scaffolding crates (`vsock-framing`, the
+#   `magpie-vsock-client` placeholder) plus the production host-side libkrun
+#   launcher (`magpie-microvm-launcher`, task_76d6) — see
+#   docs/design/rust-adoption.md. Per that doc, a binary BAKED INTO the
+#   reviewer image is already covered by the image's digest pin + cosign
+#   signature and does not need signing here again; this workflow's `sign`
+#   job is for binaries shipped OUTSIDE the image (e.g. the future
+#   install-time KVM preflight probe, task_2f46). The `sign` job signs the
 #   placeholder binary purely to prove that lane end-to-end; it is not
 #   itself a shippable artifact. Wiring the real guest-side client
 #   (task_2d6c) into docker/reviewer/Dockerfile, and the real external
 #   binaries into scripts/pack-host.sh + release-host.yml, is future work.
+#
+#   `magpie-microvm-launcher` is DELIBERATELY EXCLUDED from every job below
+#   (`lint`'s clippy/test, `build`'s static-musl matrix). Unlike every other
+#   member, it dynamically links a HOST-INSTALLED `libkrun.so` (see that
+#   crate's Cargo.toml/build.rs doc comments) — a runtime dependency that
+#   isn't present on generic GitHub-hosted runners, so `cargo build`/`test`/
+#   `clippy` would fail at link time trying to build it here, and it has no
+#   static-musl form to belong in the `build` matrix at all (there is no
+#   static build of libkrun to link against). `cargo fmt --check` still
+#   covers it (rustfmt never links). Building/testing it for real needs a
+#   libkrun-equipped, `/dev/kvm`-capable host — see that crate's
+#   `smoke-test.sh` for the closest thing to a CI-shaped run today. Wiring a
+#   dedicated self-hosted runner for it is future work (tracked informally
+#   against whichever task next touches this launcher — e.g. task_39ff).
 
 name: rust
 
@@ -80,10 +95,13 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        # --exclude magpie-microvm-launcher: see this file's top-of-file
+        # SCOPE NOTE — that crate dynamically links a host-only libkrun.so
+        # not present on this runner.
+        run: cargo clippy --workspace --exclude magpie-microvm-launcher --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude magpie-microvm-launcher
 
   build:
     needs: lint
@@ -106,7 +124,10 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: cargo build --release
-        run: cargo build --release --workspace --target ${{ matrix.target }}
+        # --exclude magpie-microvm-launcher: see this file's top-of-file
+        # SCOPE NOTE — it dynamically links libkrun and has no static-musl
+        # form, so it does not belong in this static-binary release matrix.
+        run: cargo build --release --workspace --exclude magpie-microvm-launcher --target ${{ matrix.target }}
 
       # Fail closed if a future dependency (e.g. once task_2d6c/task_76d6
       # land) accidentally drags in a dynamically-linked libc — the whole
