@@ -70,7 +70,11 @@ function isAuthorized(req: http.IncomingMessage, masterKey: string): boolean {
  *
  * Routes:
  *  - `POST   /admin/keys`     — mint a virtual key AND bind its per-job proxy socket. Body: `{ jobId, model?, budgetUsd, ttlSeconds }`. 201 `{ id, key, socketDir }` (`socketDir` is the directory the orchestrator bind-mounts — see job-sockets.ts).
- *  - `DELETE /admin/keys/:id` — revoke a virtual key AND tear down its per-job socket. 204, idempotent (unknown/already-revoked id is still 204).
+ *  - `DELETE /admin/keys/:id` — revoke a virtual key AND tear down its per-job socket. 200
+ *    `{ id, revoked, spentUsd?, budgetUsd? }` (M5-D — the final spend snapshot, so the
+ *    orchestrator can log the gateway's own authoritative cost figure alongside Pi's
+ *    self-reported usage; see PLAN.md §6 / task_8a10). Idempotent: an unknown/already-revoked
+ *    id still responds 200 with `revoked: false` and no spend fields, never an error.
  *  - anything else            — 404.
  *
  * Every route requires `Authorization: Bearer <config.secrets.masterKey>`
@@ -138,10 +142,15 @@ async function handleRequest(
     const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(url.pathname);
     if (req.method === "DELETE" && revokeMatch) {
       const id = decodeURIComponent(revokeMatch[1]);
-      keyStore.revoke(id); // idempotent by contract — no existence check needed.
+      // idempotent by contract — no existence check needed; `spend` is
+      // `undefined` for an unknown/already-revoked id (see keystore.ts).
+      const spend = keyStore.revoke(id);
       await jobSockets.teardown(id); // also idempotent by contract — see job-sockets.ts.
-      res.writeHead(204);
-      res.end();
+      sendJson(res, 200, {
+        id,
+        revoked: spend !== undefined,
+        ...(spend !== undefined ? { spentUsd: spend.spentUsd, budgetUsd: spend.budgetUsd } : {}),
+      });
       return;
     }
 

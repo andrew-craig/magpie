@@ -5,9 +5,10 @@ import { join } from "node:path";
 import type { Octokit } from "@octokit/rest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "./config.js";
-import { createReviewPipeline } from "./pipeline.js";
+import { classifyJobOutcome, createReviewPipeline } from "./pipeline.js";
 import { buildReviewedShaMarker, MAGPIE_REVIEW_MARKER } from "./publisher.js";
 import type { JobDescriptor } from "./queue.js";
+import type { GatewayKeyRevocation } from "./gateway.js";
 import type { CreateWorkspaceParams, Workspace } from "./workspace.js";
 
 // NOTE: everything here runs fully offline end-to-end through `runJob` —
@@ -226,6 +227,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
+    telemetry: { path: "/tmp/magpie-telemetry-test.jsonl" },
     secrets: {
       webhookSecret: "test-webhook-secret",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
@@ -1334,6 +1336,313 @@ function capturingLogger() {
   };
   return { logger, events };
 }
+
+// M5-D (task_8a10): per-job cost/outcome telemetry. These drive the whole
+// pipeline (as elsewhere in this file) and assert that EXACTLY ONE
+// `event: "job-telemetry"` record is emitted per job, on both success and
+// failure/kill paths, carrying the outcome, duration, Pi's usage, and the
+// gateway's authoritative final spend (when a key was minted). The telemetry
+// path is pointed at a temp file under `root` so the durable JSONL sink is
+// also exercised without touching a real /var/lib/magpie.
+describe("per-job cost telemetry (M5-D)", () => {
+  /** testConfig() with the telemetry JSONL sink redirected under `root`. */
+  function telemetryConfig(): Config {
+    const config = testConfig();
+    return { ...config, telemetry: { path: join(root, "telemetry.jsonl") } };
+  }
+
+  /** The single `job-telemetry` record from a capturing logger's events (fails if not exactly one). */
+  function soleTelemetryRecord(events: Record<string, unknown>[]): Record<string, unknown> {
+    const records = events.filter((e) => e.event === "job-telemetry");
+    expect(records).toHaveLength(1);
+    return records[0];
+  }
+
+  /** Spy mint/revoke deps where revoke resolves a caller-chosen final spend (M5-D). */
+  function gatewaySpiesWithSpend(revocation: GatewayKeyRevocation | undefined) {
+    const minted = {
+      id: "gw-live-key-id",
+      key: "sk-magpie-live-should-never-leak",
+      socketDir: "/run/magpie-gateway/jobs/gw-live-key-id",
+    };
+    const mintGatewayKey = vi.fn(async (_config: Config, _jobId: string) => minted);
+    const revokeGatewayKey = vi.fn(async (_config: Config, _id: string) => revocation);
+    return { minted, mintGatewayKey, revokeGatewayKey };
+  }
+
+  it("emits one success record carrying the gateway's authoritative spend as costUsd", async () => {
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("All good."));
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.031, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const record = soleTelemetryRecord(events);
+    expect(record).toMatchObject({
+      outcome: "success",
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 7,
+      headSha: "deadbeef",
+      // Gateway's tracked spend (0.031), NOT Pi's self-reported cost (0.001).
+      costUsd: 0.031,
+      gateway: { keyId: "gw-live-key-id", spentUsd: 0.031, budgetUsd: 0.5 },
+    });
+    // Pi's self-reported usage is still carried alongside for cross-checking.
+    expect(record.usage).toMatchObject({ costUsd: 0.001, totalTokens: 30 });
+    expect(typeof record.durationMs).toBe("number");
+
+    // The durable JSONL sink got the same single record.
+    const lines = readFileSync(join(root, "telemetry.jsonl"), "utf-8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toMatchObject({ event: "job-telemetry", outcome: "success", costUsd: 0.031 });
+  });
+
+  it("classifies a generic review failure as outcome:'error' and still emits one record", async () => {
+    const { octokit, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptFailing());
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.0, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createComment).toHaveBeenCalledTimes(1); // failure note still posted
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("error");
+    expect(typeof record.reason).toBe("string");
+  });
+
+  it("reclassifies a failure as 'budget-exhausted' when the gateway's spend reached the budget", async () => {
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    // A review that fails without ever writing findings (e.g. the 402 surfaced
+    // to Pi as a failed model call) — the AUTHORITATIVE signal that it was a
+    // budget kill is the gateway's own spend >= budget, not the error text.
+    const piBinary = writeFakePi(fakePiScriptFailing());
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.5, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("budget-exhausted");
+    expect(record.costUsd).toBe(0.5);
+  });
+
+  it("emits an 'already-reviewed' record (no gateway key minted) on the M5-C dedup no-op", async () => {
+    const { octokit } = fakeOctokit({
+      title: "x",
+      body: "",
+      files: [],
+      diffText: "",
+      // A prior Magpie review for this exact head SHA -> dedup skip.
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 1,
+            node_id: "PRR_1",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker("deadbeef")}\nAll good.`,
+          }),
+        ],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend(undefined);
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(mintGatewayKey).not.toHaveBeenCalled();
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("already-reviewed");
+    expect(record.costUsd).toBe(0);
+    expect(record.gateway).toBeUndefined();
+  });
+
+  it("still emits exactly one record when a post-mint stage throws (outcome:'error')", async () => {
+    const throwingWorkspace = async (): Promise<never> => {
+      throw new Error("clone failed");
+    };
+    const { octokit } = fakeOctokit({ title: "x", body: "", files: [], diffText: "" });
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: throwingWorkspace,
+      logger,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).rejects.toThrow(/clone failed/);
+
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("error");
+    expect(record.reason).toMatch(/clone failed/);
+  });
+
+  it("records a throw AFTER a successful review as outcome:'error' (a failed publish must not read as 'success')", async () => {
+    const { octokit, createReview, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    // The review runs and succeeds, but publishing it to GitHub fails — a
+    // real, common failure (rate limit, 422, network). publishReviewWithFindings
+    // has a two-level fallback (createReview retry, then issues.createComment),
+    // so reject all three to model an unusable publish path. The job must throw
+    // (so the queue marks it failed) AND telemetry must record 'error', not
+    // 'success', even though a valid {ok:true} reviewResult was captured.
+    createReview.mockRejectedValue(new Error("publish boom: 422"));
+    createComment.mockRejectedValue(new Error("publish boom: 422"));
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("All good."));
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.031, budgetUsd: 0.5 });
+
+    const { runJob } = createReviewPipeline(telemetryConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await expect(runJob(testJob(), new AbortController().signal)).rejects.toThrow(/publish boom/);
+
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("error");
+    // The proximate cause (the thrown publish error) is the reason, not a
+    // stale review-success signal — and cost is still the gateway's spend.
+    expect(record.reason).toMatch(/publish boom/);
+    expect(record.costUsd).toBe(0.031);
+  });
+});
+
+// classifyJobOutcome is pure/exported — cover every distinct outcome class
+// directly (the pipeline tests above prove the wiring; these prove the mapping).
+describe("classifyJobOutcome (M5-D)", () => {
+  const okResult = { ok: true as const, summary: "s", findings: [], verdict: "comment" as const };
+  const fail = (reason: string) => ({ ok: false as const, reason });
+
+  it("earlyOutcome always wins", () => {
+    expect(classifyJobOutcome({ earlyOutcome: "already-reviewed", diffTooLarge: false })).toBe("already-reviewed");
+    expect(classifyJobOutcome({ earlyOutcome: "head-sha-mismatch", diffTooLarge: false })).toBe("head-sha-mismatch");
+    expect(classifyJobOutcome({ earlyOutcome: "aborted", diffTooLarge: false })).toBe("aborted");
+  });
+
+  it("no review result and no early outcome -> error (a pre-review throw)", () => {
+    expect(classifyJobOutcome({ diffTooLarge: false })).toBe("error");
+  });
+
+  it("ok result -> success, or diff-too-large when it's the synthesized skip", () => {
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: false })).toBe("success");
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: true })).toBe("diff-too-large");
+  });
+
+  it("a throw AFTER a successful review is 'error', never 'success' (e.g. publish failed)", () => {
+    // reviewResult is captured before publish; if a later stage throws, the
+    // job failed and must not be recorded as success/diff-too-large.
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: false, threw: true })).toBe("error");
+    expect(classifyJobOutcome({ reviewResult: okResult, diffTooLarge: true, threw: true })).toBe("error");
+  });
+
+  it("timeout and abort failure reasons are classified distinctly", () => {
+    expect(classifyJobOutcome({ reviewResult: fail("timeout after 600s"), diffTooLarge: false })).toBe("timeout-kill");
+    expect(classifyJobOutcome({ reviewResult: fail("aborted"), diffTooLarge: false })).toBe("aborted");
+  });
+
+  it("a generic failure is 'error', but 'budget-exhausted' when gateway spend >= budget", () => {
+    expect(classifyJobOutcome({ reviewResult: fail("pi did not call report_findings"), diffTooLarge: false })).toBe(
+      "error",
+    );
+    expect(
+      classifyJobOutcome({
+        reviewResult: fail("pi review failed: 402 budget exhausted for this key"),
+        diffTooLarge: false,
+        gatewaySpend: { keyId: "k", spentUsd: 0.5, budgetUsd: 0.5 },
+      }),
+    ).toBe("budget-exhausted");
+  });
+
+  it("a timeout still classifies as timeout-kill even if spend reached budget (kill reason wins over budget)", () => {
+    expect(
+      classifyJobOutcome({
+        reviewResult: fail("timeout after 600s"),
+        diffTooLarge: false,
+        gatewaySpend: { keyId: "k", spentUsd: 0.5, budgetUsd: 0.5 },
+      }),
+    ).toBe("timeout-kill");
+  });
+});
 
 describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () => {
   const AFTER = "deadbeef"; // matches testJob().headSha, so HEAD VERIFY passes

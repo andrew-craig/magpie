@@ -36,6 +36,13 @@ export interface MintKeyParams {
   ttlSeconds: number;
 }
 
+/** A revoked key's final spend snapshot — see {@link KeyStore.revoke} (M5-D). */
+export interface RevokedKeySpend {
+  id: string;
+  spentUsd: number;
+  budgetUsd: number;
+}
+
 /** Prefix on every minted virtual key, so one glance at a leaked string identifies it as a magpie gateway key. */
 const KEY_PREFIX = "sk-magpie-";
 
@@ -77,12 +84,21 @@ export class KeyStore {
    * unknown or already-revoked id is a silent no-op, never an error — the
    * orchestrator's cleanup path calls this unconditionally and must never
    * fail a job over a double-revoke race.
+   *
+   * Returns the entry's final `{ id, spentUsd, budgetUsd }` snapshot (taken
+   * BEFORE deletion) so the caller can surface the key's authoritative final
+   * spend — see admin-server.ts's `DELETE /admin/keys/:id`, added in M5-D so
+   * the orchestrator can log real gateway-tracked cost instead of only Pi's
+   * self-reported usage. Returns `undefined` for an unknown/already-revoked
+   * id — there is no spend to report for a key this store never held (or no
+   * longer holds).
    */
-  revoke(id: string): void {
+  revoke(id: string): RevokedKeySpend | undefined {
     const entry = this.#entries.get(id);
-    if (!entry) return;
+    if (!entry) return undefined;
     this.#entries.delete(id);
     this.#keyToId.delete(entry.key);
+    return { id: entry.id, spentUsd: entry.spentUsd, budgetUsd: entry.budgetUsd };
   }
 
   /**

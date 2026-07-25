@@ -116,9 +116,14 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 - `DELETE /admin/keys/:id` — revoke a virtual key AND tear down that job's per-job socket
   (`server.close()`, unlink the socket, remove the now-empty job directory).
   - Auth: same as above.
-  - **Idempotent**: revoking an unknown or already-revoked id still returns `204` — never an
-    error. The orchestrator's cleanup path calls this unconditionally and must never fail a job
-    over a double-revoke race.
+  - Response: `200 { "id": string, "revoked": boolean, "spentUsd"?: number, "budgetUsd"?: number }`.
+    `spentUsd`/`budgetUsd` are the key's final spend snapshot (M5-D), taken immediately before
+    deletion — this is the gateway's own authoritative cost figure the orchestrator logs
+    alongside Pi's self-reported usage (see `packages/orchestrator/src/telemetry.ts`). Present
+    only when `revoked` is `true`.
+  - **Idempotent**: revoking an unknown or already-revoked id still returns `200
+    { "id": ..., "revoked": false }` (no spend fields) — never an error. The orchestrator's
+    cleanup path calls this unconditionally and must never fail a job over a double-revoke race.
 - Any other path under this listener -> `404`.
 - **Every request on this plane is also checked against the socket's remote address** and
   rejected with `403` if it isn't loopback (`127.0.0.1`/`::1`) — defense-in-depth on top of the

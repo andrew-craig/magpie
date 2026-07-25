@@ -108,6 +108,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
+    telemetry: { path: "/tmp/magpie-telemetry-test.jsonl" },
     secrets: {
       webhookSecret: "test-webhook-secret",
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",

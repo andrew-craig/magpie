@@ -18,7 +18,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **bug_df2d** · P2 · open · Reviewer --memory limit silently unenforced when memory cgroup is disabled
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
-- **task_8a10** · P2 · open · M5-D: cost logging + per-job telemetry  (parent: epic_d6c1)
 - **task_9d2b** · P2 · open · RUST-3: cross-language contract-test harness — TS integration tests as the boundary contract for Rust binaries  (parent: epic_6955)
 - **task_df53** · P2 · open · M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)

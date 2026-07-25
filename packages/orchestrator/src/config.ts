@@ -155,6 +155,22 @@ const rawConfigSchema = z
       })
       .strict()
       .prefault({}),
+    telemetry: z
+      .object({
+        // Append-only JSONL sink for per-job cost/outcome telemetry (M5-D,
+        // task_8a10 — see telemetry.ts). One line per job: repo/PR/head SHA,
+        // outcome (success/diff-too-large/timeout-kill/budget-exhausted/...),
+        // wall-clock duration, Pi's self-reported token usage, and the
+        // gateway's own authoritative final spend when a gateway key was
+        // involved. Same host-visible-tree rationale as workspace.work_dir
+        // above: must be a path this process can create/append to. A dev box
+        // without /var/lib/magpie (or without write access to it) doesn't
+        // fail the job — recordJobTelemetry degrades to a log-line-only
+        // fallback (see telemetry.ts) rather than throwing.
+        path: z.string().min(1).default("/var/lib/magpie/telemetry.jsonl"),
+      })
+      .strict()
+      .prefault({}),
   })
   .strict();
 
@@ -216,6 +232,10 @@ export interface Config {
     perJobBudgetUsd: number;
     /** Extra seconds added to `limits.jobTimeoutSeconds` for the minted key's TTL, so it outlives the job's own wall-clock budget. */
     ttlMarginSeconds: number;
+  };
+  telemetry: {
+    /** Append-only JSONL path for per-job cost/outcome telemetry (M5-D — see telemetry.ts). */
+    path: string;
   };
   /** Secrets resolved from the environment (never sourced from the TOML file). */
   secrets: {
@@ -481,6 +501,9 @@ export function loadConfig(configPath?: string): Config {
       containerBaseUrl: data.gateway.container_base_url,
       perJobBudgetUsd: data.gateway.per_job_budget_usd,
       ttlMarginSeconds: data.gateway.ttl_margin_seconds,
+    },
+    telemetry: {
+      path: data.telemetry.path,
     },
     secrets: {
       webhookSecret: webhookSecret!,

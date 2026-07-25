@@ -157,8 +157,22 @@ describe("createAdminServer", () => {
       method: "DELETE",
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
     expect(keyStore.findByKey(key)).toBeUndefined();
+  });
+
+  it("DELETE /admin/keys/:id responds with the key's final spend (M5-D)", async () => {
+    const { baseUrl, keyStore } = await start();
+    const { id } = keyStore.mint({ budgetUsd: 1.5, ttlSeconds: 60 });
+    keyStore.recordSpend(id, 0.42);
+
+    const res = await fetch(`${baseUrl}/admin/keys/${id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; revoked: boolean; spentUsd: number; budgetUsd: number };
+    expect(body).toEqual({ id, revoked: true, spentUsd: 0.42, budgetUsd: 1.5 });
   });
 
   it("DELETE /admin/keys/:id also tears down that job's per-job socket", async () => {
@@ -177,19 +191,21 @@ describe("createAdminServer", () => {
       method: "DELETE",
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
 
     await expect(stat(path.join(socketDir, "gw.sock"))).rejects.toThrow();
     await expect(stat(socketDir)).rejects.toThrow();
   });
 
-  it("DELETE /admin/keys/:id is idempotent for an unknown id (200/204, not an error)", async () => {
+  it("DELETE /admin/keys/:id is idempotent for an unknown id (200, not an error, no spend fields)", async () => {
     const { baseUrl } = await start();
     const res = await fetch(`${baseUrl}/admin/keys/does-not-exist`, {
       method: "DELETE",
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; revoked: boolean; spentUsd?: number; budgetUsd?: number };
+    expect(body).toEqual({ id: "does-not-exist", revoked: false });
   });
 
   it("DELETE also requires the master key", async () => {

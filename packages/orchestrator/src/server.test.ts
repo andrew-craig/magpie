@@ -38,6 +38,7 @@ function testConfig(): Config {
       perJobBudgetUsd: 0.5,
       ttlMarginSeconds: 120,
     },
+    telemetry: { path: "/tmp/magpie-telemetry-test.jsonl" },
     secrets: {
       webhookSecret: WEBHOOK_SECRET,
       githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",

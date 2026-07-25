@@ -231,7 +231,7 @@ describe("mintGatewayKey", () => {
 
 describe("revokeGatewayKey", () => {
   it("DELETEs /admin/keys/:id with the master-key bearer auth", async () => {
-    const fake = await startFakeGateway({ status: 204 });
+    const fake = await startFakeGateway({ status: 200, json: { id: "abc123", revoked: true, spentUsd: 0.01, budgetUsd: 0.5 } });
     const logger = recordingLogger();
 
     await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", logger);
@@ -244,15 +244,58 @@ describe("revokeGatewayKey", () => {
     expect(logger.errors).toHaveLength(0);
   });
 
+  it("resolves the key's final spend snapshot on a 200 { revoked: true, ... } response (M5-D)", async () => {
+    const fake = await startFakeGateway({
+      status: 200,
+      json: { id: "abc123", revoked: true, spentUsd: 0.1234, budgetUsd: 0.5 },
+    });
+
+    const result = await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", recordingLogger());
+
+    expect(result).toEqual({ spentUsd: 0.1234, budgetUsd: 0.5 });
+  });
+
+  it("resolves undefined for an idempotent revoked:false response (unknown/already-revoked id)", async () => {
+    const fake = await startFakeGateway({ status: 200, json: { id: "abc123", revoked: false } });
+    const logger = recordingLogger();
+
+    const result = await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", logger);
+
+    expect(result).toBeUndefined();
+    expect(logger.errors).toHaveLength(0); // not an error — idempotent by contract
+  });
+
+  it("resolves undefined (and logs) on a 200 response with an unparseable body", async () => {
+    const fake = await startFakeGateway({ status: 200, raw: "<html>not json</html>" });
+    const logger = recordingLogger();
+
+    const result = await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", logger);
+
+    expect(result).toBeUndefined();
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]).toMatchObject({ event: "gateway-key-revoke-unparseable-response", id: "abc123" });
+  });
+
+  it("resolves undefined (and logs) on a 200 response with an unexpected shape", async () => {
+    const fake = await startFakeGateway({ status: 200, json: { unexpected: "shape" } });
+    const logger = recordingLogger();
+
+    const result = await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", logger);
+
+    expect(result).toBeUndefined();
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]).toMatchObject({ event: "gateway-key-revoke-unexpected-response-shape", id: "abc123" });
+  });
+
   it("url-encodes a revoke id so a surprising id can't break the request path", async () => {
-    const fake = await startFakeGateway({ status: 204 });
+    const fake = await startFakeGateway({ status: 200, json: { id: "a/b c", revoked: false } });
 
     await revokeGatewayKey(authConfig(fake.baseUrl), "a/b c", recordingLogger());
 
     expect(fake.requests[0].url).toBe("/admin/keys/a%2Fb%20c");
   });
 
-  it("is best-effort: a non-204 response is logged, not thrown", async () => {
+  it("is best-effort: a non-200 response is logged, not thrown", async () => {
     const fake = await startFakeGateway({ status: 500, raw: "internal error" });
     const logger = recordingLogger();
 
@@ -270,7 +313,7 @@ describe("revokeGatewayKey", () => {
   });
 
   it("bounds the revoke request with a 5s abort timeout so cleanup isn't delayed by a hung gateway", async () => {
-    const fake = await startFakeGateway({ status: 204 });
+    const fake = await startFakeGateway({ status: 200, json: { id: "abc123", revoked: false } });
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     try {
       await revokeGatewayKey(authConfig(fake.baseUrl), "abc123", recordingLogger());
@@ -308,6 +351,7 @@ describe("mintGatewayKeyFromConfig", () => {
         dockerBin: "docker",
       },
       gateway: { baseUrl, containerBaseUrl: "http://127.0.0.1:4000/v1", perJobBudgetUsd: 0.75, ttlMarginSeconds: 90 },
+      telemetry: { path: "/tmp/magpie-telemetry-test.jsonl" },
       secrets: {
         webhookSecret: "test-webhook-secret",
         githubPrivateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
@@ -346,13 +390,14 @@ describe("per-job lifecycle (mint -> ... -> revoke)", () => {
       ttlSeconds: 700,
       jobId: "job-key-1",
     });
-    fake.setResponse({ status: 204 });
-    await revokeGatewayKey(authConfig(fake.baseUrl), minted.id, recordingLogger());
+    fake.setResponse({ status: 200, json: { id: "job-key-1", revoked: true, spentUsd: 0, budgetUsd: 0.5 } });
+    const revocation = await revokeGatewayKey(authConfig(fake.baseUrl), minted.id, recordingLogger());
 
     expect(fake.requests).toHaveLength(2);
     expect(fake.requests[0].method).toBe("POST");
     expect(fake.requests[1].method).toBe("DELETE");
     expect(fake.requests[1].url).toBe("/admin/keys/job-key-1");
+    expect(revocation).toEqual({ spentUsd: 0, budgetUsd: 0.5 });
   });
 
   it("revoke still runs (and swallows failure) even if the run it wrapped failed — the key id is always cleaned up", async () => {

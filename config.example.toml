@@ -215,3 +215,25 @@ per_job_budget_usd = 0.5
 # cleaned up by an explicit revoke on cleanup rather than expiring mid-review.
 # Default: 120
 ttl_margin_seconds = 120
+
+[telemetry]
+# Per-job cost/outcome telemetry (M5-D, PLAN.md §6). After EVERY review
+# (success or failure), Magpie emits exactly one structured, greppable record
+# per job — repo, PR number, head SHA, outcome, wall-clock duration, Pi's
+# self-reported token usage, and the AUTHORITATIVE cost (the gateway's own
+# tracked spend for the job's virtual key, not Pi's self-report). The record
+# is always written as one JSON log line (captured by journald/systemd with no
+# extra setup) AND best-effort appended as one JSONL line to the file below.
+#
+# The `outcome` field distinguishes runaway-cost patterns at a glance:
+# success / diff-too-large / already-reviewed / head-sha-mismatch /
+# timeout-kill / aborted / budget-exhausted / error.
+#
+# If this path isn't writable (e.g. a dev box without /var/lib/magpie), the
+# JSONL append is skipped with a logged warning — the job is NOT failed, and
+# the same record is still on the log line. No dashboards are in scope; one
+# `grep telemetry.jsonl` (or `journalctl | grep job-telemetry`) is the query
+# interface.
+# Default: "/var/lib/magpie/telemetry.jsonl"
+# For local development, point this under your repo checkout or home dir.
+path = "/var/lib/magpie/telemetry.jsonl"

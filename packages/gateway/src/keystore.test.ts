@@ -38,12 +38,23 @@ describe("KeyStore", () => {
 
   it("revoke is idempotent: revoking an unknown id never throws, and revoking twice is a no-op the second time", () => {
     const store = createKeyStore();
-    expect(() => store.revoke("does-not-exist")).not.toThrow();
+    expect(store.revoke("does-not-exist")).toBeUndefined();
 
     const { id, key } = store.mint({ budgetUsd: 1, ttlSeconds: 60 });
     store.revoke(id);
     expect(store.findByKey(key)).toBeUndefined();
-    expect(() => store.revoke(id)).not.toThrow(); // second revoke, same id
+    expect(store.revoke(id)).toBeUndefined(); // second revoke, same id — no spend to report
+  });
+
+  it("revoke returns the final spend snapshot (id, spentUsd, budgetUsd) taken before deletion (M5-D)", () => {
+    const store = createKeyStore();
+    const { id, key } = store.mint({ budgetUsd: 2, ttlSeconds: 60 });
+    store.recordSpend(id, 0.75);
+
+    const result = store.revoke(id);
+
+    expect(result).toEqual({ id, spentUsd: 0.75, budgetUsd: 2 });
+    expect(store.findByKey(key)).toBeUndefined();
   });
 
   it("mint -> use (spend within budget) -> spend crosses budget -> isOverBudget flips true", () => {
