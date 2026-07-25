@@ -92,16 +92,24 @@ describe("assertMemoryControllerAvailable", () => {
     }
   });
 
-  it("throws MemoryControllerUnavailableError when present at the root but not delegated to this process", async () => {
+  it("warns and continues (does NOT throw) when present at the root but not delegated to this process — the delegation sub-check is advisory, not a hard gate", async () => {
+    // Regression test for the PR #54 review finding: a delegation miss is the
+    // least-authoritative signal (this process's cgroup may not be where the
+    // review container lands), so it must not hard-block startup — otherwise a
+    // topology like systemd DefaultMemoryAccounting=no would be unable to run
+    // even though the kernel has the controller and the container WOULD be
+    // enforced. The authoritative gates are the root check + the per-job
+    // in-container assertion.
     const readFileFn = fakeReadFile(NOT_DELEGATED_FILES);
+    const warnings: string[] = [];
 
-    expect.assertions(2);
-    try {
-      await assertMemoryControllerAvailable(testConfig(), readFileFn, () => {});
-    } catch (err) {
-      expect(err).toBeInstanceOf(MemoryControllerUnavailableError);
-      expect((err as Error).message).toMatch(/not delegated/);
-    }
+    await expect(
+      assertMemoryControllerAvailable(testConfig(), readFileFn, (m) => warnings.push(m)),
+    ).resolves.toBeUndefined();
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/WARNING/);
+    expect(warnings[0]).toMatch(/not delegated/);
   });
 
   it("throws MemoryControllerUnavailableError when the cgroup v2 files are unreadable (e.g. cgroup v1 host)", async () => {

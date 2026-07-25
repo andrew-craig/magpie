@@ -87,6 +87,16 @@ interface ControllerCheckResult {
   available: boolean;
   /** Human-readable detail, folded into the warning/error message. */
   detail: string;
+  /**
+   * Set when the check passed the two AUTHORITATIVE gates (kernel-wide root
+   * controller present) but a non-authoritative sub-check was inconclusive in
+   * a way worth surfacing — currently: the memory controller isn't delegated
+   * to THIS process's own cgroup. Advisory only: `available` stays `true` (see
+   * the delegation branch in {@link checkMemoryController} for why), and
+   * {@link assertMemoryControllerAvailable} logs it as a WARNING and continues
+   * rather than blocking startup.
+   */
+  warning?: string;
 }
 
 /** Parses a cgroup v2 `cgroup.controllers` file's space-separated contents into a Set. */
@@ -158,9 +168,18 @@ async function checkMemoryController(readFileFn: ReadFileFn): Promise<Controller
   // is the real "is this possible at all" gate, and docker/reviewer/
   // entrypoint.sh's per-job memory.max assertion observes the ACTUAL enforced
   // state from inside the real container regardless of where its cgroup lives.
-  // Kept because it cheaply catches the common same-slice misconfiguration; if
-  // it ever false-fails on a rootless topology, container.require_memory_limit
-  // = false is the operator escape hatch.
+  //
+  // Because it's the LEAST authoritative of the three signals, a delegation
+  // miss is a WARNING, not a hard startup gate (`available` stays `true`). It
+  // false-positives on legitimate topologies where the kernel has `memory` and
+  // the container WOULD be enforced but this process's own cgroup lacks the
+  // delegated controller (e.g. systemd `DefaultMemoryAccounting=no`, a hardened
+  // unit profile, or a non-systemd init). Making it a hard gate would block
+  // startup in those cases, and the only escape (`require_memory_limit=false`)
+  // would ALSO demote the authoritative in-container assertion to warn-only —
+  // so a false-positive on the weakest signal would end up disabling the
+  // strongest one. It stays advisory instead; the two hard gates are the
+  // root-level check and entrypoint.sh's per-job assertion.
   let selfRaw: string;
   try {
     selfRaw = await readFileFn(SELF_CGROUP_PATH);
@@ -196,13 +215,21 @@ async function checkMemoryController(readFileFn: ReadFileFn): Promise<Controller
 
   const selfControllers = parseControllers(selfControllersRaw);
   if (!selfControllers.has(MEMORY_CONTROLLER)) {
+    // Advisory, not a hard failure — see the TOPOLOGY CAVEAT above. The kernel
+    // has the controller (the authoritative gate passed); it just isn't
+    // delegated to THIS process's cgroup, which may or may not be where the
+    // review container lands. Surface it as a warning and let the per-job
+    // in-container assertion be the real enforcement check.
     return {
-      available: false,
-      detail:
+      available: true,
+      detail: "memory controller present at the host root (delegation to this process's own cgroup not detected)",
+      warning:
         `the kernel has the "memory" controller, but it is not delegated to this process's own ` +
-        `cgroup (${selfControllersPath} lists: ${[...selfControllers].join(", ") || "(none)"}) — the ` +
-        `service manager likely needs cgroup delegation enabled (e.g. systemd's Delegate=) for this ` +
-        `user/slice`,
+        `cgroup (${selfControllersPath} lists: ${[...selfControllers].join(", ") || "(none)"}). This is ` +
+        `often benign (the review container may run in a different cgroup subtree that IS enforced — the ` +
+        `per-job in-container assertion is the authoritative check), but if reviews fail with an ` +
+        `unenforced/creation error, the service manager likely needs cgroup delegation enabled (e.g. ` +
+        `systemd's Delegate=) for this user/slice`,
     };
   }
 
@@ -213,13 +240,17 @@ async function checkMemoryController(readFileFn: ReadFileFn): Promise<Controller
 }
 
 /**
- * Verifies the cgroup v2 `memory` controller is available (and, best-effort,
- * delegated to this process) before Magpie starts accepting webhooks — see
- * this module's doc comment for why. Resolves silently when available, or
- * when unavailable AND `config.container.requireMemoryLimit` is `false`
- * (logs a clear WARNING and continues in that case). Throws
- * {@link MemoryControllerUnavailableError} when unavailable AND
- * `requireMemoryLimit` is `true` (the default) — fail loud, never silent.
+ * Verifies the cgroup v2 `memory` controller is available before Magpie starts
+ * accepting webhooks — see this module's doc comment for why. The ONLY hard
+ * gate here is the authoritative kernel-wide root-controller check; a
+ * non-authoritative delegation miss resolves with a WARNING and continues (see
+ * {@link ControllerCheckResult.warning} and the TOPOLOGY CAVEAT in
+ * {@link checkMemoryController}). Resolves silently when fully available, logs a
+ * WARNING and continues when available-with-a-caveat or when unavailable AND
+ * `config.container.requireMemoryLimit` is `false`, and throws
+ * {@link MemoryControllerUnavailableError} only when the root controller is
+ * unavailable AND `requireMemoryLimit` is `true` (the default) — fail loud,
+ * never silent.
  *
  * `readFileFn`/`warn` default to the real `fs/promises.readFile` and
  * `console.warn`; cgroup-preflight.test.ts injects fakes for every branch.
@@ -230,7 +261,18 @@ export async function assertMemoryControllerAvailable(
   warn: (message: string) => void = (m) => console.warn(m),
 ): Promise<void> {
   const result = await checkMemoryController(readFileFn);
-  if (result.available) return;
+  if (result.available) {
+    // Passed the authoritative gate, but a non-authoritative sub-check (memory
+    // not delegated to our own cgroup) was inconclusive — surface it, don't
+    // block startup. The per-job in-container assertion remains the real check.
+    if (result.warning) {
+      warn(
+        `[magpie] WARNING: cgroup memory-controller preflight: ${result.warning}. Continuing ` +
+          `(the per-job in-container memory.max assertion is the authoritative enforcement check).`,
+      );
+    }
+    return;
+  }
 
   if (!config.container.requireMemoryLimit) {
     warn(

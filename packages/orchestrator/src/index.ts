@@ -75,6 +75,29 @@ export function logJobOutcome(outcome: JobOutcome, logger: JobOutcomeLogger = co
   );
 }
 
+/**
+ * Format a fatal startup error for the entrypoint's top-level catch. Known,
+ * operator-actionable startup failures (bad config, docker/podman unavailable,
+ * the cgroup memory controller unavailable) are rendered as a clean one-line
+ * `[magpie] <message>` — their messages are already written for a human, so a
+ * stack trace would only add noise. Anything else is an unexpected fault and
+ * gets the `fatal startup error:` prefix (the caller still logs it; a stack is
+ * available on the Error itself). Pure and exported so index.test.ts can assert
+ * the classification — in particular that a `MemoryControllerUnavailableError`
+ * (bug_df2d) is treated as a clean, actionable message, not an internal fault.
+ */
+export function formatStartupError(err: unknown): string {
+  if (
+    err instanceof ConfigError ||
+    err instanceof DockerUnavailableError ||
+    err instanceof MemoryControllerUnavailableError
+  ) {
+    return `[magpie] ${err.message}`;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return `[magpie] fatal startup error: ${message}`;
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
 
@@ -186,16 +209,7 @@ const isEntrypoint =
 
 if (isEntrypoint) {
   main().catch((err: unknown) => {
-    if (
-      err instanceof ConfigError ||
-      err instanceof DockerUnavailableError ||
-      err instanceof MemoryControllerUnavailableError
-    ) {
-      console.error(`[magpie] ${err.message}`);
-    } else {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[magpie] fatal startup error: ${message}`);
-    }
+    console.error(formatStartupError(err));
     process.exit(1);
   });
 }
