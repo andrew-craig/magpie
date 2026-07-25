@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_76d6** · P1 · in_progress · M8-C0: host-side micro-VM launcher — direct libkrun (TSI-off no-network + per-VM vsock gateway port + setuid + vcpu/RAM)  (parent: epic_59b1)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway

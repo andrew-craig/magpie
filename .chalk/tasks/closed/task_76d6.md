@@ -2,14 +2,14 @@
 id: task_76d6
 title: M8-C0: host-side micro-VM launcher — direct libkrun (TSI-off no-network + per-VM vsock gateway port + setuid + vcpu/RAM)
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [rust,microvm,libkrun]
 blocked_by: []
 parent: epic_59b1
-remote_task_url: null
+remote_task_url: https://github.com/andrew-craig/magpie/pull/55
 created_at: 2026-07-21T21:39:41Z
-updated_at: 2026-07-25T03:57:32Z
+updated_at: 2026-07-25T04:47:46Z
 ---
 Net-new component surfaced by the M8-A1 spike (`task_1fdc`,
 `spike/m8-a1/frontend-investigation.md`). The spike found that driving libkrun via crun's krun
