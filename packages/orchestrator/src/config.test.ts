@@ -78,6 +78,9 @@ describe("loadConfig", () => {
       "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed",
     );
     expect(config.container.memory).toBe("4g");
+    // bug_df2d: fail-closed-by-default escape hatch for the cgroup
+    // memory-controller preflight (see cgroup-preflight.ts).
+    expect(config.container.requireMemoryLimit).toBe(true);
     expect(config.container.cpus).toBe("2");
     expect(config.container.pidsLimit).toBe(256);
     // M8-B2: the review-container runtime defaults to rootless podman.
@@ -124,6 +127,7 @@ work_dir = "/srv/magpie-work"
 [container]
 image = "magpie-reviewer:9.9.9"
 memory = "8g"
+require_memory_limit = false
 cpus = "4"
 pids_limit = 512
 docker_bin = "/usr/local/bin/podman"
@@ -149,6 +153,7 @@ ttl_margin_seconds = 300
     expect(config.workspace.workDir).toBe("/srv/magpie-work");
     expect(config.container.image).toBe("magpie-reviewer:9.9.9");
     expect(config.container.memory).toBe("8g");
+    expect(config.container.requireMemoryLimit).toBe(false);
     expect(config.container.cpus).toBe("4");
     expect(config.container.pidsLimit).toBe(512);
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");

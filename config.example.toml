@@ -133,6 +133,28 @@ image = "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf1
 # Default: "4g"
 memory = "4g"
 
+# Whether Magpie requires the memory limit above to actually be enforceable
+# by the kernel, i.e. that the cgroup v2 `memory` controller is available.
+# Some hosts boot with it disabled — notably Raspberry Pi, whose firmware
+# ships `cgroup_disable=memory` on the kernel command line by default (check
+# `cat /sys/fs/cgroup/cgroup.controllers`; if `memory` is missing, the
+# controller is off). On such a host:
+#   - rootful docker FAILS OPEN: `--memory` is accepted, a warning is printed
+#     to stderr, and the review container runs completely UNCONFINED on
+#     memory — the exact silent gap this flag exists to catch.
+#   - rootless podman/crun (the M8-B2 default) FAILS CLOSED but cryptically:
+#     every review job errors at container-creation time.
+# With this `true` (the default), Magpie checks at startup and refuses to run
+# with an unenforceable memory limit, and the review container itself
+# double-checks (and refuses to proceed) at the top of every job — see
+# cgroup-preflight.ts and docker/reviewer/entrypoint.sh. Set to `false` only
+# if you understand the risk and want Magpie to run anyway with an
+# UNENFORCED memory ceiling (e.g. a stock Raspberry Pi you can't reboot with
+# a different kernel command line right now) — see INSTALL.md/QUICKSTART.md
+# for how to actually enable the controller instead.
+# Default: true
+require_memory_limit = true
+
 # CPU limit passed to `docker run --cpus` for the review container.
 # Default: "2"
 cpus = "2"
@@ -156,7 +178,9 @@ pids_limit = 256
 #   Note also that `--memory` requires the `memory` cgroup v2 controller to be
 #   delegated to the user; where it is absent (e.g. some Raspberry Pi kernels
 #   boot with the memory controller disabled) crun fails closed rather than
-#   silently ignoring the limit the way rootful docker does.
+#   silently ignoring the limit the way rootful docker does — see
+#   `require_memory_limit` above, which fails Magpie closed on EITHER runtime
+#   before that per-job crun failure (or docker's silent one) ever happens.
 # Default: "podman"
 docker_bin = "podman"
 

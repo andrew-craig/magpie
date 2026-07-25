@@ -125,6 +125,12 @@ Every existing `docker run` flag stays: `--user`, `--read-only --tmpfs /tmp`, `-
 `/work`. The only changes are `--network bridge/magpie-net` → `--network none` and the added
 `-v …/<id>.sock:/run/gw.sock` mount.
 
+Note that `--memory` is only *enforced* when the host kernel's cgroup v2 `memory` controller is
+enabled — on a host where it's off (e.g. Raspberry Pi firmware defaults ship
+`cgroup_disable=memory`) rootful Docker silently discards the flag. Magpie fails closed on this
+at startup and per job rather than running an unbounded reviewer; see `INSTALL.md` §6a and
+`config.example.toml`'s `require_memory_limit`.
+
 ### 2.6 Feasibility gate + residual details (flagged honestly)
 
 1. **Feasibility spike first.** Confirm the in-container forwarder + `models.json baseUrl` path

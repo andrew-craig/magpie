@@ -8,7 +8,8 @@
 // this process's own env; M3 replaces that with a container that inherits
 // NOTHING from the launching process. The container's env is instead an
 // explicit ALLOWLIST built one `-e NAME` at a time (`OPENROUTER_API_KEY` plus,
-// as of M4-C, `OPENAI_BASE_URL` — see below), the `/work` mount is read-only,
+// as of M4-C, `OPENAI_BASE_URL`, plus, as of bug_df2d,
+// `MAGPIE_REQUIRE_MEMORY_LIMIT` — see below), the `/work` mount is read-only,
 // and `/tmp` inside the container is a throwaway tmpfs (the container's own
 // root filesystem is `--read-only`). `--cap-drop=ALL
 // --security-opt=no-new-privileges` plus `--memory`/`--cpus`/`--pids-limit`
@@ -18,9 +19,21 @@
 // model/provider/system-prompt/extension flags are now BAKED INTO the image
 // (see docker/reviewer/Dockerfile, docker/reviewer/entrypoint.sh) rather than
 // passed by this module; the only things this module supplies at
-// `docker run` time are the two bind mounts, the provider credential, the
-// gateway proxy-plane base URL, and `--provider`/`--model` as trailing
-// container args.
+// `docker run` time are the three bind mounts, the provider credential, the
+// gateway proxy-plane base URL, the memory-limit-enforcement escape hatch,
+// and `--provider`/`--model` as trailing container args.
+//
+// MEMORY-LIMIT ENFORCEMENT (bug_df2d): `--memory=<config.container.memory>`
+// above is only ENFORCED if the kernel's cgroup v2 `memory` controller is
+// available — on a host where it's disabled (e.g. some Raspberry Pi firmware
+// defaults), Docker accepts the flag and silently discards it. Two defences,
+// both gated by the same `config.container.requireMemoryLimit` escape hatch:
+// cgroup-preflight.ts checks this HOST-side at orchestrator startup (see
+// index.ts), and this module passes that same config value through as the
+// non-secret `MAGPIE_REQUIRE_MEMORY_LIMIT` env var (see below) so
+// docker/reviewer/entrypoint.sh can re-check the ACTUAL enforced state
+// in-container, per job, as a defence-in-depth backstop over the startup
+// check.
 //
 // GATEWAY WIRING (M4-C, transport replaced by M7-1): the container never
 // holds the real OpenRouter key. `OPENROUTER_API_KEY` is set to a per-job,
@@ -333,6 +346,15 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
     // than name-only-via-env like OPENROUTER_API_KEY above.
     "-e",
     `OPENAI_BASE_URL=${config.gateway.containerBaseUrl}`,
+    // bug_df2d: also non-secret (a deployment-wide operator choice, not a
+    // per-job credential), so passed inline like OPENAI_BASE_URL above. Lets
+    // docker/reviewer/entrypoint.sh's in-container `memory.max` assertion
+    // honour the SAME fail-closed-vs-warn-and-continue escape hatch as the
+    // orchestrator-host-level startup preflight (cgroup-preflight.ts) — the
+    // container has no other way to see this config choice, since it
+    // inherits nothing from the launching process's environment.
+    "-e",
+    `MAGPIE_REQUIRE_MEMORY_LIMIT=${config.container.requireMemoryLimit}`,
     "-i",
     config.container.image,
     "--provider",
@@ -454,6 +476,7 @@ export function findMissingHardenedFlags(argv: readonly string[]): string[] {
  *      --memory=<mem> --cpus=<cpus> --pids-limit=<n> --network none
  *      -v <mount>:/work:ro -v <out>:/out -v <gatewaySocketDir>:/run/gw:ro
  *      -e OPENROUTER_API_KEY -e OPENAI_BASE_URL=<in-container forwarder URL>
+ *      -e MAGPIE_REQUIRE_MEMORY_LIMIT=<true|false>
  *      -i <image> --provider openrouter --model <model>` with the gateway
  *      virtual key (`params.gatewayApiKey`) set only on the spawned process's
  *      `env` (never argv) and every `MAGPIE_*` secret stripped from that env

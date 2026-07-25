@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { logJobOutcome } from "./index.js";
+import { MemoryControllerUnavailableError } from "./cgroup-preflight.js";
+import { ConfigError } from "./config.js";
+import { DockerUnavailableError } from "./docker.js";
+import { formatStartupError, logJobOutcome } from "./index.js";
 import type { JobOutcome } from "./queue.js";
 
 /** Captures a single logger's `.error(line)` calls without touching console. */
@@ -84,5 +87,28 @@ describe("logJobOutcome", () => {
       message: "Request failed with status 401",
     });
     expect((parsed.error as { stack: string }).stack).toContain("Octokit.request");
+  });
+});
+
+describe("formatStartupError (entrypoint catch wiring)", () => {
+  it("renders known, operator-actionable startup errors as a clean [magpie] message (no 'fatal' prefix)", () => {
+    // These carry human-written, actionable messages — a stack would be noise.
+    for (const err of [
+      new ConfigError(["missing [gateway].base_url"], "/etc/magpie/config.toml"),
+      new DockerUnavailableError("docker CLI not found on PATH"),
+      // bug_df2d: a memory-controller failure must be surfaced as an actionable
+      // message, NOT swallowed into a generic internal-fault trace.
+      new MemoryControllerUnavailableError("cgroup memory-controller preflight failed: ..."),
+    ]) {
+      const out = formatStartupError(err);
+      expect(out).toBe(`[magpie] ${(err as Error).message}`);
+      expect(out).not.toContain("fatal startup error");
+    }
+  });
+
+  it("renders an unexpected error with the 'fatal startup error' prefix", () => {
+    expect(formatStartupError(new Error("kaboom"))).toBe("[magpie] fatal startup error: kaboom");
+    // Non-Error throws are stringified, never crash the handler.
+    expect(formatStartupError("plain string")).toBe("[magpie] fatal startup error: plain string");
   });
 });

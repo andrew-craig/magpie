@@ -30,6 +30,8 @@
     "OPENROUTER_API_KEY",
     "-e",
     "OPENAI_BASE_URL=http://127.0.0.1:4000/v1",
+    "-e",
+    "MAGPIE_REQUIRE_MEMORY_LIMIT=true",
     "-i",
     "magpie-reviewer:0.1.0",
     "--provider",

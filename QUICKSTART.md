@@ -25,6 +25,14 @@ model.
 - **Docker**, to run the reviewer image per review job. Your user (or the
   `magpie` system user `install.sh` creates) needs access to the Docker
   daemon.
+- The kernel's **cgroup v2 `memory` controller** enabled, so the per-review
+  `--memory` limit is actually enforced. Check with
+  `cat /sys/fs/cgroup/cgroup.controllers` — the list must include `memory`.
+  Magpie refuses to start otherwise (by default). **On a Raspberry Pi** the
+  firmware disables it: append `cgroup_enable=memory cgroup_memory=1` to
+  `/boot/firmware/cmdline.txt` (one line, older images use `/boot/cmdline.txt`)
+  and reboot. See [`INSTALL.md`](INSTALL.md) §6a (and the
+  `require_memory_limit` escape hatch if you can't enable it).
 - **Node.js 22** and **git**. The host-service release tarball ships
   prebuilt `dist/**`, so Node is only needed to run it (`npm ci --omit=dev`
   for dependencies), not to compile TypeScript.

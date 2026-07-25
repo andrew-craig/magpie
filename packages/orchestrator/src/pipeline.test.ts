@@ -217,6 +217,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
     container: {
       image: "magpie-reviewer:0.1.0",
       memory: "4g",
+      requireMemoryLimit: true,
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",

@@ -29,7 +29,7 @@ const CONFIG: Config = {
   limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
   repoAllowlist: [],
   workspace: { workDir: "/tmp/w" },
-  container: { image: "img:1", memory: "4g", cpus: "2", pidsLimit: 256, dockerBin: "podman" },
+  container: { image: "img:1", memory: "4g", requireMemoryLimit: true, cpus: "2", pidsLimit: 256, dockerBin: "podman" },
   gateway: {
     baseUrl: "http://127.0.0.1:4100",
     containerBaseUrl: "http://127.0.0.1:4000/v1",

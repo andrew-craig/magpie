@@ -12,6 +12,7 @@
 // this file's only job is composition, startup, and graceful shutdown.
 
 import { pathToFileURL } from "node:url";
+import { assertMemoryControllerAvailable, MemoryControllerUnavailableError } from "./cgroup-preflight.js";
 import { loadConfig, ConfigError } from "./config.js";
 import { assertDockerAvailable, DockerUnavailableError } from "./docker.js";
 import { createPullRequestFilter } from "./filter.js";
@@ -74,6 +75,29 @@ export function logJobOutcome(outcome: JobOutcome, logger: JobOutcomeLogger = co
   );
 }
 
+/**
+ * Format a fatal startup error for the entrypoint's top-level catch. Known,
+ * operator-actionable startup failures (bad config, docker/podman unavailable,
+ * the cgroup memory controller unavailable) are rendered as a clean one-line
+ * `[magpie] <message>` — their messages are already written for a human, so a
+ * stack trace would only add noise. Anything else is an unexpected fault and
+ * gets the `fatal startup error:` prefix (the caller still logs it; a stack is
+ * available on the Error itself). Pure and exported so index.test.ts can assert
+ * the classification — in particular that a `MemoryControllerUnavailableError`
+ * (bug_df2d) is treated as a clean, actionable message, not an internal fault.
+ */
+export function formatStartupError(err: unknown): string {
+  if (
+    err instanceof ConfigError ||
+    err instanceof DockerUnavailableError ||
+    err instanceof MemoryControllerUnavailableError
+  ) {
+    return `[magpie] ${err.message}`;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return `[magpie] fatal startup error: ${message}`;
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
 
@@ -83,6 +107,19 @@ async function main(): Promise<void> {
   // failing every subsequent job the same way. Refusing to start at all is
   // strictly better for a self-hosted, unattended service.
   await assertDockerAvailable(config);
+
+  // Fail fast (bug_df2d) if the review container's `--memory` limit would be
+  // silently unenforced: some hosts (notably Raspberry Pi firmware defaults)
+  // boot with the kernel's cgroup v2 `memory` controller disabled, which
+  // makes Docker accept `--memory` and discard it with only a stderr warning
+  // — a hardening flag that quietly becomes a no-op is exactly the class of
+  // gap M7 "Design D"'s asserted-confinement posture exists to catch. Fails
+  // closed by default (`container.requireMemoryLimit`, see config.ts); an
+  // operator who understands the risk can set that to `false` to start
+  // anyway. See cgroup-preflight.ts's module doc comment for the full
+  // rationale and docker/reviewer/entrypoint.sh for the per-job,
+  // in-container backstop over this startup-time check.
+  await assertMemoryControllerAvailable(config);
 
   // Defence-in-depth (M3-D, see orphan-cleanup.ts): remove any `magpie-*`
   // review containers left running by a previous crash of this process
@@ -172,12 +209,7 @@ const isEntrypoint =
 
 if (isEntrypoint) {
   main().catch((err: unknown) => {
-    if (err instanceof ConfigError || err instanceof DockerUnavailableError) {
-      console.error(`[magpie] ${err.message}`);
-    } else {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[magpie] fatal startup error: ${message}`);
-    }
+    console.error(formatStartupError(err));
     process.exit(1);
   });
 }
