@@ -90,12 +90,32 @@ afterEach(async () => {
 });
 
 /** Connects a plain TCP client to the relay's fixed listen address, rejecting
- * (e.g. ECONNREFUSED) if nothing is listening yet/at all. */
-function connectTcpClient(): Promise<net.Socket> {
+ * (e.g. ECONNREFUSED) if nothing is listening yet/at all. An optional
+ * `timeoutMs` bounds the attempt so a connect that neither succeeds nor errors
+ * (a hung SYN rather than a prompt refusal) fails fast with a clear message
+ * instead of hanging until the caller's vitest timeout; omitted for the
+ * happy-path node tests, which expect a prompt connect. */
+function connectTcpClient(timeoutMs?: number): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const sock = net.createConnection({ host: TCP_HOST, port: TCP_PORT });
-    sock.once("connect", () => resolve(sock));
-    sock.once("error", reject);
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            sock.destroy();
+            reject(new Error(`timed out after ${timeoutMs}ms connecting to ${TCP_HOST}:${TCP_PORT}`));
+          }, timeoutMs);
+    const settle = () => {
+      if (timer) clearTimeout(timer);
+    };
+    sock.once("connect", () => {
+      settle();
+      resolve(sock);
+    });
+    sock.once("error", (err) => {
+      settle();
+      reject(err);
+    });
   });
 }
 
@@ -380,7 +400,16 @@ describe.runIf(RELAY_IMPL === "rust")("relay boundary contract — impl=rust (ma
         stderr += chunk.toString();
       });
 
-      const exitCode = await new Promise<number | null>((resolve) => proc.once("exit", resolve));
+      // Await 'close', NOT 'exit': 'exit' fires when the process terminates
+      // but the stderr pipe may not be fully drained yet, so the final chunk
+      // (carrying the "refusing to start ... /dev/vsock" message this test
+      // asserts on) can still be in flight. 'close' fires only after all
+      // stdio streams have closed, so `stderr` below is guaranteed complete —
+      // this suite is the enforcement mechanism for the no-edit boundary
+      // policy, so it must not flake and spuriously block swap PRs.
+      const exitCode = await new Promise<number | null>((resolve) =>
+        proc.once("close", (code) => resolve(code)),
+      );
 
       expect(exitCode).toBe(1);
       expect(stderr).toMatch(/refusing to start/);
@@ -389,8 +418,10 @@ describe.runIf(RELAY_IMPL === "rust")("relay boundary contract — impl=rust (ma
       // Fail-closed means fail-closed: unlike forwarder.mjs (which opens its
       // TCP listener unconditionally and only fails a given connection's
       // relay attempt), vsock-client must never accept a TCP connection it
-      // has no way to relay in the first place.
-      await expect(connectTcpClient()).rejects.toThrow();
+      // has no way to relay in the first place. Explicit short timeout so a
+      // hung connect (rather than the expected ECONNREFUSED) fails fast with
+      // a clear message instead of burning the whole 10s test budget.
+      await expect(connectTcpClient(1000)).rejects.toThrow();
     },
     10_000,
   );
