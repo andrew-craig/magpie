@@ -142,14 +142,16 @@ pub enum ConfigError {
     /// both (a typo/omission), so this fails closed rather than silently
     /// booting with no gateway channel.
     VsockPortUdsUnpaired,
-    /// `--vsock-uds` was a relative path. The path is handed to libkrun
-    /// (running in a different process/cwd context by the time
-    /// `krun_start_enter` runs) and is also the socket path a separate
-    /// host-side forwarder process needs to agree on — a relative path
-    /// would resolve against whatever cwd happens to be current, which is
-    /// exactly the kind of ambiguity a per-job, security-relevant path
-    /// should never have.
-    VsockUdsNotAbsolute { path: String },
+    /// A host path handed to libkrun (`--rootfs` via `krun_set_root`, the
+    /// `--work-mount` host path via `krun_add_virtiofs3`, or `--vsock-uds`
+    /// via `krun_add_vsock_port2`) was relative. All three are resolved by
+    /// libkrun in a different process/cwd context by the time
+    /// `krun_start_enter` runs (and `--vsock-uds` is additionally a path a
+    /// separate host-side forwarder must agree on), so a relative path would
+    /// resolve against whatever cwd happens to be current — exactly the kind
+    /// of ambiguity a per-job, security-relevant path in a fail-closed
+    /// privileged component should never have. `field` names which one.
+    PathNotAbsolute { field: &'static str, path: String },
     /// `rootfs` was empty or not an existing directory. Checked here (a pure
     /// string/path check on the value, not a filesystem stat — see the
     /// field doc below) so `--rootfs ""` fails the same way as any other bad
@@ -158,6 +160,12 @@ pub enum ConfigError {
     RootfsEmpty,
     /// A `--work-mount` value was missing its host path.
     WorkMountEmpty,
+    /// A `--work-mount` value had an empty virtiofs tag (e.g. `/path:`). An
+    /// empty tag is passed straight to `krun_add_virtiofs3`, attaching a
+    /// device the guest cannot `mount -t virtiofs <tag>` by name — a silent
+    /// misconfiguration this otherwise fail-closed component should reject up
+    /// front rather than boot a VM whose `/work` can never be mounted.
+    WorkMountTagEmpty,
 }
 
 impl fmt::Display for ConfigError {
@@ -186,11 +194,17 @@ impl fmt::Display for ConfigError {
                     "--vsock-port and --vsock-uds must be supplied together (or not at all)"
                 )
             }
-            ConfigError::VsockUdsNotAbsolute { path } => {
-                write!(f, "--vsock-uds must be an absolute path, got {path:?}")
+            ConfigError::PathNotAbsolute { field, path } => {
+                write!(f, "{field} must be an absolute path, got {path:?}")
             }
             ConfigError::RootfsEmpty => write!(f, "--rootfs must not be empty"),
             ConfigError::WorkMountEmpty => write!(f, "--work-mount must not be empty"),
+            ConfigError::WorkMountTagEmpty => {
+                write!(
+                    f,
+                    "--work-mount virtiofs tag must not be empty (e.g. use /path:tag)"
+                )
+            }
         }
     }
 }
@@ -253,6 +267,7 @@ impl LaunchConfigInput {
         if self.rootfs.as_os_str().is_empty() {
             return Err(ConfigError::RootfsEmpty);
         }
+        must_be_absolute("--rootfs", &self.rootfs)?;
         if self.vcpus == 0 || self.vcpus > MAX_VCPUS {
             return Err(ConfigError::VcpusOutOfRange {
                 requested: self.vcpus,
@@ -289,11 +304,7 @@ impl LaunchConfigInput {
 
         let vsock_gateway = match (self.vsock_port, self.vsock_uds) {
             (Some(port), Some(uds_path)) => {
-                if !uds_path.is_absolute() {
-                    return Err(ConfigError::VsockUdsNotAbsolute {
-                        path: uds_path.display().to_string(),
-                    });
-                }
+                must_be_absolute("--vsock-uds", &uds_path)?;
                 Some(VsockGateway { port, uds_path })
             }
             (None, None) => None,
@@ -304,6 +315,10 @@ impl LaunchConfigInput {
             Some(host_path) => {
                 if host_path.as_os_str().is_empty() {
                     return Err(ConfigError::WorkMountEmpty);
+                }
+                must_be_absolute("--work-mount host path", &host_path)?;
+                if self.work_mount_tag.is_empty() {
+                    return Err(ConfigError::WorkMountTagEmpty);
                 }
                 Some(WorkMount {
                     host_path,
@@ -325,6 +340,21 @@ impl LaunchConfigInput {
             env: self.env,
             vsock_gateway,
             work_mount,
+        })
+    }
+}
+
+/// Rejects a relative host path bound for libkrun. Shared by `--rootfs`, the
+/// `--work-mount` host path, and `--vsock-uds` so all three enforce the same
+/// absolute-path rule (see [`ConfigError::PathNotAbsolute`] for why). `field`
+/// is a static label used only in the error message.
+fn must_be_absolute(field: &'static str, path: &std::path::Path) -> Result<(), ConfigError> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        Err(ConfigError::PathNotAbsolute {
+            field,
+            path: path.display().to_string(),
         })
     }
 }
@@ -538,7 +568,52 @@ mod tests {
         input.vsock_port = Some(1234);
         input.vsock_uds = Some(PathBuf::from("relative/gw.sock"));
         let err = input.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::VsockUdsNotAbsolute { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::PathNotAbsolute {
+                field: "--vsock-uds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn relative_rootfs_rejected() {
+        let mut input = valid_input();
+        input.rootfs = PathBuf::from("relative/rootfs");
+        let err = input.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::PathNotAbsolute {
+                field: "--rootfs",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn relative_work_mount_host_path_rejected() {
+        let mut input = valid_input();
+        input.work_mount_host_path = Some(PathBuf::from("relative/work"));
+        let err = input.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::PathNotAbsolute {
+                field: "--work-mount host path",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_work_mount_tag_rejected() {
+        let mut input = valid_input();
+        input.work_mount_host_path = Some(PathBuf::from("/var/lib/magpie/work/job-1"));
+        input.work_mount_tag = String::new();
+        assert_eq!(
+            input.validate().unwrap_err(),
+            ConfigError::WorkMountTagEmpty
+        );
     }
 
     #[test]
