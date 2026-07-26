@@ -2,14 +2,14 @@
 id: task_9d2b
 title: RUST-3: cross-language contract-test harness — TS integration tests as the boundary contract for Rust binaries
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: [rust,testing]
 blocked_by: []
 parent: epic_6955
 remote_task_url: null
 created_at: 2026-07-19T22:54:38Z
-updated_at: 2026-07-26T02:38:34Z
+updated_at: 2026-07-26T02:54:12Z
 ---
 Make the "leverage the tests we have" half of the migration strategy concrete: the existing
 TypeScript integration/e2e tests are the contract harness for every Node→Rust swap.

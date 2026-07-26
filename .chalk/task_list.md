@@ -13,7 +13,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_67aa** · P1 · open · M8-D3: installer + systemd — rootless-Podman provisioning (subuid/subgid, linger, kvm group, AF_VSOCK)  (parent: epic_59b1)
 - **task_92d7** · P1 · open · M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer  (parent: epic_59b1)
 - **task_b3f7** · P1 · open · M8-C2: host-side per-VM vsock↔gateway forwarder  (parent: epic_59b1)
-- **task_9d2b** · P2 · in_progress · RUST-3: cross-language contract-test harness — TS integration tests as the boundary contract for Rust binaries  (parent: epic_6955)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
 - **task_df53** · P2 · open · M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets  (parent: epic_59b1)
