@@ -2,14 +2,24 @@
 #
 # Scope: see docs/design/rust-adoption.md "Build & signing". This workspace
 # exists alongside the npm workspaces at the repo root; it is the build lane
-# for Magpie's native (Rust) process-boundary components — today just the
-# scaffolding crates below, growing to hold the real guest-side vsock client
-# (task_2d6c) and the host-side libkrun launcher (task_76d6) as those land.
+# for Magpie's native (Rust) process-boundary components — today the
+# scaffolding crates (`vsock-framing`, `vsock-client`) plus the production
+# host-side libkrun launcher (`magpie-microvm-launcher`, task_76d6). The
+# guest-side vsock client (task_2d6c) still needs to land in `vsock-client`.
+#
+# NOTE on `magpie-microvm-launcher`: unlike the other members, it dynamically
+# links a HOST-installed `libkrun.so` (see its Cargo.toml/build.rs doc
+# comments) rather than building fully static. It is a workspace member for
+# local dev / `cargo metadata` convenience, but `.github/workflows/rust.yml`
+# deliberately EXCLUDES it from the shared workspace-wide lint/build steps
+# (which run on generic GitHub-hosted runners that don't have libkrun
+# installed) — see that file's comments for the excluded commands and why.
 [workspace]
 resolver = "2"
 members = [
     "vsock-framing",
     "vsock-client",
+    "magpie-microvm-launcher",
 ]
 
 [workspace.package]

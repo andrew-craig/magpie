@@ -84,7 +84,15 @@ Workflow
 - Plan First: Write plan to the task file with checkable items
 - Verify Plan: Check in before starting implementation
 - Create a branch: Put all code fixes into a new branch so they can be tracked and merged
-- Track Progress: Mark items complete as you go. Commit chalk task tracking changes to the branch they relate to (so they will be marked as closed on merge)
+- Track Progress: Mark items complete as you go. Commit chalk task tracking changes to the branch they relate to (see "Closing tasks" below)
 - Explain Changes: High-level summary at each step
 - Document Results: Add review section to the task file
 - Capture Lessons: Update LEARNINGS.md after corrections
+
+Closing tasks
+
+`chalk close <id>` physically MOVES the task file from `.chalk/tasks/<id>.md` to `.chalk/tasks/closed/<id>.md` (and updates `.chalk/task_list.md` plus any dependents' `blocked_by`). Chalk is a LOCAL, file-based tracker with NO connection to GitHub — nothing watches for a PR to merge, so a merge does not close anything by itself.
+
+The convention is therefore: when a task's work goes out as a PR, run `chalk close <id>` ON THAT PR's BRANCH and COMMIT the resulting file move (the delete-from-`tasks/` + add-to-`closed/`, the `task_list.md` change, and any dependent updates) as part of the PR. That way the close is in the PR diff and lands on `main` when — and only when — the PR merges. This is what "closed on merge" means: the close rides along in the branch, it is not triggered by the merge event.
+
+Do NOT leave a merged PR's task `in_progress` expecting it to auto-close, and do NOT close a task on `main` for work that is still an unmerged branch. If you forget to close on the branch, close it manually after merge with a follow-up commit. Note that `chalk close` auto-unblocks dependents the moment it runs, so closing on the branch makes dependents appear unblocked locally before the PR actually merges — usually fine, but be aware of it for CTO-gated PRs.
