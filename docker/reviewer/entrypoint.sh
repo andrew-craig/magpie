@@ -177,26 +177,45 @@ case "${OPENROUTER_API_KEY}" in
 esac
 
 # ---------------------------------------------------------------------------
-# M7-1: start the in-container TCP->unix forwarder (Design D --
-# DISTRIBUTION.md §2.2/§2.3). This container runs `--network none`: the ONLY
-# way off it is the per-job unix socket the orchestrator bind-mounts
-# read-only at `/run/gw` (`/run/gw/gw.sock`). `forwarder.mjs` (baked into the
-# image, docker/reviewer/Dockerfile) listens on this container's OWN loopback
-# at 127.0.0.1:4000 -- which `--network none` leaves intact, since loopback
-# is not an external interface -- and relays each connection to that socket.
-# `OPENAI_BASE_URL` (and, transitively, the `~/.pi/agent/models.json`
-# baseUrl override below) points Pi at the forwarder's address, so Pi's own
-# invocation is unaffected by any of this.
+# M7-1 / M8-C1: start the in-container relay to the gateway. Something must
+# make `http://127.0.0.1:4000/v1` (where `OPENAI_BASE_URL`, and transitively
+# the `~/.pi/agent/models.json` baseUrl override below, points Pi -- so Pi's
+# own invocation is unaffected by any of this) real, by listening on this
+# container's/guest's OWN loopback and relaying each connection out to
+# wherever the gateway's per-job socket actually is. WHICH relay applies
+# depends on how this image is being run, detected here rather than via a
+# new env var (see docker/reviewer/Dockerfile's "Relay to the gateway"
+# comment for why both binaries still ship):
 #
-# Backgrounded, then bounded-waited-for: nothing downstream (the gateway
-# /healthz probe just below, then Pi itself) may attempt 127.0.0.1:4000
-# before the forwarder is actually listening. Mirrors the wait loop proven in
-# the M7-0 feasibility spike (spike/m7-0/spike-entrypoint.sh).
+#   - docker/crun, `--network none` (Design D -- DISTRIBUTION.md §2.2/§2.3,
+#     the ONLY path live in production today -- see task_2d6c's task file
+#     for the investigation confirming this): no `/dev/vsock` device, no
+#     shared filesystem with the host other than the bind-mounted
+#     `/run/gw/gw.sock` -- `forwarder.mjs` relays TCP -> that unix socket.
+#   - libkrun micro-VM guest (M8-C0/C1/C2 -- task_76d6/task_2d6c/task_b3f7,
+#     not yet wired into the orchestrator): the launcher's `krun_add_vsock`
+#     call unconditionally attaches a `/dev/vsock` character device to every
+#     guest it boots, which a plain container never has -- a reliable,
+#     zero-config signal. `magpie-vsock-client` relays TCP -> `AF_VSOCK`
+#     toward the host per-job gateway socket instead.
+#
+# Backgrounded, then bounded-waited-for below: nothing downstream (the
+# gateway /healthz probe just below, then Pi itself) may attempt
+# 127.0.0.1:4000 before the relay is actually listening. That wait loop is
+# transport-agnostic (a plain TCP connect probe), so it needs no change for
+# whichever relay was started. Mirrors the wait loop proven in the M7-0
+# feasibility spike (spike/m7-0/spike-entrypoint.sh).
 # ---------------------------------------------------------------------------
 
-echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
-node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
-MAGPIE_FORWARDER_PID=$!
+if [ -c /dev/vsock ]; then
+  echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host)" >&2
+  /opt/magpie/vsock-client &
+  MAGPIE_FORWARDER_PID=$!
+else
+  echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
+  node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
+  MAGPIE_FORWARDER_PID=$!
+fi
 
 readonly MAGPIE_FORWARDER_WAIT_ATTEMPTS=50
 readonly MAGPIE_FORWARDER_WAIT_SLEEP=0.2
@@ -216,11 +235,11 @@ for _ in $(seq 1 "${MAGPIE_FORWARDER_WAIT_ATTEMPTS}"); do
 done
 
 if [ -z "${magpie_forwarder_ready}" ]; then
-  echo "magpie-reviewer: refusing to run: the in-container forwarder never came up on 127.0.0.1:4000 -- this container's only permitted egress path is unavailable, so no review can be attempted. Aborting before Pi starts." >&2
+  echo "magpie-reviewer: refusing to run: the in-container relay (forwarder.mjs or vsock-client) never came up on 127.0.0.1:4000 -- this container's only permitted egress path is unavailable, so no review can be attempted. Aborting before Pi starts." >&2
   kill "${MAGPIE_FORWARDER_PID}" 2>/dev/null || true
   exit 1
 fi
-echo "magpie-reviewer: forwarder is up" >&2
+echo "magpie-reviewer: relay is up" >&2
 
 # --- 2. Network confinement assertion ---------------------------------------
 #

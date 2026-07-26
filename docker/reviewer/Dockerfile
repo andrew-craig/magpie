@@ -13,6 +13,8 @@
 # PINNED VERSIONS (bump deliberately -- no floating tags/ranges anywhere in
 # this file; see README.md for the "how to re-pin" checklist):
 #   - Base image:  node:22.23.1-slim, pinned by BOTH tag and digest below.
+#   - Rust builder: rust:1.97.1-alpine, pinned by BOTH tag and digest below
+#                  (matches rust/rust-toolchain.toml's channel).
 #   - Pi:          @earendil-works/pi-coding-agent@0.80.3 (matches the host's
 #                  `pi --version` == 0.80.3 as of 2026-07-10; see
 #                  docker/reviewer/extension-package.json).
@@ -20,6 +22,38 @@
 #                  typebox@1.1.38 (must match packages/review-extension's
 #                  resolved versions on the host -- see that package's
 #                  package.json / the repo root package-lock.json).
+
+# --- Builder stage: guest-side AF_VSOCK relay (M8-C1 / task_2d6c) ---------
+#
+# Compiles rust/vsock-client into a fully static musl binary baked into the
+# final image below, so the image's digest pin + cosign signature (see
+# .github/workflows/release-reviewer.yml) covers it -- no separate signing
+# lane needed (rust.yml's own `sign` job is for binaries shipped OUTSIDE the
+# image; see that workflow's SCOPE NOTE).
+#
+# No `--platform=$BUILDPLATFORM` override: `docker buildx build --platform
+# linux/amd64,linux/arm64` (release-reviewer.yml) runs this whole Dockerfile
+# once per target platform, so this stage builds NATIVELY for whichever arch
+# is currently being produced -- the same no-cross-compile posture
+# .github/workflows/rust.yml uses for the standalone rust/ build lane, and
+# for the same reason (no musl cross-linker / prebuilt-binary supply-chain
+# smell). `rust:*-alpine`'s default target is already the matching
+# `*-unknown-linux-musl` triple, so no `rustup target add` /
+# `--target` flag is needed here.
+FROM rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS vsock-builder
+# musl-dev: static-libc headers/archives cargo's linker needs; not already
+# present in the base rust:alpine image.
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY rust/ ./rust/
+WORKDIR /src/rust
+# -p (not the whole workspace): magpie-microvm-launcher dynamically links a
+# HOST-installed libkrun.so (see its own Cargo.toml doc comment) that this
+# throwaway builder image doesn't have, so building the whole workspace here
+# would fail; magpie-vsock-client (its only dependency is the `libc` crate --
+# see rust/vsock-client/Cargo.toml) is all this stage needs.
+RUN cargo build --release --locked -p magpie-vsock-client
+
 FROM node:22.23.1-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf
 
 # git: kept on PATH as defence-in-depth in case Pi or a future tool probes
@@ -63,13 +97,30 @@ RUN groupadd --gid 10001 reviewer \
 COPY docker/reviewer/entrypoint.sh /opt/magpie/entrypoint.sh
 RUN chmod +x /opt/magpie/entrypoint.sh
 
-# In-container TCP->unix forwarder (M7-1, Design D -- see DISTRIBUTION.md
-# §2.2/§2.3). The reviewer runs `--network none`; this is what makes
-# `http://127.0.0.1:4000/v1` (the address entrypoint.sh points Pi at) real by
-# relaying to the per-job unix socket bind-mounted read-only at `/run/gw`.
-# Holds no secret, so shipping it into this untrusted image is safe. Runs
-# under the `node` already on PATH in this base image -- no new dependency.
+# --- Relay to the gateway: TWO binaries, entrypoint.sh picks ONE at runtime -
+#
+# `http://127.0.0.1:4000/v1` is the address entrypoint.sh points Pi at
+# (regardless of runtime); something must make that address real by relaying
+# to wherever the gateway's per-job socket actually is. Which relay applies
+# depends on how THIS container is being run, and both still need to ship
+# today -- see entrypoint.sh's own comment on the /dev/vsock switch for why
+# forwarder.mjs is NOT dead code yet (docker/crun is still the only live
+# path in production -- task_2d6c's task file has the full investigation):
+#
+#   - forwarder.mjs (M7-1, Design D -- DISTRIBUTION.md §2.2/§2.3): TCP->unix
+#     relay for the docker/crun `--network none` container, which has no
+#     shared filesystem with the guest other than the bind-mounted
+#     `/run/gw/gw.sock`. Holds no secret. Runs under the `node` already on
+#     PATH in this base image -- no new dependency.
+#   - magpie-vsock-client (M8-C1 / task_2d6c): TCP->AF_VSOCK relay for the
+#     libkrun micro-VM path (task_76d6/task_b3f7), which has no bind-mounted
+#     socket at all -- the guest's only channel out is the vsock device.
+#     Compiled by the `vsock-builder` stage above; a static musl binary, so
+#     it runs unmodified on this glibc-based final image. Also holds no
+#     secret.
 COPY docker/reviewer/forwarder.mjs /opt/magpie/forwarder.mjs
+COPY --from=vsock-builder /src/rust/target/release/magpie-vsock-client /opt/magpie/vsock-client
+RUN chmod +x /opt/magpie/vsock-client
 
 # Findings output path is part of the image contract, not per-job config: the
 # baked-in report_findings extension (packages/review-extension) reads

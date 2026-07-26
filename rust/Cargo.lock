@@ -19,7 +19,7 @@ dependencies = [
 name = "magpie-vsock-client"
 version = "0.0.0"
 dependencies = [
- "vsock-framing",
+ "libc",
 ]
 
 [[package]]
