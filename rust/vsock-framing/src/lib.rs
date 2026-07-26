@@ -6,17 +6,23 @@
 //! ("Build & signing" — "shared crates for vsock framing and confinement
 //! assertions"). It is intentionally minimal.
 //!
-//! TODO(task_2d6c): the guest-side vsock client will use this to frame Pi's
-//! loopback TCP traffic before relaying it over `AF_VSOCK` to the host
-//! per-job gateway socket (see `spike/m8-a1/vsock-client/` for the proven
-//! raw-socket prototype this crate does not yet replace).
+//! RESOLVED (task_2d6c): the guest-side vsock client (`rust/vsock-client`)
+//! does NOT use this crate. Its relay is a raw, unframed byte pipe — one new
+//! `AF_VSOCK` connection per accepted TCP connection, mirroring
+//! `docker/reviewer/forwarder.mjs`'s `tcpConn.pipe(unixConn)` shape — because
+//! Pi's HTTP traffic is already self-delimiting and the M8-A1 spike addendum
+//! confirmed `AF_VSOCK` supports ordinary per-connection semantics (no need
+//! to multiplex several logical streams over one vsock connection). See
+//! `rust/vsock-client/src/main.rs`'s "Why not the vsock-framing crate" doc
+//! section for the full rationale. This crate is kept as general-purpose
+//! framing scaffolding for any future consumer that actually needs
+//! message-level framing (e.g. a control/data split some future protocol
+//! might want) — not currently depended on by any workspace member.
 //!
-//! TODO(task_76d6): the host-side libkrun launcher's per-VM vsock<->gateway
-//! forwarder will use this on the host side of the same connection.
-//!
-//! Do not extend this crate with real vsock I/O or launcher logic — that
-//! belongs in the crates task_2d6c/task_76d6 add, which should depend on
-//! this one rather than duplicate it.
+//! TODO(task_76d6/task_b3f7): the host-side per-VM vsock<->gateway forwarder
+//! is a plain byte relay too (the host end of the same unframed connection
+//! this crate's guest-side counterpart no longer frames) — re-evaluate
+//! whether this crate has a use there before reaching for it by default.
 
 /// Ceiling on a single frame's payload size. Placeholder value; revisit once
 /// the real protocol (task_2d6c/task_76d6) sets actual requirements.
