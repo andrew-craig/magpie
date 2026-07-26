@@ -2,14 +2,14 @@
 id: task_2d6c
 title: M8-C1: guest-side vsock client — static Rust binary in the signed reviewer image (replaces forwarder.mjs)
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [rust,vsock,supply-chain]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:48Z
-updated_at: 2026-07-26T02:27:30Z
+updated_at: 2026-07-26T02:35:56Z
 ---
 CTO edit 4: the guest-side vsock client is a named, owned deliverable — a static Rust binary
 (language per RUST-1 / `decision_aa2d`), built in our CI (RUST-2 pipeline), covered by the same
