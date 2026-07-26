@@ -80,18 +80,27 @@ process — not TypeScript, and not co-located in the launcher.**
   owns no orchestrator plumbing" scope. A separate `magpie-vsock-host-relay` binary (listen on
   uds_path → dial gw.sock) spawned/reaped by the orchestrator per job is cleaner.
 
-### Gate: one-shot vsock round-trip spike (do this FIRST)
+### Gate: one-shot vsock round-trip spike — DONE, PASS (2026-07-27)
 
-Before writing any wiring, prove direct wiring end-to-end on the KVM box:
-- [ ] Boot the launcher with `--vsock-uds` = a real gateway `gw.sock` (mint a throwaway key, or a
-      stand-in unix server with the gateway's 0666/0711 perms), `--vsock-port 1234`.
-- [ ] Guest runs `magpie-vsock-client`; confirm a bidirectional HTTP-shaped round-trip reaches the
-      gateway/stub and back, across **multiple** guest connections (Pi keep-alive + parallel).
-- [ ] Confirm half-close and teardown propagate cleanly (guest EOF → gateway EOF and vice-versa).
-- [ ] Confirm the launcher uid (kvm-group service user) can `connect()` gw.sock given 0666/0711.
-- [ ] **Isolation:** two concurrent VMs, each with its own `gw.sock`, cannot reach the other's
-      socket (distinct uds_path per VM; no shared CID namespace).
-PASS ⇒ direct wiring; FAIL/mismatch ⇒ fall back to the Rust `magpie-vsock-host-relay` helper.
+Ran on this box (arm64, 16 KB pages, real `/dev/kvm` + libkrun). Full write-up +
+scripts: `spike/m8-c2/direct-wiring-spike.md` (branch commit `0f9ce82`).
+**VERDICT: direct wiring is viable — no separate host-side forwarder needed.**
+- [x] Boot launcher `--vsock-uds`=gateway-postured `gw.sock` `--vsock-port 1234` — PASS.
+- [x] Bidirectional round-trip across multiple guest connections (sequential + true parallel) —
+      PASS at the raw-dial level (39/39 over 6 runs). ⚠️ Driving the SAME load through the real
+      `magpie-vsock-client` relay surfaced a separate, reproducible defect (see below).
+- [x] Half-close/teardown both directions — PASS.
+- [x] Launcher uid connects `gw.sock` at 0666-in-0711 — PASS (exact `job-sockets.ts` posture).
+- [x] Isolation: two concurrent VMs, each own `gw.sock`, cannot cross-connect — PASS (3/3).
+PASS ⇒ **direct wiring confirmed**; the Rust `magpie-vsock-host-relay` fallback is NOT needed.
+
+> **⚠️ Defect found (tracked as `bug_73b2`, P1):** the already-merged guest relay
+> `rust/vsock-client` (`relay()`, ~`src/main.rs:275-292`) drops the reply on its **first 1–2
+> connections after startup** under back-to-back/parallel load — host sends, guest never sees.
+> Guest-side and orthogonal to this host-wiring decision (a host relay fallback would NOT fix
+> it), but `rust/vsock-client` is exactly the binary **C3 (`task_39ff`)** makes carry live Pi
+> traffic — root-cause/fix or guard it before C3 ships live. Mechanism not yet root-caused
+> (could be partly a spike-harness artifact); needs instrumentation to confirm.
 
 ### Wiring (applies to both outcomes; mint/revoke flow UNCHANGED)
 
@@ -121,6 +130,19 @@ PASS ⇒ direct wiring; FAIL/mismatch ⇒ fall back to the Rust `magpie-vsock-ho
 ### Open questions for CTO / next session
 
 1. Confirm the scope reduction: C2 collapsing into C3 (direct wiring) vs. keeping a discrete
-   forwarder component as the brief literally specifies.
+   forwarder component as the brief literally specifies. **Spike now empirically supports the
+   collapse (direct wiring PASS on real hardware, all 5 gate assertions).** The only remaining
+   reason to build a discrete forwarder is deliberate defense-in-depth / a throttle+observability
+   seam on the egress path — a policy call, not a technical necessity.
 2. If a discrete component is wanted regardless (defense-in-depth / observability seam), confirm
    Rust standalone helper over TS.
+3. `bug_73b2` (guest-relay first-connection data loss) — decide whether to hard-gate `task_39ff`
+   (C3) on it, or let C3 proceed with the fix tracked in parallel.
+
+### Delivered on this branch (`m8-c2-forwarder-plan`)
+
+- Plan + investigation (this file).
+- `packages/orchestrator/src/microvm-vsock.ts` + test — per-job vsock channel derivation
+  (`udsPath = <socketDir>/gw.sock`, port 1234) + isolation tests. Correct under either outcome;
+  consumed by C3. (commit `4c6791e`)
+- `spike/m8-c2/` — the direct-wiring spike scripts + `direct-wiring-spike.md`. (commit `0f9ce82`)
