@@ -100,10 +100,16 @@ fn log(msg: &str) {
 }
 
 fn main() {
-    let port = vsock_port_from(
+    let port = match vsock_port_from(
         std::env::args().nth(1).as_deref(),
         std::env::var("MAGPIE_VSOCK_PORT").ok().as_deref(),
-    );
+    ) {
+        Ok(port) => port,
+        Err(reason) => {
+            log(&format!("refusing to start: {reason}"));
+            std::process::exit(1);
+        }
+    };
 
     if let Err(reason) = assert_char_device_present(Path::new(VSOCK_DEVICE_PATH)) {
         log(&format!(
@@ -151,14 +157,29 @@ fn main() {
 }
 
 /// Resolves the vsock port from (in priority order) an explicit CLI arg, the
-/// `MAGPIE_VSOCK_PORT` env var, then [`DEFAULT_VSOCK_PORT`]. A present but
-/// unparseable value falls through to the next source rather than aborting
-/// -- this is a best-effort convenience override, not security-relevant
-/// input (unlike, say, the launcher's cmdline-safety checks).
-fn vsock_port_from(arg: Option<&str>, env: Option<&str>) -> u32 {
-    arg.and_then(|s| s.parse().ok())
-        .or_else(|| env.and_then(|s| s.parse().ok()))
-        .unwrap_or(DEFAULT_VSOCK_PORT)
+/// `MAGPIE_VSOCK_PORT` env var, then [`DEFAULT_VSOCK_PORT`] when neither is
+/// set.
+///
+/// A source that is *present but unparseable* is a hard error (`Err`), NOT a
+/// silent fall-through to the next source or the default: a typo'd override
+/// (e.g. `MAGPIE_VSOCK_PORT=123o`) is a misconfiguration, and silently dialing
+/// 1234 instead would mask it -- inconsistent with this binary's otherwise
+/// strict fail-closed posture (the preflight connect only catches an
+/// *unreachable* port, not a wrong-but-reachable one). An *absent* source is
+/// fine and defers to the next: no override set at all is the normal case.
+/// The higher-priority arg wins over env only when arg is absent; a present
+/// arg is authoritative and must parse.
+fn vsock_port_from(arg: Option<&str>, env: Option<&str>) -> Result<u32, String> {
+    let parse = |value: &str, source: &str| {
+        value
+            .parse::<u32>()
+            .map_err(|err| format!("{source} value {value:?} is not a valid vsock port ({err})"))
+    };
+    match (arg, env) {
+        (Some(arg), _) => parse(arg, "vsock port argument"),
+        (None, Some(env)) => parse(env, "MAGPIE_VSOCK_PORT"),
+        (None, None) => Ok(DEFAULT_VSOCK_PORT),
+    }
 }
 
 /// True iff `path` exists and is a character device. Parameterized (rather
@@ -429,30 +450,34 @@ mod tests {
 
     #[test]
     fn port_defaults_when_nothing_set() {
-        assert_eq!(vsock_port_from(None, None), DEFAULT_VSOCK_PORT);
+        assert_eq!(vsock_port_from(None, None), Ok(DEFAULT_VSOCK_PORT));
     }
 
     #[test]
     fn port_from_arg_takes_priority_over_env() {
-        assert_eq!(vsock_port_from(Some("42"), Some("99")), 42);
+        assert_eq!(vsock_port_from(Some("42"), Some("99")), Ok(42));
     }
 
     #[test]
     fn port_falls_back_to_env_when_no_arg() {
-        assert_eq!(vsock_port_from(None, Some("99")), 99);
+        assert_eq!(vsock_port_from(None, Some("99")), Ok(99));
     }
 
     #[test]
-    fn unparseable_arg_falls_through_to_env() {
-        assert_eq!(vsock_port_from(Some("not-a-number"), Some("99")), 99);
+    fn unparseable_arg_is_a_hard_error_even_when_env_is_valid() {
+        // A present-but-malformed explicit override must fail loudly rather
+        // than silently masking the typo by falling through to env/default --
+        // the arg is authoritative and must parse.
+        let err = vsock_port_from(Some("not-a-number"), Some("99")).unwrap_err();
+        assert!(err.contains("vsock port argument"), "{err}");
+        assert!(err.contains("not-a-number"), "{err}");
     }
 
     #[test]
-    fn unparseable_everything_falls_back_to_default() {
-        assert_eq!(
-            vsock_port_from(Some("nope"), Some("also-nope")),
-            DEFAULT_VSOCK_PORT
-        );
+    fn unparseable_env_is_a_hard_error() {
+        let err = vsock_port_from(None, Some("also-nope")).unwrap_err();
+        assert!(err.contains("MAGPIE_VSOCK_PORT"), "{err}");
+        assert!(err.contains("also-nope"), "{err}");
     }
 
     // --- assert_char_device_present ------------------------------------
