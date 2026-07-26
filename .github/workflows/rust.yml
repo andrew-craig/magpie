@@ -21,6 +21,17 @@
 #   uses for the image, no long-lived signing keys) every binary this
 #   workflow produces, and uploads the signatures as a workflow artifact.
 #
+#   `boundary-contract` (RUST-3 / task_9d2b, needs `build`): runs
+#   packages/orchestrator/src/relay-boundary.test.ts — the cross-language
+#   TCP-facing relay contract shared by docker/reviewer/forwarder.mjs and
+#   rust/vsock-client's magpie-vsock-client (see that test file's own doc
+#   comment and docs/design/rust-adoption.md's migration rule) — with
+#   MAGPIE_RELAY_IMPL=rust against the REAL x86_64-unknown-linux-musl binary
+#   this workflow just built (downloaded from `build`'s artifact; runs
+#   natively on the same ubuntu-24.04 arch, no cross-arch emulation needed).
+#   This is what makes "a swap PR must keep the boundary suite green with
+#   zero test edits" an enforced CI property rather than an aspiration.
+#
 # SCOPE NOTE (read before wiring this into a real release)
 #   Today `rust/` holds the scaffolding crates (`vsock-framing`, the
 #   `magpie-vsock-client` placeholder) plus the production host-side libkrun
@@ -62,12 +73,19 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust.yml"
+      # The boundary-contract job's suite and the forwarder.mjs it's proven
+      # against — see that job's comment above. A change to either must also
+      # re-run this workflow, not just ci.yml's default (node-impl-only) run.
+      - "packages/orchestrator/src/relay-boundary.test.ts"
+      - "docker/reviewer/forwarder.mjs"
     tags:
       - "rust-v*"
   pull_request:
     paths:
       - "rust/**"
       - ".github/workflows/rust.yml"
+      - "packages/orchestrator/src/relay-boundary.test.ts"
+      - "docker/reviewer/forwarder.mjs"
   workflow_dispatch:
 
 permissions:
@@ -170,6 +188,54 @@ jobs:
             rust/target/${{ matrix.target }}/release/magpie-vsock-client
           if-no-files-found: error
           retention-days: 14
+
+  # boundary-contract (RUST-3 / task_9d2b) — see the top-of-file "WHAT THIS
+  # DOES" note. Runs on ubuntu-24.04 (linux/amd64, same arch `build`'s
+  # x86_64-unknown-linux-musl leg targets) so the downloaded static binary
+  # executes natively with no emulation. This job (not `lint`/`build`) is the
+  # actual CI enforcement of docs/design/rust-adoption.md's migration rule:
+  # relay-boundary.test.ts must stay green, unedited, against the real
+  # compiled binary.
+  boundary-contract:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Pin npm to match ci.yml/release-host.yml so lockfile handling is identical.
+      - name: Pin npm
+        run: npm install -g npm@11.17.0
+
+      # Explicit working-directory: this job drives the npm workspace at the
+      # repo root, overriding the workflow-level `defaults.run.working-directory:
+      # rust` (which only makes sense for the cargo-based jobs above).
+      - name: Install (clean, from lockfile)
+        working-directory: ${{ github.workspace }}
+        run: npm ci
+
+      - name: Download the x86_64-unknown-linux-musl binary built by `build`
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-binaries-x86_64-unknown-linux-musl
+          path: rust-binaries
+
+      # actions/download-artifact doesn't preserve the executable bit.
+      - name: Make binary executable
+        working-directory: ${{ github.workspace }}
+        run: chmod +x rust-binaries/magpie-vsock-client
+
+      - name: Run the relay-boundary contract suite against the real Rust binary
+        working-directory: packages/orchestrator
+        env:
+          MAGPIE_RELAY_IMPL: rust
+          MAGPIE_VSOCK_CLIENT_BIN: ${{ github.workspace }}/rust-binaries/magpie-vsock-client
+        run: npx vitest run src/relay-boundary.test.ts
 
   sign:
     needs: build
