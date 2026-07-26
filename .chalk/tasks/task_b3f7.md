@@ -2,14 +2,14 @@
 id: task_b3f7
 title: M8-C2: host-side per-VM vsock↔gateway forwarder
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: [vsock,gateway]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:54:58Z
-updated_at: 2026-07-23T08:29:25Z
+updated_at: 2026-07-26T22:37:33Z
 ---
 Net-new component from brief §6.1: bridges each job's per-VM vsock host socket to the gateway's
 per-job unix socket. The budget-capped virtual-key model is unchanged.

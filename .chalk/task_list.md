@@ -3,6 +3,7 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_b3f7** · P1 · in_progress · M8-C2: host-side per-VM vsock↔gateway forwarder  (parent: epic_59b1)
 - **epic_0162** · P1 · open · Distribution / M7 — make Magpie self-hostable by other organisations
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **epic_6730** · P1 · open · Milestone 4 — Network lockdown + credential-injecting gateway
@@ -12,7 +13,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_3b48** · P1 · open · M8-C4: no-network-by-construction — TSI/passt built off + fail-closed in-guest assertion  (parent: epic_59b1)
 - **task_67aa** · P1 · open · M8-D3: installer + systemd — rootless-Podman provisioning (subuid/subgid, linger, kvm group, AF_VSOCK)  (parent: epic_59b1)
 - **task_92d7** · P1 · open · M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer  (parent: epic_59b1)
-- **task_b3f7** · P1 · open · M8-C2: host-side per-VM vsock↔gateway forwarder  (parent: epic_59b1)
 - **epic_d6c1** · P2 · open · Milestone 5 — Production hardening
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
 - **task_df53** · P2 · open · M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets  (parent: epic_59b1)
