@@ -85,6 +85,48 @@ NDJSON) — never an in-process rewrite of TypeScript logic.
   Rust-internal logic only; golden fixtures (e.g. the M8-B1 floor-invariant flag test) pin
   behaviour across the swap. → `task_9d2b` (RUST-3).
 
+### The boundary contract suites, concretely (RUST-3 / `task_9d2b`)
+
+Two boundaries are load-bearing today; both are enforced in CI (`.github/workflows/ci.yml` for the
+launch contract on every PR touching `packages/**`, `.github/workflows/rust.yml`'s `boundary-contract`
+job for the relay contract against the real Rust binary):
+
+1. **Reviewer launch/argv contract** — `packages/orchestrator/src/reviewer.test.ts` (behavioural,
+   flag-by-flag via `toContain`) and `packages/orchestrator/src/reviewer-crun-floor-argv.test.ts`
+   (the golden, byte-for-byte `docker run` argv fixture — see that file's own doc comment). Both
+   drive `reviewer.ts` against a fake `docker` binary seam and are unaffected by which relay runs
+   inside the container, since they only assert the `docker run` invocation itself.
+2. **Relay boundary** — `packages/orchestrator/src/relay-boundary.test.ts`. As of M8-C1
+   (`task_2d6c`), the relay from Pi's loopback (`127.0.0.1:4000`) to the gateway has **two live
+   implementations** sharing one TCP-facing contract: `docker/reviewer/forwarder.mjs` (TCP → unix
+   socket, the docker/crun path) and `rust/vsock-client`'s `magpie-vsock-client` binary (TCP →
+   `AF_VSOCK`, the micro-VM path), selected at container startup by
+   `docker/reviewer/entrypoint.sh` testing `[ -c /dev/vsock ]`. There is **no custom wire format**
+   on this boundary — it's a raw byte pipe (Pi's HTTP traffic is already self-delimiting; see
+   `rust/vsock-client/src/main.rs`'s "Why not the vsock-framing crate" doc section) — so the
+   contract worth pinning is byte-stream *relay behaviour* (bidirectional copy, half-close/EOF
+   propagation, teardown-race tolerance), not a frame format. `vsock-framing` remains unused
+   scaffolding for a hypothetical future consumer that actually needs message framing; it is not
+   part of this boundary and has no golden fixture here.
+
+   The suite is impl-selectable via `MAGPIE_RELAY_IMPL` (`node`, default — drives the real
+   `forwarder.mjs` subprocess against a real unix-socket destination stub, always runs, no special
+   hardware) and `MAGPIE_RELAY_IMPL=rust` (drives the real compiled `magpie-vsock-client` binary,
+   path from `MAGPIE_VSOCK_CLIENT_BIN`). Because `AF_VSOCK` requires real or emulated vsock
+   hardware that no ordinary CI runner or dev sandbox has, the `rust`-impl byte-relay-behaviour
+   assertions **skip with an explicit, in-test-title reason** (never a silent no-op) rather than
+   claiming coverage they can't reach; the equivalent behaviour is independently proven, in Rust, by
+   `rust/vsock-client/src/main.rs`'s own `relay()` unit tests (`relay_copies_bytes_in_both_directions`
+   / `relay_propagates_half_close` / `relay_tolerates_peer_already_gone`), which use the same
+   "stand in with a loopback pair" technique. What *does* run for real against the compiled binary,
+   unconditionally, is its fail-closed startup contract (refuses to ever open its TCP listener
+   without a real `/dev/vsock`) — see `.github/workflows/rust.yml`'s `boundary-contract` job, which
+   downloads the binary `build` just produced and runs this exact file with `MAGPIE_RELAY_IMPL=rust`
+   against it. **This is the enforcement mechanism for the policy above**: a future PR that swaps
+   the micro-VM path's relay in for real must keep `relay-boundary.test.ts` green without editing
+   it; if it can't, that's the signal the swap changed the observable contract, not a reason to loosen
+   the test.
+
 ## Build & signing
 
 - **One cargo workspace** (`rust/` at repo root, alongside the npm workspaces); shared crates for
