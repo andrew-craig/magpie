@@ -1,5 +1,14 @@
 # M8-C2 direct-wiring spike (task_b3f7) — findings
 
+> **Note (review hygiene):** the executable harness that produced these findings
+> (the `run-assertion*.sh`, `run-diag-*.sh`, `gw-stub-listener*.py`,
+> `m8c2-*.mjs`/`.sh`, and the C3 `c3-*.sh`/`c3-gw-listener.mjs` scripts) was
+> removed from the working tree before this branch went for review, to keep the
+> reviewable diff focused on the product change. Every script remains recoverable
+> from git history at commits `0f9ce82` (C2 direct-wiring spike), `91b54e1`
+> (bug_73b2 root-cause) and `2dfdcef` (C3 live e2e). This writeup is the
+> self-contained record of what they proved.
+
 Empirical spike run on the physical arm64/16KB-page Raspberry Pi box (the same box
 `spike/m8-a1` and `rust/magpie-microvm-launcher/smoke-test.sh` already use), validating the
 "direct wiring" hypothesis from `.chalk/tasks/task_b3f7.md`'s "Gate: one-shot vsock
