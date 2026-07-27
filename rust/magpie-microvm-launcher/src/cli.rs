@@ -244,7 +244,8 @@ where
             }
             "--env-from-host" => {
                 let name = next_value(&mut iter, "--env-from-host")?;
-                let value = env_lookup(&name).ok_or_else(|| CliError::MissingHostEnv(name.clone()))?;
+                let value =
+                    env_lookup(&name).ok_or_else(|| CliError::MissingHostEnv(name.clone()))?;
                 env.push((name, value));
             }
             "--vsock-port" => vsock_port = Some(parse_u32(&mut iter, "--vsock-port")?),
@@ -602,7 +603,10 @@ mod tests {
     #[test]
     fn out_mount_with_explicit_tag() {
         let mut a = minimal_required();
-        a.extend(args(&["--out-mount", "/var/lib/magpie/work/job-1-out:findings"]));
+        a.extend(args(&[
+            "--out-mount",
+            "/var/lib/magpie/work/job-1-out:findings",
+        ]));
         let parsed = parse(a).unwrap();
         assert_eq!(
             parsed.out_mount_host_path,
@@ -652,7 +656,10 @@ mod tests {
         .expect("env-from-host should resolve via the injected lookup");
         assert_eq!(
             parsed.env,
-            vec![("OPENROUTER_API_KEY".to_string(), "sk-magpie-testvalue".to_string())]
+            vec![(
+                "OPENROUTER_API_KEY".to_string(),
+                "sk-magpie-testvalue".to_string()
+            )]
         );
     }
 
@@ -676,8 +683,14 @@ mod tests {
         a.extend(args(&["--env-from-host", "SECRET"]));
         let first = parse_with_env_lookup(a.clone(), |_| Some("value-one".to_string())).unwrap();
         let second = parse_with_env_lookup(a, |_| Some("value-two".to_string())).unwrap();
-        assert_eq!(first.env, vec![("SECRET".to_string(), "value-one".to_string())]);
-        assert_eq!(second.env, vec![("SECRET".to_string(), "value-two".to_string())]);
+        assert_eq!(
+            first.env,
+            vec![("SECRET".to_string(), "value-one".to_string())]
+        );
+        assert_eq!(
+            second.env,
+            vec![("SECRET".to_string(), "value-two".to_string())]
+        );
     }
 
     #[test]
@@ -746,8 +759,9 @@ mod tests {
         assert_eq!(cfg.vsock_gateway.unwrap().port, 1234);
         assert_eq!(cfg.work_mount.unwrap().tag, "work");
         assert_eq!(cfg.out_mount.as_ref().unwrap().tag, "out");
-        assert!(cfg
-            .env
-            .contains(&("OPENROUTER_API_KEY".to_string(), "sk-magpie-fixture".to_string())));
+        assert!(cfg.env.contains(&(
+            "OPENROUTER_API_KEY".to_string(),
+            "sk-magpie-fixture".to_string()
+        )));
     }
 }

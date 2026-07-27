@@ -664,7 +664,9 @@ mod tests {
         input.work_mount_tag = String::new();
         assert_eq!(
             input.validate().unwrap_err(),
-            ConfigError::WorkMountTagEmpty { field: "--work-mount" }
+            ConfigError::WorkMountTagEmpty {
+                field: "--work-mount"
+            }
         );
     }
 
@@ -693,7 +695,9 @@ mod tests {
         input.work_mount_host_path = Some(PathBuf::new());
         assert_eq!(
             input.validate().unwrap_err(),
-            ConfigError::WorkMountEmpty { field: "--work-mount" }
+            ConfigError::WorkMountEmpty {
+                field: "--work-mount"
+            }
         );
     }
 
@@ -717,7 +721,10 @@ mod tests {
         input.out_mount_tag = "out".to_string();
         let cfg = input.validate().expect("out mount should validate");
         let om = cfg.out_mount.expect("out_mount should be Some");
-        assert_eq!(om.host_path, PathBuf::from("/var/lib/magpie/work/job-1-out"));
+        assert_eq!(
+            om.host_path,
+            PathBuf::from("/var/lib/magpie/work/job-1-out")
+        );
         assert_eq!(om.tag, "out");
         assert!(!om.read_only, "--out-mount must be writable");
         assert!(cfg.work_mount.is_none());
@@ -729,7 +736,9 @@ mod tests {
         input.out_mount_host_path = Some(PathBuf::new());
         assert_eq!(
             input.validate().unwrap_err(),
-            ConfigError::WorkMountEmpty { field: "--out-mount" }
+            ConfigError::WorkMountEmpty {
+                field: "--out-mount"
+            }
         );
     }
 
@@ -740,7 +749,9 @@ mod tests {
         input.out_mount_tag = String::new();
         assert_eq!(
             input.validate().unwrap_err(),
-            ConfigError::WorkMountTagEmpty { field: "--out-mount" }
+            ConfigError::WorkMountTagEmpty {
+                field: "--out-mount"
+            }
         );
     }
 
