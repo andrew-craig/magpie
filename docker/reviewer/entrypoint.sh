@@ -438,12 +438,35 @@ cat > "$HOME/.pi/agent/models.json" <<EOF
 EOF
 
 # ---------------------------------------------------------------------------
+# Baked review flags -- SINGLE-SOURCED. The fixed `pi` argument set (most
+# importantly the read-only `--tools read,grep,find,ls,report_findings`
+# allowlist -- the flag that keeps a compromised reviewer from writing or
+# running anything) must be defined in EXACTLY ONE place, so the two tier
+# exec paths below (crun: plain `exec pi`; micro-VM: `exec setpriv ... pi`)
+# can never drift apart on a security-critical flag. `set --` prepends these
+# baked flags ahead of the caller's trailing args (`--provider`/`--model`,
+# already sitting in "$@" -- see line 30), reproducing the identical
+# `pi <baked flags> <trailing>` argv both tiers used before this was
+# de-duplicated.
+# ---------------------------------------------------------------------------
+set -- \
+  -p \
+  --mode json \
+  --no-session \
+  --tools read,grep,find,ls,report_findings \
+  --extension /opt/magpie/review-extension/src/index.ts \
+  --no-extensions \
+  --append-system-prompt /opt/magpie/reviewer-prompt.md \
+  "$@"
+
+# ---------------------------------------------------------------------------
 # M8-C3 (task_39ff): guest privilege drop -- MICRO-VM TIER ONLY.
 #
 # CRUN TIER: reviewer.ts's `docker run --user <uid>:<gid>` already runs this
 # whole entrypoint (and therefore Pi) as an unprivileged host uid -- nothing
 # to drop, and this block is SKIPPED (guarded on MAGPIE_IS_MICROVM), so the
-# crun path is byte-for-byte unaffected.
+# crun path is byte-for-byte unaffected: it falls through to the plain
+# `exec pi "$@"` at the very bottom.
 #
 # MICRO-VM TIER: the launcher's krun_setuid/krun_setgid confine only the
 # HOST-side VMM process, NOT the guest -- the guest boots (and, until this
@@ -456,6 +479,8 @@ EOF
 # PAM/login/shell in between and `exec`s straight into Pi, so Pi still
 # receives SIGTERM/SIGKILL directly (the timeout/abort path -- see reviewer.ts's
 # startKillSequence, which for this tier kills the launcher process == the VM).
+# Only the setpriv WRAPPER differs between the tiers; the `pi` argv ("$@",
+# built just above) is shared.
 #
 #   --reuid/--regid 10001         drop real+effective+saved id to `reviewer`
 #   --clear-groups                 shed root's supplementary groups
@@ -470,29 +495,12 @@ EOF
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi" >&2
   chown -R 10001:10001 "$HOME/.pi"
-  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs \
-    pi \
-    -p \
-    --mode json \
-    --no-session \
-    --tools read,grep,find,ls,report_findings \
-    --extension /opt/magpie/review-extension/src/index.ts \
-    --no-extensions \
-    --append-system-prompt /opt/magpie/reviewer-prompt.md \
-    "$@"
+  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs pi "$@"
 fi
 
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly
 # from `docker stop`/`docker kill` (the container-lifecycle timeout/abort
-# path -- see epic_a580) instead of a shell swallowing the signal. `"$@"`
-# forwards the caller's trailing args (--provider/--model) after the fixed
-# baked flags. (Crun tier only -- the micro-VM tier exec'd above.)
-exec pi \
-  -p \
-  --mode json \
-  --no-session \
-  --tools read,grep,find,ls,report_findings \
-  --extension /opt/magpie/review-extension/src/index.ts \
-  --no-extensions \
-  --append-system-prompt /opt/magpie/reviewer-prompt.md \
-  "$@"
+# path -- see epic_a580) instead of a shell swallowing the signal. "$@" is
+# the baked review flags followed by the caller's trailing --provider/--model
+# (see the `set --` above). (Crun tier only -- the micro-VM tier exec'd above.)
+exec pi "$@"
