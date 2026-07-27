@@ -60,10 +60,29 @@ Absorbed C2 responsibilities (in addition to the plan above):
       from root before Pi (see `magpie-krun-launch` main.rs scope notes) and mount the read-only
       `/work` virtiofs device inside the guest.
 
-### HARD GATE: `bug_73b2` (blocks this task)
+### RESOLVED gate → C3 acceptance criterion: the vsock-uds teardown-vs-flush race
 
-`bug_73b2` (P1) — the already-merged guest relay `rust/vsock-client` drops reply data on its
-first 1–2 connections after startup (found in the C2 spike, assertion 3b). This is exactly the
-binary C3 makes carry live Pi↔gateway traffic, so **C3 must not ship live traffic until
-`bug_73b2` is root-caused and fixed (or explicitly guarded).** Repro harness lives in
-`spike/m8-c2/`.
+`bug_73b2` (P1) is CLOSED (2026-07-27, commit `91b54e1` on this branch) — root-caused and the
+gate is satisfied. The finding was that the guest relay `rust/vsock-client` is **NOT** defective:
+its source is byte-for-byte unchanged from `main`. The reply loss was a **timing race in
+libkrun's own `--vsock-uds` bridge** (the exact transport C3 depends on): when the *host* peer
+calls `shutdown(SHUT_WR)` in the same tick as `sendall()`-ing its reply, the bridge can
+propagate the teardown to the guest before it finishes flushing the just-sent bytes, so the
+guest sees a bare EOF instead of the reply. Fully documented in `.chalk/tasks/closed/bug_73b2.md`.
+
+**This is a real, external-dependency transport property, not a harness quirk** — it reproduced
+even against a persistent multi-accept host stub (10/10 lost), and was only masked by inserting
+a gap before the host's `shutdown()`. So C3 MUST NOT assume immunity. Carry these as hard
+acceptance criteria:
+
+- [ ] **Prove the real gateway never triggers it.** `packages/gateway`'s proxy plane replies via
+      Node `http.createServer` → `res.write()`/`res.end()` with keep-alive (see
+      `proxy-server.ts` ~L244-261), which schedules FIN through libuv asynchronously rather than
+      issuing a synchronous `shutdown()` in the last-write tick — structurally much safer than
+      the spike's Python stub. But **verify, don't assume**: add a C3 integration test that
+      drives a real (or faithfully-modelled) gateway reply → guest over the vsock-uds bridge and
+      asserts ZERO byte loss, explicitly including the gateway's abort/error/`res.destroy()`
+      teardown paths (the most likely place a prompt close-after-partial-write could sneak in).
+- [ ] **If any gateway path can close promptly after writing,** either fix it to defer the close
+      until bytes are flushed, or add a guest-/host-side guard — do not ship live Pi↔gateway
+      traffic over a path that can silently drop a reply. Repro harness: `spike/m8-c2/`.
