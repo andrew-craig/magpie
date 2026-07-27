@@ -296,3 +296,43 @@ wires this launcher into the production pipeline:
 
 None of `rust/magpie-microvm-launcher/smoke-test.sh`, `spike/m8-a1/vsock-host-listener.py`, or
 any other committed m8-a1 file was modified.
+
+## Addendum (2026-07-27) — correcting the assertion-3b attribution
+
+The follow-up investigation (`bug_73b2`, see that task file's own "Root cause + fix" section
+for the full writeup) found that the data loss described above in "Assertion 3 ... 3b" is
+**not** a defect in `rust/vsock-client`. Root-caused with instrumentation (per-fd,
+microsecond-timestamped logging of every `read`/`dup`/`shutdown`/`close` call added
+temporarily to `relay()` and `VsockStream`, then reverted): the unmodified relay's blocking
+read on the host-reply direction genuinely waits the full round trip and then returns a bare
+`Ok(0)` (EOF, zero bytes) -- not an instantly-poisoned read. The proven mechanism is a timing
+race in the direct `--vsock-uds` bridge (libkrun's own vsock-to-unix-socket proxying, the
+subject of this very spike) between (a) a peer finishing `sendall()` of its reply and (b) that
+same peer immediately calling `shutdown(SHUT_WR)` with no gap: `gw-stub-listener.py` did
+exactly that, and the bridge's propagation of "peer is done" to the guest can outrun its own
+forwarding of the just-sent reply bytes, so the guest observes EOF instead of data.
+
+This was confirmed two ways: (1) two independent guest-side mitigations in
+`rust/vsock-client` (deferring the close of the dup'd vsock write-half until after the whole
+relay completes; and eliminating `dup()` entirely by sharing the raw fd across threads)
+**each helped inconsistently** across repeated runs -- neither reliably eliminated the loss,
+which is itself evidence the defect isn't in the relay's dup/thread/close ordering; (2) a
+single change with no code touched at all -- inserting a delay in the **host stub** between
+`sendall()` and `shutdown()` -- eliminated the loss **reliably and reproducibly** (0/10 lost
+replies across 7 repeated runs of assertion 3's 5-sequential + 5-parallel batch, versus
+10/10 lost on every un-delayed control run). `gw-stub-listener.py` has been fixed accordingly
+(see its own updated comment); `rust/vsock-client` was left completely unmodified -- `cargo
+test --workspace` and a full release build are unchanged and green.
+
+This reframes assertion 3's verdict: the wiring-mechanism PASS (3a, raw dials) stands, and
+the relay path (3b) now ALSO passes cleanly once the host-side test double stops racing its
+own write against its own teardown -- there is no evidence of a `rust/vsock-client` defect.
+The residual, genuine risk this surfaces for C3 (`task_39ff`) is at the *transport* layer, not
+the relay: whatever plays the "host" role over this direct vsock-uds bridge must not shut down
+or close a connection immediately after writing its final bytes, or it risks this same race.
+The real `packages/gateway` is a standard Node `http.createServer` responding via `res.end()`
+(no synchronous same-tick `shutdown()`/`destroy()` after writing), which is structurally much
+safer than this spike's tight, synchronous Python stub -- but this is a property of the
+transport (very likely libkrun's vsock-uds bridge itself, an external dependency of this repo)
+that C3's own wiring/pipeline tests should still probe directly, rather than assuming Node's
+timing is inherently immune.

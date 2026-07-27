@@ -89,9 +89,25 @@ def main() -> int:
             print(f"HOST[{tag}]: conn#{conn_no} received {received!r}", flush=True)
             reply = b"ACK[%s]:%s" % (tag.encode(), received)
             conn.sendall(reply)
-            # Same shutdown(SHUT_WR)+sleep+close shape as
-            # spike/m8-a1/vsock-host-listener.py, so the guest side can
-            # observe ITS OWN EOF (half-close the other direction).
+            # bug_73b2 root cause: calling shutdown(SHUT_WR) immediately
+            # (same tick) after sendall() races the direct vsock-uds
+            # bridge's own forwarding of the just-sent bytes -- the
+            # bridge can propagate the "peer is done" teardown signal to
+            # the guest before it finishes flushing `reply` into the
+            # guest's vsock queue, and the guest's read then observes a
+            # bare EOF instead of the reply. Proven on-box: the unmodified
+            # `rust/vsock-client` relay lost the reply on 10/10 connections
+            # across repeated runs against this listener's ORIGINAL
+            # immediate-shutdown timing, and lost 0/10 across 7 repeated
+            # runs once this delay was inserted here -- with no code
+            # change anywhere else. This
+            # sleep is a test-harness correctness fix (modeling a
+            # well-behaved peer that doesn't race its own write against
+            # its own teardown), not evidence of a defect in the relay;
+            # see bug_73b2.md's "Root cause + fix" section for the full
+            # writeup. The shutdown(SHUT_WR)+sleep+close shape below is
+            # otherwise unchanged from spike/m8-a1/vsock-host-listener.py.
+            time.sleep(0.3)
             conn.shutdown(socket.SHUT_WR)
             time.sleep(0.2)
         except (BrokenPipeError, ConnectionResetError) as exc:
