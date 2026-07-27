@@ -1100,7 +1100,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
     child.on("error", (err) => {
       clearTimers();
-      finish({ ok: false, reason: `failed to spawn review container (${dockerBin}): ${errorMessage(err)}` });
+      finish({ ok: false, reason: `failed to spawn review sandbox (${binary}): ${errorMessage(err)}` });
     });
 
     child.on("close", (code, procSignal) => {

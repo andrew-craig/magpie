@@ -520,7 +520,7 @@ describe("runReview", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/failed to spawn review container/);
+      expect(result.reason).toMatch(/failed to spawn review sandbox/);
     }
   });
 
@@ -624,6 +624,229 @@ describe("runReview", () => {
       expect(result.reason).toBe("aborted");
     }
     expect(existsSync(join(root, INVOCATION_FILE))).toBe(false);
+  });
+});
+
+// --- Micro-VM tier (M8-C3, task_39ff) --------------------------------------
+//
+// Same offline-fake-binary approach as the crun-tier tests above, but the
+// fake stands in for `magpie-krun-launch`: it parses `--out-mount
+// <hostOut>:<tag>` (not `-v <hostOut>:/out`) to find the findings dir, and
+// there is no `docker kill <name>` step to fake at all — the micro-VM tier
+// never calls it (see reviewer.ts's `killContainerBestEffort` doc comment).
+
+const MICROVM_INVOCATION_FILE = "microvm-invocation.json";
+
+interface MicrovmInvocation {
+  argv: string[];
+  outHost: string;
+  openRouterKey: string | null;
+  magpieFooVisible: boolean;
+}
+
+function microvmTestConfig(overrides: Partial<Config["limits"]> = {}): Config {
+  const base = testConfig(overrides);
+  return {
+    ...base,
+    container: { ...base.container, tier: "microvm" },
+    microvm: { ramMib: 512, vcpus: 2, rootfsPath: "/fake/rootfs", hostRamBudgetMib: 2048, launcherBin: "magpie-krun-launch" },
+  };
+}
+
+/** Writes a fake `magpie-krun-launch` whose body is `runBody`, recording the invocation first (mirrors `writeFakeDocker` for the crun tier). */
+function writeFakeLauncher(runBody: string): string {
+  const path = join(root, "fake-krun-launch.js");
+  const prelude = [
+    `const fs = require("fs");`,
+    `const nodepath = require("path");`,
+    `const ROOT = ${JSON.stringify(root)};`,
+    `const argv = process.argv.slice(2);`,
+    // Find the `--out-mount <hostOut>:<tag>` value.
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "--out-mount") outHost = argv[i + 1].replace(/:[^:]*$/, "");`,
+    `}`,
+    `fs.writeFileSync(nodepath.join(ROOT, ${JSON.stringify(MICROVM_INVOCATION_FILE)}), JSON.stringify({`,
+    `  argv,`,
+    `  outHost,`,
+    `  openRouterKey: process.env.OPENROUTER_API_KEY === undefined ? null : process.env.OPENROUTER_API_KEY,`,
+    `  magpieFooVisible: process.env.MAGPIE_FOO !== undefined,`,
+    `}));`,
+  ].join("\n");
+  writeFileSync(path, `#!/usr/bin/env node\n${prelude}\n${runBody}\n`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function writeFakeLauncherWithFindings(
+  messages: Array<ReturnType<typeof assistantMessage>>,
+  findingsSpec: FakeFindingsSpec,
+): string {
+  const lines: string[] = [`const findingsPath = nodepath.join(outHost, "findings.json");`];
+  if (findingsSpec.kind === "valid") {
+    lines.push(`fs.writeFileSync(findingsPath, ${JSON.stringify(JSON.stringify(findingsSpec.value))});`);
+  } else if (findingsSpec.kind === "raw") {
+    lines.push(`fs.writeFileSync(findingsPath, ${JSON.stringify(findingsSpec.value)});`);
+  }
+  lines.push(
+    `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+  );
+  messages.forEach((m, i) => {
+    lines.push(`const m${i} = ${JSON.stringify(m)};`);
+    lines.push(`process.stdout.write(JSON.stringify({type:"message_end",message:m${i}}) + "\\n");`);
+  });
+  lines.push(
+    `process.stdout.write(JSON.stringify({type:"agent_end",messages:[${messages
+      .map((_, i) => `m${i}`)
+      .join(",")}]}) + "\\n");`,
+  );
+  return writeFakeLauncher(lines.join("\n"));
+}
+
+function readMicrovmInvocation(): MicrovmInvocation {
+  return JSON.parse(readFileSync(join(root, MICROVM_INVOCATION_FILE), "utf-8")) as MicrovmInvocation;
+}
+
+describe("runReview (microvm tier)", () => {
+  it("returns ok:true with parsed findings via the --out-mount virtiofs dir (container-mounts.ts reused unchanged)", async () => {
+    const piBinary = writeFakeLauncherWithFindings([assistantMessage("unused")], {
+      kind: "valid",
+      value: { findings: sampleFindings, summary: "One correctness issue found.", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary, config: microvmTestConfig() }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.summary).toBe("One correctness issue found.");
+      expect(result.findings).toEqual(sampleFindings);
+      expect(result.verdict).toBe("comment");
+    }
+  });
+
+  it("builds a launcher argv with the vsock pair, both virtiofs mounts, and no docker-shaped flags", async () => {
+    const piBinary = writeFakeLauncherWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary, config: microvmTestConfig() }));
+    expect(result.ok).toBe(true);
+
+    const { argv } = readMicrovmInvocation();
+    expect(argv).toContain("--rootfs");
+    expect(argv[argv.indexOf("--rootfs") + 1]).toBe("/fake/rootfs");
+    expect(argv).toContain("--exec");
+    expect(argv[argv.indexOf("--exec") + 1]).toBe("/opt/magpie/entrypoint.sh");
+    expect(argv).toContain("--vsock-port");
+    expect(argv).toContain("--vsock-uds");
+    expect(argv[argv.indexOf("--vsock-uds") + 1]).toBe(`${TEST_GATEWAY_SOCKET_DIR}/gw.sock`);
+    expect(argv.some((a) => a.startsWith("--work-mount"))).toBe(true);
+    expect(argv.some((a) => a.startsWith("--out-mount"))).toBe(true);
+    // No crun-shaped flags at all under this tier.
+    expect(argv).not.toContain("--network");
+    expect(argv).not.toContain("--cap-drop=ALL");
+  });
+
+  it("passes the gateway key via --env-from-host (env only), never as a literal argv value (uid-split invariant)", async () => {
+    const piBinary = writeFakeLauncherWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary, config: microvmTestConfig() }));
+    expect(result.ok).toBe(true);
+
+    const { argv, openRouterKey } = readMicrovmInvocation();
+    expect(openRouterKey).toBe(TEST_GATEWAY_API_KEY);
+    expect(argv).toContain("--env-from-host");
+    expect(argv[argv.indexOf("--env-from-host") + 1]).toBe("OPENROUTER_API_KEY");
+    // The MERGE-BLOCKER assertion: the real key value never appears anywhere
+    // in the argv this module constructs, only its NAME.
+    expect(argv.join(" ")).not.toContain(TEST_GATEWAY_API_KEY);
+  });
+
+  it("returns ok:false when the launcher exits non-zero (guest panic/OOM-shaped failure)", async () => {
+    const piBinary = writeFakeLauncher(
+      [`process.stderr.write("magpie-krun-launch: boot failed: krun_start_enter failed: -12 (Cannot allocate memory)\\n");`, `process.exit(4);`].join(
+        "\n",
+      ),
+    );
+
+    const result = await runReview(baseParams({ piBinary, config: microvmTestConfig() }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/exited with code 4/);
+      expect(result.reason).toMatch(/Cannot allocate memory/);
+    }
+    // Out dir (the --out-mount host source) is still cleaned up on the
+    // dead-VM path, same as the crun tier's non-zero-exit path.
+    const { outHost } = readMicrovmInvocation();
+    expect(outHost.length).toBeGreaterThan(0);
+    expect(existsSync(outHost)).toBe(false);
+  });
+
+  it("kills the launcher (no docker-kill equivalent) and returns ok:false after the configured timeout", async () => {
+    const piBinary = writeFakeLauncher(
+      [
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        // Simulates krun_start_enter never returning (the VM running
+        // forever) — only runReview's own timeout should end this process.
+        `setInterval(() => {}, 1000);`,
+      ].join("\n"),
+    );
+
+    const start = Date.now();
+    const result = await runReview(
+      baseParams({ piBinary, config: microvmTestConfig({ jobTimeoutSeconds: 0.2 }) }),
+    );
+    const elapsedMs = Date.now() - start;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/timeout/);
+    }
+    // Killed via plain SIGTERM (the launcher process IS the VM), well under
+    // the SIGTERM->SIGKILL grace period.
+    expect(elapsedMs).toBeLessThan(4_000);
+
+    const { outHost } = readMicrovmInvocation();
+    expect(existsSync(outHost)).toBe(false);
+  }, 10_000);
+
+  it("resolves ok:false/aborted promptly when the caller's AbortSignal fires, without a docker-kill call", async () => {
+    const piBinary = writeFakeLauncher(
+      [
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        `setInterval(() => {}, 1000);`,
+      ].join("\n"),
+    );
+    const controller = new AbortController();
+
+    const resultPromise = runReview(
+      baseParams({ piBinary, config: microvmTestConfig(), signal: controller.signal }),
+    );
+    // Give the launcher a moment to actually spawn before aborting.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    controller.abort();
+
+    const result = await resultPromise;
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("aborted");
+    }
+  });
+
+  it("returns ok:false when the launcher binary cannot be spawned", async () => {
+    const result = await runReview(
+      baseParams({ piBinary: join(root, "does-not-exist-launcher"), config: microvmTestConfig() }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/failed to spawn review sandbox/);
+    }
   });
 });
 
