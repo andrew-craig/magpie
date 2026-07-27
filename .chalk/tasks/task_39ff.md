@@ -2,14 +2,14 @@
 id: task_39ff
 title: M8-C3: micro-VM tier end-to-end — port reviewer launch to krun under rootless podman (crun floor stays feature-flagged fallback)
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: [microvm,security]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:10Z
-updated_at: 2026-07-27T02:58:57Z
+updated_at: 2026-07-27T03:20:09Z
 ---
 Brief §8 phase 3: the core port. Launch the reviewer as a rootless KVM micro-VM (podman +
 krun OCI runtime) end-to-end, with the hardened crun tier remaining as the feature-flagged
@@ -86,3 +86,116 @@ acceptance criteria:
 - [ ] **If any gateway path can close promptly after writing,** either fix it to defer the close
       until bytes are flushed, or add a guest-/host-side guard — do not ship live Pi↔gateway
       traffic over a path that can silently drop a reply. Repro harness: `spike/m8-c2/`.
+
+## C3 implementation plan (2026-07-27)
+
+Working on `m8-c2-forwarder-plan` (consolidated C2+C3 branch, no new branch, no push, no PR).
+
+### 0. Design forks resolved up front (documented, not stalled on)
+
+- **Secret-on-launcher-argv problem.** `magpie-krun-launch`'s only way to set a guest env var
+  today is `--env KEY=VALUE` — literally on argv, visible via `/proc/<pid>/cmdline` to any
+  local user. That would put the gateway virtual key on argv, violating the same
+  "never in argv, only in env" invariant `reviewer.ts` already documents for the docker path
+  (`-e OPENROUTER_API_KEY` name-only) and directly contradicts CTO edit 1 (uid-split /
+  no-credential-on-launcher-argv, a merge blocker). Fix: add a new launcher flag
+  `--env-from-host <NAME>` (repeatable) that reads `NAME`'s value from the **launcher
+  process's own environment** (which `reviewer.ts` sets via `spawn(bin, argv, { env })`,
+  exactly like it already does for the docker client) and forwards `NAME=<value>` into the
+  guest's envp — mirroring docker's `-e NAME` name-only convention exactly. Only
+  `OPENROUTER_API_KEY` uses this path; `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT` are
+  non-secret and go via plain `--env KEY=VALUE` (matches docker's inline-non-secret
+  convention for `OPENAI_BASE_URL` today).
+- **Findings retrieval (`/out`) has no launcher flag today.** The CLI contract only exposes
+  one read-only virtiofs device (`--work-mount`). Without a writable channel out, the guest
+  can never hand back `findings.json`. Fix: add a second flag, `--out-mount <host-path>[:<tag>]`,
+  mirroring `--work-mount` but attached `read_only=false` (`krun_add_virtiofs3`'s existing
+  4th arg already supports this — no new libkrun call needed). This lets `container-mounts.ts`'s
+  existing `createOutputDir`/`findingsPath` be reused completely unchanged across both tiers.
+  Verify empirically on this box (via `sg kvm`) whether a file the guest writes as a non-root
+  uid lands host-side owned by the orchestrator's own uid (matching plain docker's behavior)
+  or needs an explicit permission fix (matching the M8-B2 podman `--userns=keep-id` lesson,
+  `task_08ec`) — do not assume, test it.
+
+### 1. Rust launcher (`rust/magpie-microvm-launcher`)
+- [ ] `src/cli.rs`: add `--out-mount <host-path>[:<tag>]` (mirrors `--work-mount` parsing).
+- [ ] `src/cli.rs`: add `--env-from-host <NAME>` (repeatable). Resolve via an injectable lookup
+      (`parse_with_env_lookup`, default `std::env::var`) so it stays unit-testable with a fake
+      env — `parse()`'s existing signature/tests stay unchanged.
+- [ ] `src/config.rs`: add `out_mount: Option<WorkMount>` (or equivalent) to `LaunchConfig`/
+      `LaunchConfigInput`, validated the same way as `work_mount` (absolute path, non-empty tag).
+- [ ] `src/krun.rs`: attach `out_mount` via a second `krun_add_virtiofs3` call, `read_only: false`.
+- [ ] Unit tests for all of the above (cli.rs + config.rs), mirroring the existing work-mount/
+      vsock-pair test shapes.
+- [ ] `cargo build --release && cargo test --workspace` green.
+- [ ] Empirically boot via `sg kvm` with both mounts + a non-root guest write to `/out`, confirm
+      host-side ownership/permissions, adjust `createOutputDir`/entrypoint approach if needed.
+
+### 2. Orchestrator config (`packages/orchestrator/src/config.ts`)
+- [ ] `container.tier: "crun" | "microvm"`, default `"crun"`.
+- [ ] New `microvm` section: `ram_mib` (default 1024), `vcpus` (default 2), `rootfs_path`
+      (absolute, required when tier=microvm), `host_ram_budget_mib` (default, for concurrency),
+      `launcher_bin` (default `magpie-krun-launch`), `out_mount_tag`/`work_mount_tag` if needed.
+      Mirror the zod + typed-Config style exactly; fail closed at load if tier=microvm and
+      rootfs_path is missing/relative.
+- [ ] `resolveQueueConcurrency(config)`: crun tier unchanged (`limits.concurrency`); microvm tier
+      = `max(1, floor(host_ram_budget_mib / ram_mib))`. Wire into `queue.ts`'s
+      `jobQueueOptionsFromConfig`.
+
+### 3. `reviewer.ts` tier ladder
+- [ ] `buildMicrovmLaunchArgs(...)`: pure builder for `magpie-krun-launch` argv, analogous to
+      `buildReviewDockerArgs`. Unit-tested (new `reviewer-microvm-argv.test.ts`), including an
+      explicit assertion that the gateway virtual key never appears as a literal in the argv
+      (only `--env-from-host OPENROUTER_API_KEY`, name-only) — the uid-split/CTO-edit-1 merge
+      blocker test.
+- [ ] `runReview`: branch on `config.container.tier`. crun path (`buildReviewDockerArgs` +
+      spawn) stays byte-for-byte unchanged — zero edits to `reviewer-crun-floor-argv.test.ts`'s
+      fixture. microvm path spawns `magpie-krun-launch` with the built argv, `--vsock-uds`/
+      `--vsock-port` from `microvmVsockChannel(gatewayKey-shaped input)`, `--work-mount
+      <mountDir>:work`, `--out-mount <outDir>:out`, `--uid/--gid` = `process.getuid()/getgid()`,
+      no gateway-socket-dir bind mount (vsock replaces it).
+- [ ] Kill path: no `docker kill <name>` for microvm — killing the launcher process IS killing
+      the VM (`krun_start_enter` never returns). Skip `killContainerBestEffort` for this tier;
+      SIGTERM→SIGKILL on the launcher child is sufficient.
+- [ ] Dead-VM handling: non-zero launcher exit / timeout / abort all still resolve
+      `{ ok: false, reason }` through the existing settle path — add a test.
+
+### 4. Guest-side entrypoint (`docker/reviewer/entrypoint.sh`, `Dockerfile`)
+- [ ] Guard new logic behind the existing `[ -c /dev/vsock ]` tier signal (already used to pick
+      `vsock-client` vs `forwarder.mjs`).
+- [ ] Mount both virtiofs devices before anything else needs them: `mount -t virtiofs work /work`,
+      `mount -t virtiofs out /out`.
+- [ ] Drop privileges before `exec pi`: `setpriv --reuid=10001 --regid=10001 --clear-groups
+      --no-new-privs exec pi ...` using the image's already-baked-in `reviewer` uid/gid (10001)
+      — the guest boots root (`krun_setuid`/`krun_setgid` only confine the HOST VMM, per
+      `src/krun.rs`), so this is the real, previously-dormant purpose of that baked-in user.
+      Ensure `util-linux` (for `setpriv`/`mount`) is present in the image.
+- [ ] Note in the report: this is a source change; the published signed image needs a rebuild,
+      out of scope here.
+
+### 5. Concurrency — covered by 2 above (config.ts + queue.ts wiring).
+
+### 6. bug_73b2 acceptance test (packages/gateway)
+- [ ] New integration test driving a REAL `createProxyServer` bound to a real unix socket
+      (mirrors `job-sockets.ts` production shape), a raw low-level client, and a stubbed
+      upstream — covering: normal keep-alive completion, an upstream error (502) response, and
+      the client-disconnect/abort path — asserting zero byte loss / no premature shutdown before
+      full flush on every path.
+- [ ] Time-permitting: an additional real hardware check via `sg kvm` — boot the actual launcher
+      with `--vsock-uds` pointed at a real `packages/gateway` proxy server instance and drive a
+      review-shaped HTTP round trip from inside the guest, to validate the transport end-to-end
+      rather than only the gateway's own write/close ordering in isolation.
+
+### 7. Verification
+- [ ] `cd rust && cargo build --release && cargo test --workspace`
+- [ ] `npm test` (full workspace) + isolated re-run of the known-flaky
+      `reviewer.test.ts` AbortSignal test if it flakes
+- [ ] M8-B1 floor golden green, zero fixture edits
+- [ ] Live micro-VM run(s) via `sg kvm`, reusing `smoke-test.sh`/spike artifacts where possible
+- [ ] Do NOT claim two-arch/full-webhook e2e — defer explicitly (no amd64 hw, no image
+      republish, no M8-D3 provisioning here).
+
+### 8. Process
+- [ ] Commit incrementally (Rust changes, config, reviewer.ts, entrypoint, tests, verification)
+- [ ] Leave `task_39ff` `in_progress`; append a "C3 status: proven vs deferred" section at the
+      end instead of closing.
