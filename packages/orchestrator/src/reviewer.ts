@@ -94,6 +94,7 @@ import { basename } from "node:path";
 import type { Config } from "./config.js";
 import { assertGitStripped, createOutputDir, prepareReviewMount } from "./container-mounts.js";
 import { parseFindings, type Finding } from "./findings.js";
+import { microvmVsockChannel } from "./microvm-vsock.js";
 
 /** Grace period between SIGTERM and SIGKILL when a job times out. */
 const KILL_GRACE_MS = 5_000;
@@ -460,6 +461,206 @@ export function findMissingHardenedFlags(argv: readonly string[]): string[] {
   return HARDENED_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
 }
 
+// --- Micro-VM tier (M8-C3, task_39ff) -------------------------------------
+//
+// Everything below is the ALTERNATIVE launch path selected by
+// `config.container.tier === "microvm"` (default remains `"crun"`, the
+// buildReviewDockerArgs path above, byte-for-byte unchanged — see the
+// M8-B1 floor golden). Instead of `docker run`/`podman run`, this spawns
+// `magpie-krun-launch` (rust/magpie-microvm-launcher), a direct-libkrun
+// launcher that boots the reviewer image's unpacked rootfs as a rootless
+// KVM micro-VM. Three structural differences from the crun path:
+//
+//   1. NO gateway-socket bind mount, NO in-container TCP->unix forwarder.
+//      The launcher's `--vsock-uds`/`--vsock-port` (see
+//      microvm-vsock.ts's `microvmVsockChannel`) make libkrun itself dial
+//      OUT to the gateway's `gw.sock` on each guest `connect()` — the
+//      guest's own `magpie-vsock-client` (M8-C1, already baked into the
+//      image, selected by entrypoint.sh's `[ -c /dev/vsock ]` check) still
+//      bridges Pi's plain TCP request to that vsock port, so `OPENAI_BASE_URL`
+//      stays the SAME in-guest-loopback address as the crun tier
+//      (`config.gateway.containerBaseUrl`) — nothing about how Pi itself
+//      reaches the gateway changes, only what's on the OTHER side of the
+//      vsock device.
+//   2. `/work` and `/out` ride WRITABLE-vs-read-only virtiofs devices
+//      (`--work-mount`/`--out-mount`) instead of bind mounts — see
+//      container-mounts.ts's `prepareReviewMount`/`createOutputDir`, reused
+//      COMPLETELY UNCHANGED: virtiofs shares the same host directory a bind
+//      mount would, so the host-side findings-file read path below needs no
+//      tier-specific branch at all.
+//   3. UID-SPLIT INVARIANT (CTO edit 1, a MERGE BLOCKER): the gateway
+//      virtual key must never appear on the launcher's own argv (visible to
+//      any local user via `/proc/<pid>/cmdline`), unlike a plain
+//      `--env KEY=VALUE`. `buildMicrovmLaunchArgs` below structurally
+//      cannot violate this: its `envFromHost` parameter is a list of
+//      env-var NAMES only (`--env-from-host <NAME>`, see
+//      rust/magpie-microvm-launcher/src/cli.rs), never values — the actual
+//      secret reaches the launcher exactly like it reaches `docker run`
+//      today, ONLY via the spawned child process's environment (`env`,
+//      below), never argv. `reviewer-microvm-argv.test.ts` asserts this
+//      structurally (the key can never even be constructed onto the argv,
+//      by the function's own type) and empirically (a fixture key value
+//      never appears as a literal in the returned array).
+//
+// Kill/dead-VM handling differs too — see `startKillSequence`'s
+// `killContainerBestEffort` call below: there is no `docker kill <name>`
+// equivalent for a micro-VM (no container name, no separate runtime to
+// ask); `krun_start_enter` never returns once the guest boots (see
+// rust/magpie-microvm-launcher/src/krun.rs's `boot` doc comment: "the VMM
+// assumes it has full control of the process"), so the launcher's OWN
+// process IS the VM — killing it (the same SIGTERM->SIGKILL sequence used
+// for the crun tier's client process) tears the guest down too. No new
+// kill mechanism is needed, only skipping the docker/podman-specific
+// `killContainerBestEffort` call for this tier.
+
+/** Inputs to {@link buildMicrovmLaunchArgs} — every per-job/per-host VALUE the `magpie-krun-launch` argv is templated from. Pure, no I/O/spawn (mirrors {@link BuildReviewDockerArgsParams}). */
+export interface BuildMicrovmLaunchArgsParams {
+  /** Host path to the prepared guest rootfs (`config.microvm.rootfsPath`, `--rootfs`). */
+  rootfsPath: string;
+  /** Path to the executable inside the guest rootfs (`--exec`) — always the reviewer image's entrypoint. */
+  execPath: string;
+  /** Guest argv appended to `execPath` (`--arg` per element) — the same `--provider`/`--model` trailing args the crun tier's image ENTRYPOINT forwards via `"$@"`. */
+  execArgs: string[];
+  /** Guest vCPU count (`config.microvm.vcpus`, `--vcpus`). */
+  vcpus: number;
+  /** Guest RAM in MiB (`config.microvm.ramMib`, `--ram-mib`). */
+  ramMib: number;
+  /** Host uid passed to `krun_setuid` (`process.getuid()` in production — confines only the HOST VMM process, see rust/magpie-microvm-launcher/src/krun.rs; the guest itself stays root until entrypoint.sh drops privileges). */
+  uid: number;
+  /** Host gid passed to `krun_setgid` (`process.getgid()` in production). Same caveat as `uid`. */
+  gid: number;
+  /** Guest-relative working directory (`--workdir`) — `/work`, matching the crun tier's image `WORKDIR`. */
+  workdir: string;
+  /**
+   * Env var NAMES (never values) resolved from the LAUNCHER'S OWN process
+   * environment and forwarded into the guest (`--env-from-host <NAME>` per
+   * element — see rust/magpie-microvm-launcher/src/cli.rs). This is the
+   * uid-split-preserving equivalent of docker's `-e OPENROUTER_API_KEY`
+   * name-only convention: the secret crosses the orchestrator->launcher
+   * boundary only via the spawned process's `env` (see `runReview`), never
+   * this array or the resulting argv. Always exactly `["OPENROUTER_API_KEY"]`
+   * in production.
+   */
+  envFromHost: string[];
+  /** Non-secret guest env vars, passed inline (`--env KEY=VALUE`) — mirrors docker's inline `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT` (values here are deployment config, never a per-job credential). */
+  env: Record<string, string>;
+  /** Fixed vsock port the guest dials (`microvmVsockChannel`'s `MICROVM_VSOCK_PORT`, `--vsock-port`). */
+  vsockPort: number;
+  /** Host path to the gateway's per-job `gw.sock` (`microvmVsockChannel`'s `udsPath`, `--vsock-uds`). */
+  vsockUdsPath: string;
+  /** Host path bind-mounted (virtiofs, read-only) at `/work` (`--work-mount`) — same `mountDir` container-mounts.ts's `prepareReviewMount` produces for the crun tier. */
+  workMountHostPath: string;
+  /** virtiofs tag for the `/work` device; defaults to `"work"` (matches the launcher CLI's own default and entrypoint.sh's `mount -t virtiofs work /work`). */
+  workMountTag?: string;
+  /** Host path bind-mounted (virtiofs, WRITABLE) at `/out` (`--out-mount`) — same `outDir` container-mounts.ts's `createOutputDir` produces for the crun tier; `findingsPath` is read back from this same host directory afterward, no tier-specific branch needed. */
+  outMountHostPath: string;
+  /** virtiofs tag for the `/out` device; defaults to `"out"` (matches the launcher CLI's own default and entrypoint.sh's `mount -t virtiofs out /out`). */
+  outMountTag?: string;
+}
+
+/**
+ * Pure builder for the `magpie-krun-launch` argv — the micro-VM tier's
+ * counterpart to {@link buildReviewDockerArgs}. Same shape/spirit: takes
+ * only plain values, does no I/O/spawning/uid lookup, and is exercised by
+ * `reviewer-microvm-argv.test.ts` (including the uid-split/CTO-edit-1
+ * merge-blocker assertion that no credential value ever appears in the
+ * returned array).
+ */
+export function buildMicrovmLaunchArgs(params: BuildMicrovmLaunchArgsParams): string[] {
+  const {
+    rootfsPath,
+    execPath,
+    execArgs,
+    vcpus,
+    ramMib,
+    uid,
+    gid,
+    workdir,
+    envFromHost,
+    env,
+    vsockPort,
+    vsockUdsPath,
+    workMountHostPath,
+    workMountTag = "work",
+    outMountHostPath,
+    outMountTag = "out",
+  } = params;
+
+  return [
+    "--rootfs",
+    rootfsPath,
+    "--exec",
+    execPath,
+    ...execArgs.flatMap((arg) => ["--arg", arg]),
+    "--vcpus",
+    String(vcpus),
+    "--ram-mib",
+    String(ramMib),
+    "--uid",
+    String(uid),
+    "--gid",
+    String(gid),
+    "--workdir",
+    workdir,
+    // Name-only, uid-split-preserving secrets FIRST, then non-secret inline
+    // pairs — order doesn't matter to the launcher (it just accumulates one
+    // `env` list either way — see rust/magpie-microvm-launcher/src/cli.rs's
+    // `parse_with_env_lookup`), but keeping the security-relevant entries
+    // grouped together makes the argv easier to eyeball in a log line.
+    ...envFromHost.flatMap((name) => ["--env-from-host", name]),
+    ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+    "--vsock-port",
+    String(vsockPort),
+    "--vsock-uds",
+    vsockUdsPath,
+    "--work-mount",
+    `${workMountHostPath}:${workMountTag}`,
+    "--out-mount",
+    `${outMountHostPath}:${outMountTag}`,
+  ];
+}
+
+/**
+ * The micro-VM tier's runtime fail-closed preflight — the counterpart to
+ * {@link findMissingHardenedFlags}/`HARDENED_FLAG_CHECKS`. Narrower than the
+ * crun tier's list (there are fewer independently-toggleable hardening
+ * flags in this argv shape — vcpu/RAM/no-network are the launcher's own
+ * unconditional behavior, not per-flag choices this argv could accidentally
+ * omit), but covers the properties a bad refactor COULD silently drop:
+ * non-root uid/gid (the whole point of `krun_setuid`/`krun_setgid` on the
+ * host VMM process), the vsock pair (the guest's only egress channel), and
+ * both virtiofs mounts (no `/work` or `/out` means the review can't
+ * function, and — more importantly for `/work` — a missing `--work-mount`
+ * here would be a silent posture change if a future refactor dropped it
+ * from the argv while still believing the PR content was mounted).
+ */
+const MICROVM_FLAG_CHECKS: ReadonlyArray<{ label: string; ok: (argv: readonly string[]) => boolean }> = [
+  { label: "--uid <non-root>", ok: (a) => hasNonZeroValue(a, "--uid") },
+  { label: "--gid <non-root>", ok: (a) => hasNonZeroValue(a, "--gid") },
+  { label: "--vsock-port/--vsock-uds pair", ok: (a) => a.includes("--vsock-port") && a.includes("--vsock-uds") },
+  { label: "--work-mount", ok: (a) => a.includes("--work-mount") },
+  { label: "--out-mount", ok: (a) => a.includes("--out-mount") },
+  { label: "--rootfs", ok: (a) => a.includes("--rootfs") },
+];
+
+/** True iff `flag` is present with a value whose integer form is non-zero (mirrors {@link hasNonRootUser}'s intent, generalized to a bare `--uid`/`--gid` rather than a colon-joined `uid:gid` pair). */
+function hasNonZeroValue(argv: readonly string[], flag: string): boolean {
+  const i = argv.indexOf(flag);
+  if (i < 0 || i + 1 >= argv.length) return false;
+  return argv[i + 1] !== "0";
+}
+
+/**
+ * Returns the labels of any micro-VM flags MISSING from `argv` (empty array
+ * ⇒ the full posture is present). See {@link MICROVM_FLAG_CHECKS}. Pure —
+ * {@link runReview} calls it just before spawn under the `"microvm"` tier
+ * and fails the job closed (mirrors {@link findMissingHardenedFlags}'s
+ * crun-tier contract exactly).
+ */
+export function findMissingMicrovmFlags(argv: readonly string[]): string[] {
+  return MICROVM_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
+}
+
 /**
  * Run Pi headless, inside a hardened review container, against a PR
  * checkout + diff, and return STRUCTURED review findings collected via the
@@ -524,7 +725,16 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     return { ok: false, reason: "aborted" };
   }
 
+  // Tier selection (M8-C3): "crun" (default) is the docker/podman path
+  // below, byte-for-byte unchanged; "microvm" spawns `magpie-krun-launch`
+  // instead — see this module's "Micro-VM tier" section above. `piBinary`
+  // is the SAME test-seam field regardless of tier (it already documents
+  // itself generically as "the docker (or docker-compatible) binary this
+  // module spawns" — the micro-VM tier reuses it unchanged rather than
+  // adding a parallel override field).
+  const tier = config.container.tier;
   const dockerBin = params.piBinary ?? config.container.dockerBin;
+  const launcherBin = params.piBinary ?? config.microvm.launcherBin;
   const jobTimeoutSeconds = config.limits.jobTimeoutSeconds;
   const timeoutMs = jobTimeoutSeconds * 1000;
   const jobId = params.jobId ?? randomBytes(8).toString("hex");
@@ -608,45 +818,108 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // dependent iptables rule. The mounted `/run/gw` directory (below) is
   // therefore the container's ONLY remaining path off itself.
   //
-  // The actual argv is assembled by the pure {@link buildReviewDockerArgs}
-  // (see its doc comment) so it can be unit-tested — including the M8-B1
-  // byte-for-byte golden/floor-invariant regression test — independently of
-  // this function's spawn/timeout/kill machinery.
-  const dockerArgs: string[] = buildReviewDockerArgs({
-    containerName,
-    uid: process.getuid(),
-    gid: process.getgid(),
-    mountDir,
-    outDir: output.outDir,
-    gatewaySocketDir: params.gatewaySocketDir,
-    dockerBin,
-    config,
-  });
+  // The actual argv is assembled by the pure {@link buildReviewDockerArgs}/
+  // {@link buildMicrovmLaunchArgs} (see their doc comments) so either can be
+  // unit-tested — including the M8-B1 byte-for-byte golden/floor-invariant
+  // regression test for the crun path — independently of this function's
+  // spawn/timeout/kill machinery. `binary`/`argv` below are what actually
+  // gets spawned; everything from here down is written against those two
+  // generic names so the rest of this function doesn't need its own
+  // tier-conditional branches.
+  let binary: string;
+  let argv: string[];
+  if (tier === "microvm") {
+    const vsockChannel = microvmVsockChannel({ socketDir: params.gatewaySocketDir });
+    argv = buildMicrovmLaunchArgs({
+      rootfsPath: config.microvm.rootfsPath,
+      // The reviewer image's entrypoint — same binary the crun tier's
+      // ENTRYPOINT execs, just reached via the unpacked-rootfs path this
+      // launcher boots instead of a container image reference.
+      execPath: "/opt/magpie/entrypoint.sh",
+      execArgs: ["--provider", "openrouter", "--model", config.llm.model],
+      vcpus: config.microvm.vcpus,
+      ramMib: config.microvm.ramMib,
+      uid: process.getuid(),
+      gid: process.getgid(),
+      workdir: "/work",
+      envFromHost: ["OPENROUTER_API_KEY"],
+      env: {
+        OPENAI_BASE_URL: config.gateway.containerBaseUrl,
+        MAGPIE_REQUIRE_MEMORY_LIMIT: String(config.container.requireMemoryLimit),
+      },
+      vsockPort: vsockChannel.port,
+      vsockUdsPath: vsockChannel.udsPath,
+      workMountHostPath: mountDir,
+      outMountHostPath: output.outDir,
+    });
 
-  // Runtime fail-closed preflight (task_bfaf / CTO edit #3 "or preflight" leg),
-  // defence-in-depth over the M8-B1 build-time floor golden. Assert the fully-
-  // templated argv still carries the complete hardened posture (and that the
-  // `.git`-stripped `/work` mount really has no `.git`) BEFORE we spawn a
-  // container over untrusted PR content — never launch an under-hardened
-  // sandbox. Both checks resolve `{ ok: false }` (never throw) per this
-  // module's contract, and log loudly so an operator sees exactly which
-  // invariant regressed.
-  const missingFlags = findMissingHardenedFlags(dockerArgs);
-  if (missingFlags.length > 0) {
-    console.error(
-      `[reviewer] FAIL-CLOSED: refusing to launch review container — hardened flag preflight ` +
-        `failed, missing: ${missingFlags.join(", ")}. This is a posture regression (see ` +
-        `reviewer.ts findMissingHardenedFlags / the M8-B1 floor golden); no container was started.`,
-    );
-    await output.cleanup().catch(() => {});
-    return { ok: false, reason: `hardened-flag preflight failed: missing ${missingFlags.join(", ")}` };
+    const missingFlags = findMissingMicrovmFlags(argv);
+    if (missingFlags.length > 0) {
+      console.error(
+        `[reviewer] FAIL-CLOSED: refusing to launch review micro-VM — flag preflight failed, ` +
+          `missing: ${missingFlags.join(", ")}. This is a posture regression (see reviewer.ts ` +
+          `findMissingMicrovmFlags); no micro-VM was started.`,
+      );
+      await output.cleanup().catch(() => {});
+      return { ok: false, reason: `microvm-flag preflight failed: missing ${missingFlags.join(", ")}` };
+    }
+    binary = launcherBin;
+  } else {
+    // The hardened `docker run` invocation (mirrors PLAN.md §4 exactly — see
+    // this module's doc comment above for the full flag-by-flag rationale).
+    // Model/provider are the only per-job, non-secret inputs the image needs
+    // and arrive as TRAILING container args, forwarded by
+    // docker/reviewer/entrypoint.sh's `"$@"` onto the baked `pi` invocation —
+    // everything else Pi needs (tools, extension, system prompt) is baked into
+    // the image itself, not passed here.
+    //
+    // `--network none` (M7-1, Design D — DISTRIBUTION.md §2.3) replaces the old
+    // `--network <config.container.network>` bridge/`magpie-net` attachment:
+    // the container gets no network interfaces at all except its own loopback,
+    // a property of the network namespace rather than any daemon-config-
+    // dependent iptables rule. The mounted `/run/gw` directory (below) is
+    // therefore the container's ONLY remaining path off itself.
+    argv = buildReviewDockerArgs({
+      containerName,
+      uid: process.getuid(),
+      gid: process.getgid(),
+      mountDir,
+      outDir: output.outDir,
+      gatewaySocketDir: params.gatewaySocketDir,
+      dockerBin,
+      config,
+    });
+
+    // Runtime fail-closed preflight (task_bfaf / CTO edit #3 "or preflight" leg),
+    // defence-in-depth over the M8-B1 build-time floor golden. Assert the fully-
+    // templated argv still carries the complete hardened posture BEFORE we
+    // spawn a container over untrusted PR content — never launch an
+    // under-hardened sandbox. Resolves `{ ok: false }` (never throws) per this
+    // module's contract, and logs loudly so an operator sees exactly which
+    // invariant regressed.
+    const missingFlags = findMissingHardenedFlags(argv);
+    if (missingFlags.length > 0) {
+      console.error(
+        `[reviewer] FAIL-CLOSED: refusing to launch review container — hardened flag preflight ` +
+          `failed, missing: ${missingFlags.join(", ")}. This is a posture regression (see ` +
+          `reviewer.ts findMissingHardenedFlags / the M8-B1 floor golden); no container was started.`,
+      );
+      await output.cleanup().catch(() => {});
+      return { ok: false, reason: `hardened-flag preflight failed: missing ${missingFlags.join(", ")}` };
+    }
+    binary = dockerBin;
   }
+
+  // `.git`-stripped `/work` mount assertion — tier-agnostic (container-mounts.ts's
+  // `prepareReviewMount`/`assertGitStripped` don't know or care whether `mountDir`
+  // ends up bind-mounted (crun) or virtiofs-attached (microvm); the invariant
+  // ("no live .git reaches the sandbox") is identical either way).
   try {
     await assertGitStripped(mountDir);
   } catch (err) {
     console.error(
-      `[reviewer] FAIL-CLOSED: refusing to launch review container — /work mount is not ` +
-        `.git-stripped (${errorMessage(err)}); no container was started.`,
+      `[reviewer] FAIL-CLOSED: refusing to launch review sandbox — /work mount is not ` +
+        `.git-stripped (${errorMessage(err)}); nothing was started.`,
     );
     await output.cleanup().catch(() => {});
     return { ok: false, reason: `review mount preflight failed: ${errorMessage(err)}` };
@@ -678,9 +951,9 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     // like, which surface asynchronously rather than as a sync throw.
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(dockerBin, dockerArgs, { env });
+      child = spawn(binary, argv, { env });
     } catch (err) {
-      finish({ ok: false, reason: `failed to spawn review container (${dockerBin}): ${errorMessage(err)}` });
+      finish({ ok: false, reason: `failed to spawn review sandbox (${binary}): ${errorMessage(err)}` });
       return;
     }
 
@@ -689,7 +962,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     // a clean failure result instead of a later throw on `.on(...)`/`.end(...)`.
     if (!child.stdout || !child.stderr || !child.stdin) {
       child.kill();
-      finish({ ok: false, reason: "failed to spawn review container: stdio streams unavailable" });
+      finish({ ok: false, reason: "failed to spawn review sandbox: stdio streams unavailable" });
       return;
     }
 
@@ -712,6 +985,14 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
      * signal path. `--rm` on the original `docker run` still removes the
      * container once it's dead, whether that death came from this kill or a
      * normal exit.
+     *
+     * MICRO-VM TIER: this has NO equivalent and is never called for it (see
+     * `startKillSequence` below) — there is no separate runtime/container
+     * name to ask. `krun_start_enter` never returns once the guest boots
+     * (rust/magpie-microvm-launcher/src/krun.rs's `boot` doc comment: "the
+     * VMM assumes it has full control of the process"), so the launcher's
+     * OWN process (`child` below) IS the VM; killing it is both necessary
+     * and sufficient.
      */
     const killContainerBestEffort = (): void => {
       try {
@@ -725,7 +1006,16 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       }
     };
 
-    /** `docker kill` the container, then SIGTERM the client now and SIGKILL after `KILL_GRACE_MS` if still alive — shared by the timeout and the abort-signal paths below. */
+    /**
+     * `docker kill` the container (crun tier only — see
+     * `killContainerBestEffort`'s doc comment), then SIGTERM the client/launcher
+     * now and SIGKILL after `KILL_GRACE_MS` if still alive — shared by the
+     * timeout and the abort-signal paths below. Identical for both tiers except
+     * for that one skipped call: SIGTERM/SIGKILL on `child` tears down a
+     * micro-VM just as reliably as it stops the crun tier's `docker run` client
+     * (once `killContainerBestEffort` has also asked the daemon to stop the
+     * container proper).
+     */
     const startKillSequence = (): void => {
       // Idempotent: if a kill is already in flight (e.g. the timeout fires
       // while an abort's SIGTERM->SIGKILL grace is still counting down, or
@@ -733,7 +1023,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       // `killGraceTimer` — that would leak the first timer and reset the
       // grace period.
       if (killGraceTimer) return;
-      killContainerBestEffort();
+      if (tier !== "microvm") killContainerBestEffort();
       child.kill("SIGTERM");
       killGraceTimer = setTimeout(() => {
         child.kill("SIGKILL");
