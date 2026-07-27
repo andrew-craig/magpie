@@ -199,3 +199,82 @@ Working on `m8-c2-forwarder-plan` (consolidated C2+C3 branch, no new branch, no 
 - [ ] Commit incrementally (Rust changes, config, reviewer.ts, entrypoint, tests, verification)
 - [ ] Leave `task_39ff` `in_progress`; append a "C3 status: proven vs deferred" section at the
       end instead of closing.
+
+## C3 status: proven vs deferred (2026-07-27)
+
+Implemented on branch `m8-c2-forwarder-plan` (NOT closed — the "done when: full
+webhook→published-review e2e on BOTH arches" bar is not fully achievable on this
+single arm64 box; tech lead to make the close/PR call). Commits:
+
+- `d855242` plan
+- `3745cce` launcher: `--env-from-host` + `--out-mount`
+- `d17302e` config `container.tier` + `[microvm]` + queue concurrency
+- `788933a` reviewer.ts micro-VM tier launch path + argv builder/preflight
+- `da33c8a` dead-VM handling tests + tier-agnostic spawn-error wording
+- `54df58a` entrypoint.sh guest virtiofs mounts + setpriv privilege drop + Dockerfile util-linux
+- `968a2b8` pipeline tier wiring + uid-split merge-blocker test (pipeline level)
+- `f852788` bug_73b2 acceptance test (gateway flush safety over a unix socket)
+- `2dfdcef` live micro-VM e2e (out-mount + env-from-host + vsock round-trip)
+
+### PROVEN (implemented + verified on this box)
+
+- **Rust launcher extensions** (`--env-from-host <NAME>`, `--out-mount
+  <host>[:<tag>]`, `WorkMount.read_only`). `cargo build --release` +
+  `cargo test --workspace` GREEN (65 launcher + 14 vsock-client + 5 framing).
+- **Config surface** — `container.tier` (`crun`|`microvm`, default `crun`) +
+  `[microvm]` block (ram_mib/vcpus/rootfs_path/host_ram_budget_mib/launcher_bin),
+  zod-validated, fail-closed at load if `microvm` tier has no absolute rootfs.
+- **Queue concurrency** — `resolveQueueConcurrency`: crun unchanged, microvm =
+  `floor(host_ram_budget_mib/ram_mib)` min 1.
+- **reviewer.ts tier ladder** — pure `buildMicrovmLaunchArgs` +
+  `findMissingMicrovmFlags`; crun path byte-for-byte unchanged; kill path skips
+  `docker kill` for microvm (launcher process == VM).
+- **UID-SPLIT INVARIANT (CTO edit 1, MERGE BLOCKER)** — covered by THREE tests:
+  `reviewer-microvm-argv.test.ts` (builder can't emit the key), reviewer.test.ts
+  microvm suite (runReview level), and pipeline.test.ts microvm suite (end-to-end:
+  key reaches launcher ENV, never argv). Confirmed live too — the launcher boot
+  line carries no key.
+- **Guest privilege drop + in-guest virtiofs mounts** — entrypoint.sh (guarded on
+  the `/dev/vsock` tier signal, crun path untouched): `mount -t virtiofs` for
+  `/work` (ro) + `/out` (rw), then `setpriv --reuid/--regid 10001 --clear-groups
+  --no-new-privs` before `exec pi`. Dockerfile: `util-linux` added. Source only —
+  image rebuild is downstream (see DEFERRED).
+- **Dead-VM handling** — non-zero launcher exit / timeout / abort / unspawnable
+  binary all resolve `{ ok:false, reason }` (never throw); tests added.
+- **pipeline.ts wiring** — tier selected inside runReview from config (call shape
+  unchanged across tiers); tier logged for operators only.
+- **bug_73b2 acceptance** — `proxy-server-flush.test.ts`: real gateway on a UNIX
+  SOCKET, ZERO byte loss on every teardown path (normal / 1 MiB multi-segment /
+  502 / 402 / upstream-error-after-headers / client-abort). AUDIT: no gateway
+  code change needed — it replies only via `res.write()`/`res.end()`, never
+  `res.destroy()`/same-tick shutdown (the safe shape). 7/7 green.
+- **Full TS suite** — `npm test` GREEN: gateway 75, orchestrator 361 (+4 skipped),
+  review-extension 11. reviewer.test.ts (incl. the known AbortSignal-timing flake)
+  passed in the full run AND in isolation.
+- **M8-B1 floor golden** — GREEN with ZERO fixture edits (`git diff main` on
+  `reviewer-crun-floor-argv.golden.json` is empty).
+- **LIVE micro-VM run** (`sg kvm -c 'spike/m8-c2/c3-live-e2e.sh'`, real
+  /dev/kvm + libkrun v1.19.4, arm64/16 KB) — ALL PASSED: `--out-mount` writable
+  (guest-written findings.json landed host-side), `--env-from-host` (secret in
+  guest env, absent from argv), and a gateway-shaped review round-trip over the
+  REAL libkrun `--vsock-uds` bridge with ZERO byte loss (200000/200000 reply
+  bytes, JSON parsed intact). Also re-ran `smoke-test.sh` GREEN (launcher boot +
+  vsock + read-only /work unaffected by the Rust changes).
+
+### DEFERRED (not achievable on this box / out of C3 scope)
+
+- **Reviewer image rebuild/republish** — entrypoint.sh + Dockerfile are SOURCE
+  changes; the cosign-signed multi-arch GHCR image must be rebuilt for a live
+  micro-VM review to pick up the mounts + privilege drop. Can't publish the
+  signed image here.
+- **Full webhook→published-review live pipeline under the microvm tier** — needs
+  a real gateway + GitHub App + the republished image + M8-D3 host provisioning
+  (subuid/subgid, linger, kvm group, rootfs staging — `task_67aa`), none doable
+  non-interactively here. The e2e is proven in PIECES (pipeline.test.ts microvm
+  suite drives webhook→published review with a fake launcher; the live run proves
+  the real transport/mounts) but not as one continuous live flow.
+- **amd64** — no amd64 hardware on this box; the second-arch live e2e is deferred.
+- **In-guest privilege-drop under the REAL entrypoint** — the live run used a
+  standalone guest probe (the real entrypoint needs a real gateway + sk-magpie-
+  key + healthz); the setpriv drop itself is source-verified + will exercise once
+  the image is rebuilt and M8-D3 provisioning lands.
