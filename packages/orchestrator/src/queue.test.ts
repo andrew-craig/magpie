@@ -34,8 +34,10 @@ function makeRecordingLogger(): Logger & { calls: Record<string, unknown>[] } {
 
 describe("jobQueueOptionsFromConfig", () => {
   it("staggers jobTimeoutMs to be a true backstop over the reviewer's own timeout", () => {
-    const config: Pick<Config, "limits"> = {
+    const config: Pick<Config, "limits" | "container" | "microvm"> = {
       limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
+      container: { tier: "crun" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
     };
 
     const options = jobQueueOptionsFromConfig(config);
@@ -43,6 +45,37 @@ describe("jobQueueOptionsFromConfig", () => {
     expect(options.jobTimeoutMs).toBe(
       config.limits.jobTimeoutSeconds * 1000 + QUEUE_TIMEOUT_GRACE_MS,
     );
+  });
+
+  it("uses limits.concurrency unchanged for the crun tier", () => {
+    const config: Pick<Config, "limits" | "container" | "microvm"> = {
+      limits: { jobTimeoutSeconds: 600, concurrency: 5, maxDiffLines: 4000 },
+      container: { tier: "crun" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
+    };
+
+    expect(jobQueueOptionsFromConfig(config).concurrency).toBe(5);
+  });
+
+  it("derives floor(host_ram_budget/ram) for the microvm tier, min 1", () => {
+    const config: Pick<Config, "limits" | "container" | "microvm"> = {
+      limits: { jobTimeoutSeconds: 600, concurrency: 999, maxDiffLines: 4000 },
+      container: { tier: "microvm" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "/rootfs", hostRamBudgetMib: 3500, launcherBin: "magpie-krun-launch" },
+    };
+
+    // floor(3500 / 1024) = 3, and must NOT fall back to limits.concurrency's 999.
+    expect(jobQueueOptionsFromConfig(config).concurrency).toBe(3);
+  });
+
+  it("clamps microvm-tier concurrency to a minimum of 1", () => {
+    const config: Pick<Config, "limits" | "container" | "microvm"> = {
+      limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
+      container: { tier: "microvm" } as Config["container"],
+      microvm: { ramMib: 4096, vcpus: 2, rootfsPath: "/rootfs", hostRamBudgetMib: 1024, launcherBin: "magpie-krun-launch" },
+    };
+
+    expect(jobQueueOptionsFromConfig(config).concurrency).toBe(1);
   });
 });
 
