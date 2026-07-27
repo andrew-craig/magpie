@@ -583,7 +583,17 @@ export function createReviewPipeline(
               verdict: "comment",
             };
           } else {
-            logger.info({ event: "running-review", ...jobLogFields(job) });
+            // M8-C3: which reviewer TIER runs is selected inside `runReview`
+            // from `config.container.tier` (crun/docker vs. the rootless
+            // libkrun micro-VM launcher — see reviewer.ts), so the call
+            // shape below is UNCHANGED across tiers: the pipeline passes the
+            // same `config` + `gatewaySocketDir` either way (the micro-VM
+            // path derives its `--vsock-uds` from that same socketDir via
+            // microvm-vsock.ts, so no new per-job input is threaded here).
+            // The tier is logged for operator observability ONLY (M8-D2's
+            // "operator logs, never the public PR footer" surfacing rule —
+            // this log object is ids/counts, never posted to the PR).
+            logger.info({ event: "running-review", ...jobLogFields(job), tier: config.container.tier });
             result = await runReview({
               workspaceDir: workspace.dir,
               // Not tooLarge, so diff.ts guarantees a non-null diff (see
