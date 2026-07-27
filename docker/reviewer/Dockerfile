@@ -59,9 +59,15 @@ FROM node:22.23.1-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971
 # git: kept on PATH as defence-in-depth in case Pi or a future tool probes
 # for it, even though the mounted worktree itself is `.git`-free (M3-B strips
 # it host-side) and the read-only tool allowlist below never includes `bash`.
+# util-linux: provides `mount`/`setpriv`, both needed ONLY under the M8-C3
+# micro-VM tier's entrypoint.sh branch (mounting the /work and /out virtiofs
+# devices, then dropping privileges before exec'ing pi -- see that file's
+# own comments). node:22-slim's default package set doesn't guarantee
+# either is present, so install explicitly rather than assume; harmless
+# no-op cost under the docker/crun tier, which never reaches that branch.
 # Minimal install, apt lists cleaned up in the same layer.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Pi + review-extension, installed together at pinned exact versions ---

@@ -207,14 +207,60 @@ esac
 # feasibility spike (spike/m7-0/spike-entrypoint.sh).
 # ---------------------------------------------------------------------------
 
+# MAGPIE_IS_MICROVM captures the same /dev/vsock tier signal used to pick a
+# relay above, in a variable, for reuse further down this script (the
+# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff -- need the
+# same tier decision and shouldn't re-derive it via a second `[ -c
+# /dev/vsock ]` probe scattered elsewhere).
 if [ -c /dev/vsock ]; then
   echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host)" >&2
   /opt/magpie/vsock-client &
   MAGPIE_FORWARDER_PID=$!
+  MAGPIE_IS_MICROVM=1
 else
   echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
   node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
   MAGPIE_FORWARDER_PID=$!
+  MAGPIE_IS_MICROVM=0
+fi
+
+# ---------------------------------------------------------------------------
+# M8-C3 (task_39ff): in-guest virtiofs mounts -- MICRO-VM TIER ONLY.
+#
+# Under the docker/crun tier, `/work` (read-only) and `/out` (writable) are
+# already present as bind mounts the runtime set up before this entrypoint
+# ran -- there is nothing to do, and this whole block is SKIPPED (guarded on
+# MAGPIE_IS_MICROVM), so the crun path is byte-for-byte unaffected.
+#
+# Under the micro-VM tier the launcher (rust/magpie-microvm-launcher) only
+# ATTACHES the two virtiofs DEVICES (`krun_add_virtiofs3`, tags `work`
+# read-only and `out` writable -- see reviewer.ts's buildMicrovmLaunchArgs
+# --work-mount/--out-mount); mounting them inside the guest is the guest
+# workload's job (that crate's own doc comments are explicit about this
+# split). The guest boots as root (krun_setuid/krun_setgid confine only the
+# HOST VMM process, not the guest -- see that crate's src/krun.rs), so this
+# script still has the privilege to mount here, BEFORE it drops to the
+# unprivileged reviewer uid for `exec pi` at the very end.
+#
+# Fail-closed: a mount that doesn't succeed means Pi would either see no PR
+# content (/work) or be unable to hand findings back (/out), so abort loudly
+# rather than run a review that can't work. The `-o ro` on /work is
+# defence-in-depth over the device's own read-only attachment (the launcher
+# passes read_only=true to krun_add_virtiofs3) -- the same "the PR checkout
+# is never guest-writable" invariant the crun tier gets from its `:ro` bind
+# mount.
+# ---------------------------------------------------------------------------
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  echo "magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices" >&2
+  mkdir -p /work /out
+  if ! mount -t virtiofs -o ro work /work; then
+    echo "magpie-reviewer: refusing to run: failed to mount the read-only /work virtiofs device (tag 'work') -- the reviewer has no PR content to review. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  if ! mount -t virtiofs out /out; then
+    echo "magpie-reviewer: refusing to run: failed to mount the writable /out virtiofs device (tag 'out') -- the reviewer would have nowhere to write findings.json. Aborting before Pi starts." >&2
+    exit 1
+  fi
 fi
 
 readonly MAGPIE_FORWARDER_WAIT_ATTEMPTS=50
@@ -391,11 +437,56 @@ cat > "$HOME/.pi/agent/models.json" <<EOF
 }
 EOF
 
+# ---------------------------------------------------------------------------
+# M8-C3 (task_39ff): guest privilege drop -- MICRO-VM TIER ONLY.
+#
+# CRUN TIER: reviewer.ts's `docker run --user <uid>:<gid>` already runs this
+# whole entrypoint (and therefore Pi) as an unprivileged host uid -- nothing
+# to drop, and this block is SKIPPED (guarded on MAGPIE_IS_MICROVM), so the
+# crun path is byte-for-byte unaffected.
+#
+# MICRO-VM TIER: the launcher's krun_setuid/krun_setgid confine only the
+# HOST-side VMM process, NOT the guest -- the guest boots (and, until this
+# point, runs this script) as root (fully documented, source + empirically,
+# in rust/magpie-microvm-launcher/src/krun.rs's module doc comment). So the
+# equivalent of `--user` has to happen HERE, image-side: re-exec Pi as the
+# baked-in unprivileged `reviewer` account (uid/gid 10001 -- see
+# docker/reviewer/Dockerfile's groupadd/useradd), matching the crun tier's
+# non-root posture. `setpriv` (util-linux) does a pure privilege drop with no
+# PAM/login/shell in between and `exec`s straight into Pi, so Pi still
+# receives SIGTERM/SIGKILL directly (the timeout/abort path -- see reviewer.ts's
+# startKillSequence, which for this tier kills the launcher process == the VM).
+#
+#   --reuid/--regid 10001         drop real+effective+saved id to `reviewer`
+#   --clear-groups                 shed root's supplementary groups
+#   --no-new-privs                 set PR_SET_NO_NEW_PRIVS (mirrors the crun
+#                                   tier's --security-opt=no-new-privileges)
+#
+# HOME/.pi (holding the non-secret models.json written just above) is chowned
+# to the reviewer uid first so Pi can read it after the drop; everything in
+# it is a fixed, deployment-wide URL, never a per-job credential (the gateway
+# key reaches Pi only via the OPENROUTER_API_KEY env var, which survives the
+# setpriv exec since setpriv does not scrub the environment).
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi" >&2
+  chown -R 10001:10001 "$HOME/.pi"
+  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs \
+    pi \
+    -p \
+    --mode json \
+    --no-session \
+    --tools read,grep,find,ls,report_findings \
+    --extension /opt/magpie/review-extension/src/index.ts \
+    --no-extensions \
+    --append-system-prompt /opt/magpie/reviewer-prompt.md \
+    "$@"
+fi
+
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly
 # from `docker stop`/`docker kill` (the container-lifecycle timeout/abort
 # path -- see epic_a580) instead of a shell swallowing the signal. `"$@"`
 # forwards the caller's trailing args (--provider/--model) after the fixed
-# baked flags.
+# baked flags. (Crun tier only -- the micro-VM tier exec'd above.)
 exec pi \
   -p \
   --mode json \
