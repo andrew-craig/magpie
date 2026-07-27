@@ -277,7 +277,37 @@ pub fn boot(config: &LaunchConfig) -> Result<Infallible, BootError> {
             let path_c = cstring_path("work_mount.host_path", &work_mount.host_path)?;
             check(
                 "krun_add_virtiofs3",
-                krun_add_virtiofs3(ctx_id, tag_c.as_ptr(), path_c.as_ptr(), 0, true),
+                krun_add_virtiofs3(
+                    ctx_id,
+                    tag_c.as_ptr(),
+                    path_c.as_ptr(),
+                    0,
+                    work_mount.read_only,
+                ),
+            )?;
+        }
+
+        // Writable /out virtiofs device (task_39ff / M8-C3) — how the guest
+        // hands `findings.json` back to the host, mirroring docker's
+        // `-v <outDir>:/out` (read-write) bind mount. Same call as the
+        // `/work` device above, differing only in `read_only` (always
+        // `false` here per `LaunchConfig::out_mount`'s doc comment — this
+        // launcher never constructs an `out_mount` with `read_only: true`,
+        // but the check still reads the field rather than hardcoding
+        // `false` so a future caller mistake would change behavior loudly,
+        // not silently).
+        if let Some(out_mount) = &config.out_mount {
+            let tag_c = cstring("out_mount.tag", &out_mount.tag)?;
+            let path_c = cstring_path("out_mount.host_path", &out_mount.host_path)?;
+            check(
+                "krun_add_virtiofs3",
+                krun_add_virtiofs3(
+                    ctx_id,
+                    tag_c.as_ptr(),
+                    path_c.as_ptr(),
+                    0,
+                    out_mount.read_only,
+                ),
             )?;
         }
 

@@ -122,7 +122,7 @@ fn main() -> ExitCode {
 
     eprintln!(
         "magpie-krun-launch: booting rootfs={:?} exec={:?} vcpus={} ram_mib={} uid={} gid={} \
-         vsock={} work_mount={} (libkrun ABI: {})",
+         vsock={} work_mount={} out_mount={} (libkrun ABI: {})",
         config.rootfs,
         config.exec_path,
         config.vcpus,
@@ -136,6 +136,11 @@ fn main() -> ExitCode {
             .unwrap_or_else(|| "none".to_string()),
         config
             .work_mount
+            .as_ref()
+            .map(|m| m.tag.as_str())
+            .unwrap_or("none"),
+        config
+            .out_mount
             .as_ref()
             .map(|m| m.tag.as_str())
             .unwrap_or("none"),
