@@ -70,9 +70,20 @@ echo "=== building rust/vsock-client (release) ===" >&2
 (cd "$REPO_ROOT/rust" && cargo build --release -p magpie-vsock-client >&2)
 
 echo "=== refreshing rootfs with CURRENT entrypoint.sh + vsock-client + diag-probe.sh ===" >&2
+# IMPORTANT: only ever touch $ROOTFS/opt/magpie/vsock-client here -- that is
+# the ONLY path docker/reviewer/entrypoint.sh actually execs
+# (rust/vsock-client's `magpie-vsock-client`, the TCP<->AF_VSOCK relay).
+# $ROOTFS/vsock-client (no /opt/magpie prefix) is a DIFFERENT program --
+# spike/m8-a1/vsock-client's one-shot PING/PONG round-trip client, which
+# rust/magpie-microvm-launcher/smoke-test.sh's smoke-probe.sh depends on
+# unchanged. An earlier version of this script clobbered that path with the
+# relay binary, which silently broke smoke-test.sh (the relay just listens
+# forever on 127.0.0.1:4000 and never sends the PING smoke-probe.sh expects,
+# so the round-trip assertion timed out) since the shared, gitignored
+# spike/m8-a1/rootfs/ directory is a fixture multiple scripts depend on with
+# DIFFERENT expectations for that filename -- never write it from here.
 install -m 0755 "$REPO_ROOT/docker/reviewer/entrypoint.sh" "$ROOTFS/opt/magpie/entrypoint.sh"
 install -m 0755 "$VSOCK_CLIENT_BUILD" "$ROOTFS/opt/magpie/vsock-client"
-install -m 0755 "$VSOCK_CLIENT_BUILD" "$ROOTFS/vsock-client"
 install -m 0755 "$SPIKE_C4_DIR/diag-probe.sh" "$ROOTFS/diag-probe.sh"
 
 WORKDIR="$(mktemp -d /tmp/magpie-c4-negtest.XXXXXX)"
