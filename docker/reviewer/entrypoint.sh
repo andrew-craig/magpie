@@ -240,7 +240,14 @@ readonly MAGPIE_EXPECTED_VSOCK_PORT=1234
 # /dev/vsock ]` probe scattered elsewhere).
 if [ -c /dev/vsock ]; then
   echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port ${MAGPIE_EXPECTED_VSOCK_PORT})" >&2
-  MAGPIE_VSOCK_PORT="${MAGPIE_EXPECTED_VSOCK_PORT}" /opt/magpie/vsock-client &
+  # `export` (not a one-shot `VAR=value cmd` prefix) so MAGPIE_VSOCK_PORT is
+  # BOTH inherited by the backgrounded vsock-client below AND still readable
+  # by THIS script's own later re-assertion (a `VAR=value cmd &` prefix only
+  # sets the variable in the child's environment, not the calling shell's --
+  # the earlier version of this line got that wrong and made the later
+  # re-check always see "unset").
+  export MAGPIE_VSOCK_PORT="${MAGPIE_EXPECTED_VSOCK_PORT}"
+  /opt/magpie/vsock-client &
   MAGPIE_FORWARDER_PID=$!
   MAGPIE_IS_MICROVM=1
 else
@@ -395,14 +402,50 @@ magpie_http_get_200() {
 #
 # IMPORTANT -- this check is NOT sufficient on its own to catch a TSI-hijack
 # mis-launch: libkrun's TSI backend gives a guest real egress via syscall
-# interception, which needs no virtio-net device and no route at all (see
-# spike/m8-a1/libkrun/src/init_blob/init/init.c's `tsi_enabled()` -- when
-# TSI hijack IS on it may bring up a `dummy0` interface, administratively
-# DOWN, which this check will also catch as a bonus, but that is an
-# implementation detail of one libkrun version, not something to rely on).
+# interception, which does not fundamentally need a routable device at all.
 # The ACTUAL TSI-catching mechanism is the active egress canary loop just
-# below this block, which is why it is retained unchanged.
+# below this block, which is why it is retained unchanged regardless of
+# anything found here.
 #
+# KNOWN, EMPIRICALLY-CONFIRMED ARTIFACT of the installed libkrun (v1.19.4,
+# see rust/magpie-microvm-launcher/src/krun.rs's ABI pin) on THIS host: every
+# micro-VM guest -- TSI on or off -- has a `dummy0` interface in addition to
+# `lo` (also documented, independently, by
+# rust/magpie-microvm-launcher/smoke-test.sh's own "dummy0 is administratively
+# down" assertion). task_3b48's own negative-test harness
+# (spike/m8-c4/run-negative-test.sh) proved the two states are DISTINGUISHABLE
+# by operstate, not by mere presence:
+#   - TSI OFF  (production posture): dummy0 operstate=`down`, carrier absent,
+#     NO route table entry -- confirmed inert.
+#   - TSI ON   (the mis-launch this task defends against): dummy0 operstate=
+#     `unknown`, carrier=1 (up), AND a real route appears in
+#     /proc/net/route -- i.e. libkrun's TSI-INET hijack actually DHCP-configures
+#     this interface for real, which both the operstate check below AND the
+#     IPv4-route-count check further down independently catch. (A future
+#     libkrun version could in principle make TSI's egress fully invisible to
+#     both checks -- this is exactly why the active egress canary below is
+#     never treated as optional.)
+# So: tolerate `dummy0` ONLY when it is administratively `down`; any other
+# non-lo interface, or a `dummy0` that is anything but `down`, aborts here.
+magpie_non_lo_ifaces=""
+for magpie_iface_path in /sys/class/net/*; do
+  [ -e "${magpie_iface_path}" ] || continue
+  magpie_iface="$(basename "${magpie_iface_path}")"
+  [ "${magpie_iface}" = "lo" ] && continue
+  magpie_iface_operstate="unreadable"
+  if [ -r "${magpie_iface_path}/operstate" ]; then
+    magpie_iface_operstate="$(cat "${magpie_iface_path}/operstate" 2>/dev/null || echo unreadable)"
+  fi
+  if [ "${magpie_iface}" = "dummy0" ] && [ "${magpie_iface_operstate}" = "down" ]; then
+    continue
+  fi
+  magpie_non_lo_ifaces="${magpie_non_lo_ifaces}${magpie_iface}(${magpie_iface_operstate}) "
+done
+if [ -n "${magpie_non_lo_ifaces}" ]; then
+  echo "magpie-reviewer: refusing to run: non-loopback network interface(s) present and not administratively down (${magpie_non_lo_ifaces}) -- this reviewer must have no network transport beyond the gateway forwarder/vsock channel. Aborting before Pi starts." >&2
+  exit 1
+fi
+
 # Confirmed empirically (`docker run --network none`, this task): the IPv4
 # route table (/proc/net/route) is genuinely empty (header line only), but
 # the IPv6 route table (/proc/net/ipv6_route) is NOT -- it carries two
@@ -411,18 +454,6 @@ magpie_http_get_200() {
 # whose OUTPUT DEVICE (the last whitespace-separated field of each
 # /proc/net/ipv6_route line) is something other than `lo`, rather than
 # requiring literal emptiness.
-magpie_non_lo_ifaces=""
-for magpie_iface_path in /sys/class/net/*; do
-  [ -e "${magpie_iface_path}" ] || continue
-  magpie_iface="$(basename "${magpie_iface_path}")"
-  if [ "${magpie_iface}" != "lo" ]; then
-    magpie_non_lo_ifaces="${magpie_non_lo_ifaces}${magpie_iface} "
-  fi
-done
-if [ -n "${magpie_non_lo_ifaces}" ]; then
-  echo "magpie-reviewer: refusing to run: non-loopback network interface(s) present (${magpie_non_lo_ifaces}) -- this reviewer must have no network transport beyond the gateway forwarder/vsock channel. Aborting before Pi starts." >&2
-  exit 1
-fi
 
 magpie_route_count=0
 if [ -r /proc/net/route ]; then
