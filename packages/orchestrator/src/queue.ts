@@ -34,6 +34,7 @@
 
 import PQueue from "p-queue";
 import type { Config } from "./config.js";
+import { resolveQueueConcurrency } from "./config.js";
 
 /**
  * Grace period added on top of `config.limits.jobTimeoutSeconds` for the
@@ -145,13 +146,21 @@ export interface JobQueueOptions {
  * `jobTimeoutSeconds` budget, unchanged), not the primary deadline. See the
  * module doc comment for why the two timers must be staggered rather than
  * equal.
+ *
+ * `concurrency` is derived via config.ts's {@link resolveQueueConcurrency}
+ * (M8-C3) rather than reading `config.limits.concurrency` directly: under
+ * the `"microvm"` reviewer tier it's instead `floor(host_ram_budget_mib /
+ * ram_mib)` (brief §6.4) so the queue can never schedule more concurrent
+ * microVMs than the deployment's own configured RAM budget allows. Under
+ * the default `"crun"` tier this is exactly `config.limits.concurrency`,
+ * unchanged.
  */
 export function jobQueueOptionsFromConfig(
-  config: Pick<Config, "limits">,
+  config: Pick<Config, "limits" | "container" | "microvm">,
   logger?: Logger,
 ): JobQueueOptions {
   return {
-    concurrency: config.limits.concurrency,
+    concurrency: resolveQueueConcurrency(config),
     jobTimeoutMs: config.limits.jobTimeoutSeconds * 1000 + QUEUE_TIMEOUT_GRACE_MS,
     logger,
   };

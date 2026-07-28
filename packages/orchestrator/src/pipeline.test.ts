@@ -133,6 +133,41 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
 }
 
 /**
+ * M8-C3: fake `magpie-krun-launch` for the micro-VM tier. Like
+ * {@link fakePiScriptEmittingFindings} but parses `--out-mount
+ * <hostOut>:<tag>` (the writable virtiofs device — not `-v <hostOut>:/out`)
+ * to find where to write findings.json, and records its argv + observed
+ * OPENROUTER_API_KEY env exactly like the docker fake, so the same
+ * pipeline-level assertions (findings flow through to a published review;
+ * the uid-split invariant: the key reaches env, never argv) work under the
+ * micro-VM tier.
+ */
+function fakeMicrovmLauncherScript(text: string): string {
+  const msg = {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.001 } },
+  };
+  const findings = { findings: [], summary: text, verdict: "comment" };
+  return [
+    `const fs = require("fs");`,
+    `const nodepath = require("path");`,
+    `const argv = process.argv.slice(2);`,
+    `fs.writeFileSync(${JSON.stringify(join(root, INVOCATION_FILE))}, JSON.stringify(argv));`,
+    `fs.writeFileSync(${JSON.stringify(join(root, ENV_FILE))}, JSON.stringify({ openRouterKey: process.env.OPENROUTER_API_KEY ?? null }));`,
+    `let outHost = "";`,
+    `for (let i = 0; i < argv.length - 1; i++) {`,
+    `  if (argv[i] === "--out-mount") outHost = argv[i + 1].replace(/:[^:]*$/, "");`,
+    `}`,
+    `fs.writeFileSync(nodepath.join(outHost, "findings.json"), ${JSON.stringify(JSON.stringify(findings))});`,
+    `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+    `const msg = ${JSON.stringify(msg)};`,
+    `process.stdout.write(JSON.stringify({type:"message_end",message:msg}) + "\\n");`,
+    `process.stdout.write(JSON.stringify({type:"agent_end",messages:[msg]}) + "\\n");`,
+  ].join("\n");
+}
+
+/**
  * Like {@link fakePiScriptEmittingFindings} but ALSO records the full stdin
  * payload (the prompt reviewer.ts pipes to the container — PR metadata +
  * changed-file list + diff) to a file, so incremental-review tests can assert
@@ -221,7 +256,9 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
       cpus: "2",
       pidsLimit: 256,
       dockerBin: "docker",
+      tier: "crun",
     },
+    microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
     gateway: {
       baseUrl: "http://127.0.0.1:4100",
       containerBaseUrl: "http://127.0.0.1:4000/v1",
@@ -2276,5 +2313,129 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     expect(compareCommitsWithBasehead).toHaveBeenCalledWith(
       expect.objectContaining({ basehead: `${BEFORE}...${AFTER}` }),
     );
+  });
+});
+
+describe("createReviewPipeline / runJob — micro-VM tier (M8-C3)", () => {
+  /** testConfig with the micro-VM tier selected and a fake launcher rootfs/bin. */
+  function microvmTestConfig(): Config {
+    const base = testConfig();
+    return {
+      ...base,
+      container: { ...base.container, tier: "microvm" },
+      microvm: { ramMib: 512, vcpus: 2, rootfsPath: "/fake/rootfs", hostRamBudgetMib: 2048, launcherBin: "magpie-krun-launch" },
+    };
+  }
+
+  it("reviews a small diff end-to-end under the micro-VM tier and posts exactly one PR review", async () => {
+    const { octokit, createReview, createComment } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory, cleanupCalls } = fakeWorkspaceFactory();
+    // The same `piBinary` seam stands in for `magpie-krun-launch` under this
+    // tier (reviewer.ts resolves it as the launcher binary when tier=microvm).
+    const piBinary = writeFakePi(fakeMicrovmLauncherScript("Looks good, no issues found."));
+
+    const { runJob } = createReviewPipeline(microvmTestConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    // Findings flowed through the writable /out virtiofs device to a single
+    // published COMMENT review, exactly like the crun tier.
+    expect(createReview).toHaveBeenCalledTimes(1);
+    const reviewArgs = createReview.mock.calls[0][0] as { body: string };
+    expect(reviewArgs.body).toContain("Looks good, no issues found.");
+    expect(createComment).not.toHaveBeenCalled();
+    expect(cleanupCalls).toHaveLength(1);
+
+    // The launcher argv is the micro-VM shape (not a docker `run` argv).
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    expect(argv![0]).toBe("--rootfs");
+    expect(argv).toContain("--vsock-uds");
+    expect(argv).toContain("--out-mount");
+  });
+
+  // --- uid-split invariant (CTO edit 1, MERGE BLOCKER) at the pipeline level -
+  it("threads the gateway key into the launcher env ONLY, never onto its argv", async () => {
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakeMicrovmLauncherScript("ok"));
+
+    const { runJob } = createReviewPipeline(microvmTestConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    // The minted virtual key reached the launcher's ENVIRONMENT...
+    const env = readRecordedEnv();
+    expect(env?.openRouterKey).toBe(FAKE_GATEWAY_KEY.key);
+
+    // ...but NEVER its argv (name-only via --env-from-host). This is the
+    // merge-blocker: a real minted key value must not be findable anywhere
+    // in the argv the orchestrator handed the launcher process.
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    expect(argv!.join(" ")).not.toContain(FAKE_GATEWAY_KEY.key);
+    expect(argv!.some((tok) => tok.startsWith("sk-magpie-"))).toBe(false);
+    const idx = argv!.indexOf("--env-from-host");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(argv![idx + 1]).toBe("OPENROUTER_API_KEY");
+  });
+
+  it("derives the launcher's --vsock-uds from the minted gateway key's socketDir (no bind mount)", async () => {
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakeMicrovmLauncherScript("ok"));
+
+    const { runJob } = createReviewPipeline(microvmTestConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const argv = readRecordedArgv();
+    expect(argv).toBeDefined();
+    const udsIdx = argv!.indexOf("--vsock-uds");
+    expect(udsIdx).toBeGreaterThanOrEqual(0);
+    // <socketDir>/gw.sock (microvm-vsock.ts's GATEWAY_SOCKET_BASENAME) — the
+    // launcher's libkrun dials this directly; there is NO /run/gw bind mount
+    // under this tier.
+    expect(argv![udsIdx + 1]).toBe(`${FAKE_GATEWAY_KEY.socketDir}/gw.sock`);
+    expect(argv!.some((tok) => tok.includes("/run/gw"))).toBe(false);
   });
 });

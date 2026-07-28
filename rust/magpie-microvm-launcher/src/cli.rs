@@ -11,8 +11,10 @@
 //!     --uid <n> --gid <n>       (required, non-root)
 //!     [--workdir <path>]        (default "/")
 //!     [--env KEY=VALUE]...      (repeatable)
+//!     [--env-from-host <NAME>]... (repeatable; see below)
 //!     [--vsock-port <n> --vsock-uds <path>]   (both or neither)
 //!     [--work-mount <host-path>[:<tag>]]      (tag defaults to "work")
+//!     [--out-mount <host-path>[:<tag>]]       (tag defaults to "out"; WRITABLE)
 //!     [--help]
 //! ```
 //!
@@ -34,6 +36,28 @@
 //! value itself starts with `-c`-like content and still parses correctly,
 //! since `--arg` unconditionally consumes exactly the next token as its
 //! value with no flag-sniffing).
+//!
+//! # `--env-from-host <NAME>` (task_39ff / M8-C3)
+//!
+//! `--env KEY=VALUE` puts `VALUE` literally on THIS process's own argv,
+//! which any local user can read via `/proc/<pid>/cmdline` — fine for
+//! non-secret values (e.g. `OPENAI_BASE_URL`), but wrong for a credential
+//! (the gateway's per-job virtual key). `packages/orchestrator/src/reviewer.ts`
+//! never puts a secret on the `docker run`/`magpie-krun-launch` argv — it
+//! sets it only on the spawned CLIENT PROCESS'S OWN ENVIRONMENT and
+//! references it in argv by NAME ONLY (docker: `-e OPENROUTER_API_KEY`,
+//! no `=value`). `--env-from-host <NAME>` reproduces that exact convention
+//! for this launcher: it reads `NAME`'s value from THIS PROCESS's own
+//! environment (never from argv) and forwards `NAME=<that value>` into the
+//! guest's envp — the secret crosses the orchestrator -> launcher boundary
+//! only via `child_process.spawn(bin, argv, { env })`'s `env`, exactly like
+//! the docker path, and is never visible via `/proc/<pid>/cmdline`.
+//!
+//! Implemented via an injectable lookup function
+//! ([`parse_with_env_lookup`]) so this stays unit-testable with a fake
+//! environment — [`parse`] (the function every existing test and `main.rs`
+//! use) is an unchanged thin wrapper defaulting to the real
+//! `std::env::var`.
 
 use std::path::PathBuf;
 
@@ -55,6 +79,9 @@ const DEFAULT_WORKDIR: &str = "/";
 
 /// Default virtiofs tag for `--work-mount` when no `:<tag>` suffix is given.
 const DEFAULT_WORK_MOUNT_TAG: &str = "work";
+
+/// Default virtiofs tag for `--out-mount` when no `:<tag>` suffix is given.
+const DEFAULT_OUT_MOUNT_TAG: &str = "out";
 
 /// Everything that can go wrong parsing argv, before validation
 /// ([`crate::config::ConfigError`]) even runs. Kept separate from
@@ -79,12 +106,20 @@ pub enum CliError {
         value: String,
     },
     InvalidEnvPair(String),
-    /// `--work-mount` had more than one `:` (ambiguous: which colon
-    /// separates path from tag?). Windows-style drive-letter paths aren't a
-    /// concern here — this launcher only ever runs on Linux (`krun_setuid`,
-    /// `AF_VSOCK`, `/dev/kvm` are all Linux-only), so a bare `:` is always
-    /// the path/tag separator, never part of the path itself.
+    /// `--work-mount`/`--out-mount` had more than one `:` (ambiguous: which
+    /// colon separates path from tag?). Windows-style drive-letter paths
+    /// aren't a concern here — this launcher only ever runs on Linux
+    /// (`krun_setuid`, `AF_VSOCK`, `/dev/kvm` are all Linux-only), so a bare
+    /// `:` is always the path/tag separator, never part of the path itself.
     AmbiguousWorkMount(String),
+    /// `--env-from-host <NAME>` named a variable that isn't set in this
+    /// process's own environment. Fails closed (rather than silently
+    /// forwarding an empty/absent value into the guest) since the whole
+    /// point of this flag is to deliver a value the caller expects to be
+    /// there — e.g. a missing `OPENROUTER_API_KEY` here would otherwise
+    /// boot a guest with no gateway credential at all, a confusing failure
+    /// to debug from inside the sandboxed VM.
+    MissingHostEnv(String),
 }
 
 impl std::fmt::Display for CliError {
@@ -103,7 +138,13 @@ impl std::fmt::Display for CliError {
             CliError::AmbiguousWorkMount(raw) => {
                 write!(
                     f,
-                    "--work-mount must be <host-path>[:<tag>] (at most one ':'), got {raw:?}"
+                    "--work-mount/--out-mount must be <host-path>[:<tag>] (at most one ':'), got {raw:?}"
+                )
+            }
+            CliError::MissingHostEnv(name) => {
+                write!(
+                    f,
+                    "--env-from-host {name}: not set in this process's own environment"
                 )
             }
         }
@@ -138,17 +179,37 @@ OPTIONS:
     --ram-mib <n>                Guest RAM in MiB, >128 (default 4096)
     --workdir <path>              Guest-relative working directory (default \"/\")
     --env <KEY=VALUE>              One guest env var (repeatable)
+    --env-from-host <NAME>           One guest env var, VALUE read from this
+                                       process's own environment (repeatable) —
+                                       use for secrets; never appears on argv
     --vsock-port <n>                 vsock port the guest dials (needs --vsock-uds)
     --vsock-uds <path>                 Host unix socket path (needs --vsock-port; must be absolute)
     --work-mount <host-path>[:<tag>]     Read-only virtiofs device (tag default \"work\")
+    --out-mount <host-path>[:<tag>]       Writable virtiofs device (tag default \"out\")
     --help                                  Print this message and exit 0
 ";
 
 /// Parses `args` (NOT including argv[0] — callers pass `env::args().skip(1)`)
 /// into a [`LaunchConfigInput`]. Performs no validation beyond argv SHAPE
 /// (see [`CliError`]'s doc comment); call `.validate()` on the result to get
-/// a [`crate::config::LaunchConfig`].
+/// a [`crate::config::LaunchConfig`]. Resolves any `--env-from-host` names
+/// via the REAL process environment (`std::env::var`) — see
+/// [`parse_with_env_lookup`] for a version tests can inject a fake
+/// environment into.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaunchConfigInput, CliError> {
+    parse_with_env_lookup(args, |name| std::env::var(name).ok())
+}
+
+/// Same contract as [`parse`], but resolves `--env-from-host <NAME>` values
+/// via the injected `env_lookup` closure instead of the real process
+/// environment — the seam that makes `--env-from-host` unit-testable
+/// without mutating (or depending on) this test process's actual env vars.
+/// [`parse`] is a thin wrapper defaulting `env_lookup` to `std::env::var`.
+pub fn parse_with_env_lookup<I, F>(args: I, env_lookup: F) -> Result<LaunchConfigInput, CliError>
+where
+    I: IntoIterator<Item = String>,
+    F: Fn(&str) -> Option<String>,
+{
     let mut rootfs: Option<PathBuf> = None;
     let mut exec_path: Option<String> = None;
     let mut exec_args: Vec<String> = Vec::new();
@@ -162,6 +223,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaunchConfigInpu
     let mut vsock_uds: Option<PathBuf> = None;
     let mut work_mount_host_path: Option<PathBuf> = None;
     let mut work_mount_tag: String = DEFAULT_WORK_MOUNT_TAG.to_string();
+    let mut out_mount_host_path: Option<PathBuf> = None;
+    let mut out_mount_tag: String = DEFAULT_OUT_MOUNT_TAG.to_string();
 
     let mut iter = args.into_iter();
     while let Some(flag) = iter.next() {
@@ -179,6 +242,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaunchConfigInpu
                 let raw = next_value(&mut iter, "--env")?;
                 env.push(split_env_pair(&raw)?);
             }
+            "--env-from-host" => {
+                let name = next_value(&mut iter, "--env-from-host")?;
+                let value =
+                    env_lookup(&name).ok_or_else(|| CliError::MissingHostEnv(name.clone()))?;
+                env.push((name, value));
+            }
             "--vsock-port" => vsock_port = Some(parse_u32(&mut iter, "--vsock-port")?),
             "--vsock-uds" => vsock_uds = Some(PathBuf::from(next_value(&mut iter, "--vsock-uds")?)),
             "--work-mount" => {
@@ -187,6 +256,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaunchConfigInpu
                 work_mount_host_path = Some(host_path);
                 if let Some(tag) = tag {
                     work_mount_tag = tag;
+                }
+            }
+            "--out-mount" => {
+                let raw = next_value(&mut iter, "--out-mount")?;
+                let (host_path, tag) = split_work_mount(&raw)?;
+                out_mount_host_path = Some(host_path);
+                if let Some(tag) = tag {
+                    out_mount_tag = tag;
                 }
             }
             other => return Err(CliError::UnknownFlag(other.to_string())),
@@ -207,6 +284,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaunchConfigInpu
         vsock_uds,
         work_mount_host_path,
         work_mount_tag,
+        out_mount_host_path,
+        out_mount_tag,
     })
 }
 
@@ -242,9 +321,13 @@ fn split_env_pair(raw: &str) -> Result<(String, String), CliError> {
     }
 }
 
-/// Splits a `--work-mount` value into `(host_path, Option<tag>)`. At most one
-/// `:` is allowed (see [`CliError::AmbiguousWorkMount`]'s doc comment for
-/// why a bare `:` is unambiguous on the Linux-only platform this runs on).
+/// Splits a `--work-mount`/`--out-mount` value into `(host_path,
+/// Option<tag>)`. At most one `:` is allowed (see
+/// [`CliError::AmbiguousWorkMount`]'s doc comment for why a bare `:` is
+/// unambiguous on the Linux-only platform this runs on). Shared by both
+/// flags since their `<host-path>[:<tag>]` grammar is identical — only the
+/// default tag and the resulting mount's read-only-ness (decided in
+/// `config.rs`) differ.
 fn split_work_mount(raw: &str) -> Result<(PathBuf, Option<String>), CliError> {
     let parts: Vec<&str> = raw.splitn(3, ':').collect();
     match parts.as_slice() {
@@ -290,6 +373,7 @@ mod tests {
         assert!(parsed.vsock_port.is_none());
         assert!(parsed.vsock_uds.is_none());
         assert!(parsed.work_mount_host_path.is_none());
+        assert!(parsed.out_mount_host_path.is_none());
     }
 
     #[test]
@@ -505,6 +589,133 @@ mod tests {
     }
 
     #[test]
+    fn out_mount_without_tag_uses_default() {
+        let mut a = minimal_required();
+        a.extend(args(&["--out-mount", "/var/lib/magpie/work/job-1-out"]));
+        let parsed = parse(a).unwrap();
+        assert_eq!(
+            parsed.out_mount_host_path,
+            Some(PathBuf::from("/var/lib/magpie/work/job-1-out"))
+        );
+        assert_eq!(parsed.out_mount_tag, "out");
+    }
+
+    #[test]
+    fn out_mount_with_explicit_tag() {
+        let mut a = minimal_required();
+        a.extend(args(&[
+            "--out-mount",
+            "/var/lib/magpie/work/job-1-out:findings",
+        ]));
+        let parsed = parse(a).unwrap();
+        assert_eq!(
+            parsed.out_mount_host_path,
+            Some(PathBuf::from("/var/lib/magpie/work/job-1-out"))
+        );
+        assert_eq!(parsed.out_mount_tag, "findings");
+    }
+
+    #[test]
+    fn out_mount_with_two_colons_rejected() {
+        let mut a = minimal_required();
+        a.extend(args(&["--out-mount", "/a:b:c"]));
+        assert!(matches!(
+            parse(a).unwrap_err(),
+            CliError::AmbiguousWorkMount(_)
+        ));
+    }
+
+    #[test]
+    fn work_mount_and_out_mount_are_independent() {
+        let mut a = minimal_required();
+        a.extend(args(&[
+            "--work-mount",
+            "/var/lib/magpie/work/job-1",
+            "--out-mount",
+            "/var/lib/magpie/work/job-1-out",
+        ]));
+        let parsed = parse(a).unwrap();
+        assert_eq!(
+            parsed.work_mount_host_path,
+            Some(PathBuf::from("/var/lib/magpie/work/job-1"))
+        );
+        assert_eq!(
+            parsed.out_mount_host_path,
+            Some(PathBuf::from("/var/lib/magpie/work/job-1-out"))
+        );
+    }
+
+    #[test]
+    fn env_from_host_resolves_via_injected_lookup() {
+        let mut a = minimal_required();
+        a.extend(args(&["--env-from-host", "OPENROUTER_API_KEY"]));
+        let parsed = parse_with_env_lookup(a, |name| {
+            assert_eq!(name, "OPENROUTER_API_KEY");
+            Some("sk-magpie-testvalue".to_string())
+        })
+        .expect("env-from-host should resolve via the injected lookup");
+        assert_eq!(
+            parsed.env,
+            vec![(
+                "OPENROUTER_API_KEY".to_string(),
+                "sk-magpie-testvalue".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn env_from_host_missing_var_rejected() {
+        let mut a = minimal_required();
+        a.extend(args(&["--env-from-host", "NOT_SET"]));
+        let err = parse_with_env_lookup(a, |_| None).unwrap_err();
+        assert_eq!(err, CliError::MissingHostEnv("NOT_SET".to_string()));
+    }
+
+    #[test]
+    fn env_from_host_never_reads_the_value_from_argv() {
+        // The whole point of --env-from-host: the VALUE never appears
+        // anywhere in the parsed argv-derived strings except via the
+        // lookup closure. This test drives the same argv through two
+        // different lookups and confirms the resolved value tracks the
+        // lookup, not anything in `a` itself (which never contains a value
+        // at all, only the flag name).
+        let mut a = minimal_required();
+        a.extend(args(&["--env-from-host", "SECRET"]));
+        let first = parse_with_env_lookup(a.clone(), |_| Some("value-one".to_string())).unwrap();
+        let second = parse_with_env_lookup(a, |_| Some("value-two".to_string())).unwrap();
+        assert_eq!(
+            first.env,
+            vec![("SECRET".to_string(), "value-one".to_string())]
+        );
+        assert_eq!(
+            second.env,
+            vec![("SECRET".to_string(), "value-two".to_string())]
+        );
+    }
+
+    #[test]
+    fn env_and_env_from_host_combine_in_order() {
+        let mut a = minimal_required();
+        a.extend(args(&[
+            "--env",
+            "PATH=/usr/bin",
+            "--env-from-host",
+            "SECRET",
+            "--env",
+            "MODE=prod",
+        ]));
+        let parsed = parse_with_env_lookup(a, |_| Some("shh".to_string())).unwrap();
+        assert_eq!(
+            parsed.env,
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("SECRET".to_string(), "shh".to_string()),
+                ("MODE".to_string(), "prod".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn full_invocation_parses_end_to_end_and_validates() {
         let a = args(&[
             "--rootfs",
@@ -533,8 +744,13 @@ mod tests {
             "/tmp/gw.sock",
             "--work-mount",
             "/var/lib/magpie/work/job-1:work",
+            "--out-mount",
+            "/var/lib/magpie/work/job-1-out:out",
+            "--env-from-host",
+            "OPENROUTER_API_KEY",
         ]);
-        let input = parse(a).expect("full invocation should parse");
+        let input = parse_with_env_lookup(a, |_| Some("sk-magpie-fixture".to_string()))
+            .expect("full invocation should parse");
         let cfg = input.validate().expect("full invocation should validate");
         assert_eq!(cfg.vcpus, 4);
         assert_eq!(cfg.ram_mib, 2048);
@@ -542,5 +758,10 @@ mod tests {
         assert_eq!(cfg.exec_args, vec!["-c".to_string(), "echo hi".to_string()]);
         assert_eq!(cfg.vsock_gateway.unwrap().port, 1234);
         assert_eq!(cfg.work_mount.unwrap().tag, "work");
+        assert_eq!(cfg.out_mount.as_ref().unwrap().tag, "out");
+        assert!(cfg.env.contains(&(
+            "OPENROUTER_API_KEY".to_string(),
+            "sk-magpie-fixture".to_string()
+        )));
     }
 }

@@ -119,6 +119,56 @@ const rawConfigSchema = z
         // user needs subuid/subgid + linger provisioning; that installer/
         // systemd work is M8-D3 (task_67aa).
         docker_bin: z.string().min(1).default("podman"),
+        // M8-C3 (task_39ff): the reviewer launch TIER. "crun" (default) is
+        // today's hardened `docker run`/`podman run` path
+        // (buildReviewDockerArgs, the M8-B1 "floor" golden) — unchanged
+        // unless a deployment opts into "microvm" (rootless libkrun via
+        // `magpie-krun-launch`, see reviewer.ts's buildMicrovmLaunchArgs).
+        // Defaulting to "crun" means an existing deployment's behavior, and
+        // the floor golden fixture, are BYTE-FOR-BYTE unaffected by this
+        // field's mere existence.
+        tier: z.enum(["crun", "microvm"]).default("crun"),
+      })
+      .strict()
+      .prefault({}),
+    // M8-C3 (task_39ff): guest knobs for the "microvm" container.tier. Only
+    // load-bearing when container.tier === "microvm" — loadConfig() below
+    // fails closed if that tier is selected without a valid rootfs_path, but
+    // otherwise these fields are inert (same "present but unused unless
+    // opted in" shape as container.require_memory_limit's escape hatch).
+    microvm: z
+      .object({
+        // Guest RAM, mirroring rust/magpie-microvm-launcher/src/cli.rs's
+        // --ram-mib and docs/design's brief §6.4 "~1 GB/review" default —
+        // deliberately smaller than container.memory's "4g" docker default:
+        // the microVM's RAM is VMM-ENFORCED (bug_df2d's structural fix, see
+        // that crate's config.rs doc comment), not a cgroup ceiling that can
+        // be silently unenforced, so a tighter default is safe to ship.
+        ram_mib: z.number().int().positive().default(1024),
+        // Guest vCPUs, mirroring --vcpus.
+        vcpus: z.number().int().positive().default(2),
+        // Absolute host path to the PREPARED guest root filesystem (an
+        // unpacked OCI image directory — see rust/magpie-microvm-launcher's
+        // --rootfs and the M8-A1 spike's virtiofs unpack-to-dir approach).
+        // Required (and validated absolute) only when container.tier is
+        // "microvm" — see loadConfig()'s post-parse check below; left
+        // optional here (empty-string default) so a "crun"-tier deployment
+        // never needs to set it at all.
+        rootfs_path: z.string().default(""),
+        // Total host RAM (MiB) this deployment is willing to dedicate to
+        // CONCURRENT microVM reviews — the "available_RAM" half of brief
+        // §6.4's `floor(available_RAM / guest_RAM)` concurrency formula
+        // (see resolveQueueConcurrency below). Deliberately a separate,
+        // explicit config value rather than probed from the host
+        // (os.totalmem()): probing would silently change an operator's
+        // effective concurrency across a host resize/reboot with no config
+        // diff to review, which is the wrong property for a value that
+        // gates how much untrusted-PR-triggered work can run at once.
+        host_ram_budget_mib: z.number().int().positive().default(4096),
+        // Path to the magpie-krun-launch binary (see
+        // rust/magpie-microvm-launcher). Mirrors container.docker_bin's
+        // "any compatible binary via PATH or a full path" seam.
+        launcher_bin: z.string().min(1).default("magpie-krun-launch"),
       })
       .strict()
       .prefault({}),
@@ -229,6 +279,21 @@ export interface Config {
     pidsLimit: number;
     /** Path to the review-container runtime CLI. Defaults to `podman` (rootless; M8-B2); any docker-compatible CLI works. See config schema above. */
     dockerBin: string;
+    /** Reviewer launch tier (M8-C3). `"crun"` (default) is today's docker/podman `docker run` path; `"microvm"` opts into the rootless-libkrun launcher (reviewer.ts's `buildMicrovmLaunchArgs`). */
+    tier: "crun" | "microvm";
+  };
+  /** Micro-VM guest knobs (M8-C3), only load-bearing when `container.tier === "microvm"`. See config schema above. */
+  microvm: {
+    /** Guest RAM in MiB (`magpie-krun-launch --ram-mib`). */
+    ramMib: number;
+    /** Guest vCPUs (`magpie-krun-launch --vcpus`). */
+    vcpus: number;
+    /** Absolute host path to the prepared guest rootfs (`magpie-krun-launch --rootfs`). Required when `container.tier === "microvm"`. */
+    rootfsPath: string;
+    /** Total host RAM (MiB) budgeted for concurrent microVM reviews — see `resolveQueueConcurrency`. */
+    hostRamBudgetMib: number;
+    /** Path to the `magpie-krun-launch` binary. */
+    launcherBin: string;
   };
   gateway: {
     /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see PLAN.md §5. */
@@ -479,6 +544,23 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
+  // M8-C3 (task_39ff): fail closed at load time if the "microvm" tier is
+  // selected without a usable rootfs — better than discovering it per-job,
+  // deep inside reviewer.ts, the first time a review actually runs. Checked
+  // on `parsed.data` (not the raw TOML) so this only runs once the rest of
+  // the schema is already known-valid, avoiding a confusing double error for
+  // an otherwise-malformed file.
+  if (parsed.success && parsed.data.container.tier === "microvm") {
+    const rootfsPath = parsed.data.microvm.rootfs_path;
+    if (rootfsPath.length === 0) {
+      problems.push(
+        "microvm.rootfs_path is required when container.tier = \"microvm\" (path to the prepared guest rootfs)",
+      );
+    } else if (!isAbsolute(rootfsPath)) {
+      problems.push(`microvm.rootfs_path must be an absolute path, got: "${rootfsPath}"`);
+    }
+  }
+
   // If schema validation failed, `problems` is non-empty, so this single
   // throw covers both TOML-shape problems and missing secrets at once.
   if (!parsed.success || problems.length > 0) {
@@ -516,6 +598,14 @@ export function loadConfig(configPath?: string): Config {
       cpus: data.container.cpus,
       pidsLimit: data.container.pids_limit,
       dockerBin: data.container.docker_bin,
+      tier: data.container.tier,
+    },
+    microvm: {
+      ramMib: data.microvm.ram_mib,
+      vcpus: data.microvm.vcpus,
+      rootfsPath: data.microvm.rootfs_path,
+      hostRamBudgetMib: data.microvm.host_ram_budget_mib,
+      launcherBin: data.microvm.launcher_bin,
     },
     gateway: {
       baseUrl: data.gateway.base_url,
@@ -532,4 +622,28 @@ export function loadConfig(configPath?: string): Config {
       gatewayMasterKey: gatewayMasterKey!,
     },
   };
+}
+
+/**
+ * Derives the queue's per-job concurrency limit (see queue.ts's
+ * `jobQueueOptionsFromConfig`, the only production caller).
+ *
+ * `"crun"` tier (default): unchanged — `config.limits.concurrency`, exactly
+ * as before this field existed.
+ *
+ * `"microvm"` tier (M8-C3, brief §6.4): `floor(host_ram_budget_mib /
+ * ram_mib)`, clamped to a minimum of 1 — a host that's only budgeted for
+ * (say) 3.5 concurrent 1 GiB guests should run 3 at a time, never 0, and
+ * never more than its own configured RAM budget allows regardless of what
+ * `limits.concurrency` happens to say (a stale/unrelated value from a
+ * "crun"-tier config carried over when switching tiers must not silently
+ * over-commit host RAM to concurrent microVMs). Pure and exported
+ * separately from `loadConfig` so it's unit-testable against fixed inputs
+ * without a real TOML file.
+ */
+export function resolveQueueConcurrency(config: Pick<Config, "limits" | "container" | "microvm">): number {
+  if (config.container.tier !== "microvm") {
+    return config.limits.concurrency;
+  }
+  return Math.max(1, Math.floor(config.microvm.hostRamBudgetMib / config.microvm.ramMib));
 }

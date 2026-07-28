@@ -52,7 +52,9 @@ const GOLDEN_CONFIG: Config = {
     cpus: "2",
     pidsLimit: 256,
     dockerBin: "podman",
+    tier: "crun",
   },
+  microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
   gateway: {
     baseUrl: "http://127.0.0.1:4100",
     containerBaseUrl: "http://127.0.0.1:4000/v1",

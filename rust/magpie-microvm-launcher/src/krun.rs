@@ -61,6 +61,36 @@
 //! that order, whether or not a gateway channel is configured — TSI-off is
 //! unconditional, not something a caller can accidentally skip by never
 //! setting `--vsock-port`.
+//!
+//! # LAYER 1 PIN (task_3b48 / M8-C4) — "no network by construction"
+//!
+//! `docs`/the M8 brief treat "no network" as a THREE-layer invariant, never
+//! trusted to a single launch flag, because libkrun's TSI (Transparent
+//! Socket Impersonation) backend can give a guest real egress via syscall
+//! interception with NO virtio-net device ever attached — the VMM analog of
+//! a fail-open netns. This module is Layer 1 (construction): it must be
+//! structurally impossible for a `LaunchConfig` — built from ANY argv this
+//! launcher's CLI (`src/cli.rs`) can produce — to enable TSI hijacking or
+//! attach a virtio-net device.
+//!
+//! Confirmed by inspection (`/usr/local/include/libkrun.h`, this box's
+//! installed libkrun v1.19.4) that a virtio-net device is a wholly separate
+//! call family (`krun_add_net_unixstream`/`krun_add_net_unixgram`/
+//! `krun_add_net_tap`, all explicitly documented as "networking uses the
+//! TSI backend" when never called) — this crate's `extern "C"` block above
+//! declares NONE of them, so there is no code path in this binary that
+//! could attach one even if `LaunchConfig` grew a field asking for it.
+//!
+//! TSI itself is controlled entirely by the bitmask [`resolve_tsi_features`]
+//! computes and [`boot`] passes to `krun_add_vsock` — see that function's
+//! own doc comment for why it is pinned to always return
+//! [`TSI_NO_HIJACK`], unconditionally, regardless of anything in
+//! `LaunchConfig`. Layers 2 (`packages/orchestrator/src/reviewer.ts`'s
+//! `findMicrovmNetworkTransportViolations`) and 3
+//! (`docker/reviewer/entrypoint.sh`'s in-guest assertions) exist precisely
+//! because a construction-only guarantee, however solid, is still a single
+//! point of failure for a future edit — see this module's own tests for the
+//! "even with every other field varied, the TSI bitmask never moves" proof.
 
 #![allow(non_camel_case_types)]
 
@@ -79,6 +109,25 @@ pub const LIBKRUN_ABI_PIN: &str = "v1.19.4 (ABI 1)";
 /// TSI feature bitmask meaning "no hijacking at all" (see `libkrun.h`'s
 /// `KRUN_TSI_HIJACK_INET`/`KRUN_TSI_HIJACK_UNIX` — both bits clear).
 const TSI_NO_HIJACK: u32 = 0;
+
+/// The Layer 1 (construction) decision for task_3b48/M8-C4: what TSI
+/// feature bitmask [`boot`] passes to `krun_add_vsock`. ALWAYS
+/// [`TSI_NO_HIJACK`] — this function takes `_config` purely for call-site
+/// symmetry with the rest of this module (a future edit adding a per-VM
+/// field it actually reads here, e.g. a "networked" opt-in, would BE the
+/// exact regression this pin exists to prevent, and should be caught by
+/// this function's own tests below rather than discovered live).
+///
+/// There is deliberately no `cfg`/env/feature-flag override of any kind on
+/// this decision in the production binary: the ONLY way this repo boots a
+/// TSI-hijacked guest at all is the wholly separate, out-of-crate
+/// `spike/m8-c4/` test harness (see that directory's own README/script),
+/// which links libkrun directly and never goes through this function or
+/// this binary — so there is no config, env var, or CLI flag reachable
+/// through `magpie-krun-launch` that can ever flip this.
+fn resolve_tsi_features(_config: &LaunchConfig) -> u32 {
+    TSI_NO_HIJACK
+}
 
 #[link(name = "krun")]
 extern "C" {
@@ -277,16 +326,51 @@ pub fn boot(config: &LaunchConfig) -> Result<Infallible, BootError> {
             let path_c = cstring_path("work_mount.host_path", &work_mount.host_path)?;
             check(
                 "krun_add_virtiofs3",
-                krun_add_virtiofs3(ctx_id, tag_c.as_ptr(), path_c.as_ptr(), 0, true),
+                krun_add_virtiofs3(
+                    ctx_id,
+                    tag_c.as_ptr(),
+                    path_c.as_ptr(),
+                    0,
+                    work_mount.read_only,
+                ),
             )?;
         }
 
-        // TSI OFF — unconditional (see module doc comment "Call ordering").
+        // Writable /out virtiofs device (task_39ff / M8-C3) — how the guest
+        // hands `findings.json` back to the host, mirroring docker's
+        // `-v <outDir>:/out` (read-write) bind mount. Same call as the
+        // `/work` device above, differing only in `read_only` (always
+        // `false` here per `LaunchConfig::out_mount`'s doc comment — this
+        // launcher never constructs an `out_mount` with `read_only: true`,
+        // but the check still reads the field rather than hardcoding
+        // `false` so a future caller mistake would change behavior loudly,
+        // not silently).
+        if let Some(out_mount) = &config.out_mount {
+            let tag_c = cstring("out_mount.tag", &out_mount.tag)?;
+            let path_c = cstring_path("out_mount.host_path", &out_mount.host_path)?;
+            check(
+                "krun_add_virtiofs3",
+                krun_add_virtiofs3(
+                    ctx_id,
+                    tag_c.as_ptr(),
+                    path_c.as_ptr(),
+                    0,
+                    out_mount.read_only,
+                ),
+            )?;
+        }
+
+        // TSI OFF — unconditional (see module doc comment "Call ordering"
+        // and "LAYER 1 PIN"). `resolve_tsi_features` always returns
+        // `TSI_NO_HIJACK` regardless of `config` — see its own doc comment.
         check(
             "krun_disable_implicit_vsock",
             krun_disable_implicit_vsock(ctx_id),
         )?;
-        check("krun_add_vsock", krun_add_vsock(ctx_id, TSI_NO_HIJACK))?;
+        check(
+            "krun_add_vsock",
+            krun_add_vsock(ctx_id, resolve_tsi_features(config)),
+        )?;
 
         // Per-VM HYBRID gateway channel, if configured. `listen: false` —
         // the GUEST initiates the connection by dialing the vsock port;
@@ -413,5 +497,83 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("krun_set_root"), "message was: {msg}");
         assert!(msg.contains("-2"), "message was: {msg}");
+    }
+
+    // --- Layer 1 pin (task_3b48 / M8-C4): construction never sets TSI ------
+    // hijack bits, no matter what the rest of `LaunchConfig` looks like.
+
+    use crate::config::{VsockGateway, WorkMount};
+    use std::path::PathBuf;
+
+    /// A minimal, valid `LaunchConfig` — mirrors `config.rs`'s own
+    /// `valid_input()` test fixture but at the post-`validate()` shape this
+    /// module actually consumes. `vsock_gateway`/mounts default to `None` so
+    /// callers can override just the field(s) relevant to a given test.
+    fn base_launch_config() -> LaunchConfig {
+        LaunchConfig {
+            rootfs: PathBuf::from("/tmp/rootfs"),
+            vcpus: 2,
+            ram_mib: 1024,
+            uid: 10001,
+            gid: 10001,
+            workdir: "/".to_string(),
+            exec_path: "/bin/sh".to_string(),
+            exec_args: vec![],
+            env: vec![],
+            vsock_gateway: None,
+            work_mount: None,
+            out_mount: None,
+        }
+    }
+
+    #[test]
+    fn resolve_tsi_features_is_no_hijack_with_no_vsock_gateway() {
+        let cfg = base_launch_config();
+        assert_eq!(resolve_tsi_features(&cfg), TSI_NO_HIJACK);
+    }
+
+    #[test]
+    fn resolve_tsi_features_is_no_hijack_even_with_a_vsock_gateway_configured() {
+        // The gateway channel (a *legitimate* vsock use — the guest dialing
+        // OUT to the per-job gateway socket) must not be conflated with TSI
+        // hijacking (a guest process's ordinary INET/UNIX socket calls being
+        // transparently redirected). Proving the bitmask is unaffected by
+        // this field's presence is exactly the "unconditional, not merely
+        // true for the empty case" property the doc comment promises.
+        let mut cfg = base_launch_config();
+        cfg.vsock_gateway = Some(VsockGateway {
+            port: 1234,
+            uds_path: PathBuf::from("/tmp/gw.sock"),
+        });
+        assert_eq!(resolve_tsi_features(&cfg), TSI_NO_HIJACK);
+    }
+
+    #[test]
+    fn resolve_tsi_features_is_no_hijack_with_work_and_out_mounts_configured() {
+        let mut cfg = base_launch_config();
+        cfg.work_mount = Some(WorkMount {
+            host_path: PathBuf::from("/tmp/work"),
+            tag: "work".to_string(),
+            read_only: true,
+        });
+        cfg.out_mount = Some(WorkMount {
+            host_path: PathBuf::from("/tmp/out"),
+            tag: "out".to_string(),
+            read_only: false,
+        });
+        assert_eq!(resolve_tsi_features(&cfg), TSI_NO_HIJACK);
+    }
+
+    #[test]
+    fn tsi_no_hijack_constant_clears_both_documented_hijack_bits() {
+        // Pins TSI_NO_HIJACK's own value against libkrun.h's documented bit
+        // positions (KRUN_TSI_HIJACK_INET = 1<<0, KRUN_TSI_HIJACK_UNIX =
+        // 1<<1) — a future accidental edit of the constant (e.g. a typo'd
+        // nonzero value) would fail this before ever reaching a live boot.
+        const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
+        const KRUN_TSI_HIJACK_UNIX: u32 = 1 << 1;
+        assert_eq!(TSI_NO_HIJACK & KRUN_TSI_HIJACK_INET, 0);
+        assert_eq!(TSI_NO_HIJACK & KRUN_TSI_HIJACK_UNIX, 0);
+        assert_eq!(TSI_NO_HIJACK, 0);
     }
 }

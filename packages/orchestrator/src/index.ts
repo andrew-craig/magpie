@@ -16,7 +16,11 @@ import { assertMemoryControllerAvailable, MemoryControllerUnavailableError } fro
 import { loadConfig, ConfigError } from "./config.js";
 import { assertDockerAvailable, DockerUnavailableError } from "./docker.js";
 import { createPullRequestFilter } from "./filter.js";
-import { cleanupOrphanContainers } from "./orphan-cleanup.js";
+import {
+  cleanupOrphanContainers,
+  cleanupOrphanLauncherProcesses,
+  cleanupOrphanScratchDirs,
+} from "./orphan-cleanup.js";
 import { createReviewPipeline } from "./pipeline.js";
 import type { JobOutcome } from "./queue.js";
 import { JobQueue, jobQueueOptionsFromConfig } from "./queue.js";
@@ -121,12 +125,20 @@ async function main(): Promise<void> {
   // in-container backstop over this startup-time check.
   await assertMemoryControllerAvailable(config);
 
-  // Defence-in-depth (M3-D, see orphan-cleanup.ts): remove any `magpie-*`
-  // review containers left running by a previous crash of this process
-  // (normal exits, including the graceful-shutdown path below, never leave
-  // one behind — see reviewer.ts's `--rm` + kill-on-timeout/abort handling).
-  // Best-effort and non-fatal: never blocks startup on a docker error.
+  // Defence-in-depth (M3-D, extended M8-C5 for the micro-VM substrate — see
+  // orphan-cleanup.ts): remove any `magpie-*` review containers, orphaned
+  // `magpie-krun-launch` micro-VM processes, and orphaned per-job scratch
+  // directories left behind by a previous crash of this process (normal
+  // exits, including the graceful-shutdown path below, never leave any of
+  // these behind — see reviewer.ts's `--rm`/kill-on-timeout-abort handling
+  // and pipeline.ts's per-job `Workspace.cleanup()`/`OutputDir.cleanup()`).
+  // Each call is independently best-effort and non-fatal (never blocks
+  // startup, and one failing must not skip the others) — see each
+  // function's own doc comment in orphan-cleanup.ts, including the
+  // deliberate gateway-virtual-key design-fork writeup (task_df53 §4).
   await cleanupOrphanContainers(config);
+  await cleanupOrphanLauncherProcesses(config);
+  await cleanupOrphanScratchDirs(config);
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
   const { runJob, cleanupJob } = createReviewPipeline(config);

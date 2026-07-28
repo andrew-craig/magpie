@@ -31,25 +31,38 @@ pub const MAX_VCPUS: u8 = 16;
 /// loudly here instead of silently upgraded.
 pub const MIN_RAM_MIB: u32 = 128;
 
-/// The read-only PR-checkout mount libkrun attaches as an independent
-/// virtiofs device (`krun_add_virtiofs3`, read-only). Reproduces the
-/// `-v <workspace>:/work:ro` bind mount `reviewer.ts`'s `docker run` argv
-/// uses today (see `packages/orchestrator/src/reviewer.ts`'s
-/// `buildReviewDockerArgs`).
+/// A virtiofs device attachment (`krun_add_virtiofs3`) — either the
+/// read-only `/work` PR-checkout mount (`--work-mount`) or, as of task_39ff
+/// (M8-C3), the WRITABLE `/out` findings mount (`--out-mount`). Reproduces
+/// docker's two bind mounts (`-v <workspace>:/work:ro`, `-v <outDir>:/out`)
+/// from `reviewer.ts`'s `buildReviewDockerArgs` — one struct, one field
+/// (`read_only`) distinguishing the two, since `krun_add_virtiofs3`'s own
+/// signature already takes a `read_only: bool` fourth argument (see
+/// `krun.rs`) and everything else about the two mounts (host path + tag)
+/// is identical in shape.
 ///
 /// SCOPE NOTE: this struct only describes the HOST-side device attachment.
-/// Actually mounting it inside the guest (`mount -t virtiofs work /work`) is
-/// the guest workload's responsibility, not this launcher's — see the crate
-/// root doc comment "What this launcher does and does not own". The
-/// production reviewer image's entrypoint would need to do this mount as one
-/// of its first actions (task_39ff's job); this launcher's smoke test does
-/// it inline in its `--exec` target to prove the device wiring end-to-end.
+/// Actually mounting it inside the guest (`mount -t virtiofs <tag> <path>`)
+/// is the guest workload's responsibility, not this launcher's — see the
+/// crate root doc comment "What this launcher does and does not own".
+/// `docker/reviewer/entrypoint.sh` does this mount (both `work` and `out`)
+/// as one of its first actions under the micro-VM tier; this launcher's
+/// smoke test mounts `work` inline in its `--exec` target to prove the
+/// device wiring end-to-end (`out` is not exercised by that smoke test —
+/// see its own doc comment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkMount {
-    /// Host directory bind-mounted into the guest (read-only).
+    /// Host directory attached into the guest.
     pub host_path: PathBuf,
     /// virtiofs tag the guest mounts by (`mount -t virtiofs <tag> <path>`).
     pub tag: String,
+    /// Whether the guest's mount of this device is read-only
+    /// (`krun_add_virtiofs3`'s `read_only` argument). `true` for
+    /// `--work-mount` (the PR checkout must never be guest-writable — same
+    /// invariant `container-mounts.ts`'s `assertGitStripped`/read-only bind
+    /// mount enforce for the crun tier); `false` for `--out-mount` (the
+    /// guest must be able to write `findings.json` back to the host).
+    pub read_only: bool,
 }
 
 /// The per-VM HYBRID gateway vsock channel (`krun_add_vsock_port2`) — see
@@ -109,6 +122,10 @@ pub struct LaunchConfig {
     pub vsock_gateway: Option<VsockGateway>,
     /// The read-only `/work` virtiofs device, if configured.
     pub work_mount: Option<WorkMount>,
+    /// The writable `/out` virtiofs device (task_39ff / M8-C3), if
+    /// configured — how the guest hands `findings.json` back to the host;
+    /// see `WorkMount::read_only`'s doc comment.
+    pub out_mount: Option<WorkMount>,
 }
 
 /// Everything that can make a [`LaunchConfig`] (or its raw inputs) invalid.
@@ -158,14 +175,16 @@ pub enum ConfigError {
     /// input, at config-validation time rather than deep inside
     /// `krun_set_root`.
     RootfsEmpty,
-    /// A `--work-mount` value was missing its host path.
-    WorkMountEmpty,
-    /// A `--work-mount` value had an empty virtiofs tag (e.g. `/path:`). An
-    /// empty tag is passed straight to `krun_add_virtiofs3`, attaching a
-    /// device the guest cannot `mount -t virtiofs <tag>` by name — a silent
-    /// misconfiguration this otherwise fail-closed component should reject up
-    /// front rather than boot a VM whose `/work` can never be mounted.
-    WorkMountTagEmpty,
+    /// A `--work-mount`/`--out-mount` value was missing its host path.
+    /// `field` names which flag (`"--work-mount"` or `"--out-mount"`).
+    WorkMountEmpty { field: &'static str },
+    /// A `--work-mount`/`--out-mount` value had an empty virtiofs tag (e.g.
+    /// `/path:`). An empty tag is passed straight to `krun_add_virtiofs3`,
+    /// attaching a device the guest cannot `mount -t virtiofs <tag>` by name
+    /// — a silent misconfiguration this otherwise fail-closed component
+    /// should reject up front rather than boot a VM whose `/work`/`/out` can
+    /// never be mounted. `field` names which flag.
+    WorkMountTagEmpty { field: &'static str },
 }
 
 impl fmt::Display for ConfigError {
@@ -198,11 +217,11 @@ impl fmt::Display for ConfigError {
                 write!(f, "{field} must be an absolute path, got {path:?}")
             }
             ConfigError::RootfsEmpty => write!(f, "--rootfs must not be empty"),
-            ConfigError::WorkMountEmpty => write!(f, "--work-mount must not be empty"),
-            ConfigError::WorkMountTagEmpty => {
+            ConfigError::WorkMountEmpty { field } => write!(f, "{field} must not be empty"),
+            ConfigError::WorkMountTagEmpty { field } => {
                 write!(
                     f,
-                    "--work-mount virtiofs tag must not be empty (e.g. use /path:tag)"
+                    "{field} virtiofs tag must not be empty (e.g. use /path:tag)"
                 )
             }
         }
@@ -255,6 +274,8 @@ pub struct LaunchConfigInput {
     pub vsock_uds: Option<PathBuf>,
     pub work_mount_host_path: Option<PathBuf>,
     pub work_mount_tag: String,
+    pub out_mount_host_path: Option<PathBuf>,
+    pub out_mount_tag: String,
 }
 
 impl LaunchConfigInput {
@@ -311,22 +332,18 @@ impl LaunchConfigInput {
             _ => return Err(ConfigError::VsockPortUdsUnpaired),
         };
 
-        let work_mount = match self.work_mount_host_path {
-            Some(host_path) => {
-                if host_path.as_os_str().is_empty() {
-                    return Err(ConfigError::WorkMountEmpty);
-                }
-                must_be_absolute("--work-mount host path", &host_path)?;
-                if self.work_mount_tag.is_empty() {
-                    return Err(ConfigError::WorkMountTagEmpty);
-                }
-                Some(WorkMount {
-                    host_path,
-                    tag: self.work_mount_tag,
-                })
-            }
-            None => None,
-        };
+        let work_mount = build_mount(
+            "--work-mount",
+            self.work_mount_host_path,
+            self.work_mount_tag,
+            true,
+        )?;
+        let out_mount = build_mount(
+            "--out-mount",
+            self.out_mount_host_path,
+            self.out_mount_tag,
+            false,
+        )?;
 
         Ok(LaunchConfig {
             rootfs: self.rootfs,
@@ -340,7 +357,39 @@ impl LaunchConfigInput {
             env: self.env,
             vsock_gateway,
             work_mount,
+            out_mount,
         })
+    }
+}
+
+/// Shared validation for `--work-mount`/`--out-mount`: both take an
+/// identical `<host-path>[:<tag>]` grammar (parsed identically in
+/// `cli.rs::split_work_mount`) and differ only in `field` (for error
+/// messages) and `read_only` (the actual security-relevant property).
+/// Factored out so the two flags can never silently drift apart in how
+/// they're validated.
+fn build_mount(
+    field: &'static str,
+    host_path: Option<PathBuf>,
+    tag: String,
+    read_only: bool,
+) -> Result<Option<WorkMount>, ConfigError> {
+    match host_path {
+        Some(host_path) => {
+            if host_path.as_os_str().is_empty() {
+                return Err(ConfigError::WorkMountEmpty { field });
+            }
+            must_be_absolute(field, &host_path)?;
+            if tag.is_empty() {
+                return Err(ConfigError::WorkMountTagEmpty { field });
+            }
+            Ok(Some(WorkMount {
+                host_path,
+                tag,
+                read_only,
+            }))
+        }
+        None => Ok(None),
     }
 }
 
@@ -397,6 +446,8 @@ mod tests {
             vsock_uds: None,
             work_mount_host_path: None,
             work_mount_tag: "work".to_string(),
+            out_mount_host_path: None,
+            out_mount_tag: "out".to_string(),
         }
     }
 
@@ -410,6 +461,7 @@ mod tests {
         assert_eq!(cfg.exec_path, "/bin/sh");
         assert!(cfg.vsock_gateway.is_none());
         assert!(cfg.work_mount.is_none());
+        assert!(cfg.out_mount.is_none());
     }
 
     #[test]
@@ -599,7 +651,7 @@ mod tests {
         assert!(matches!(
             err,
             ConfigError::PathNotAbsolute {
-                field: "--work-mount host path",
+                field: "--work-mount",
                 ..
             }
         ));
@@ -612,7 +664,9 @@ mod tests {
         input.work_mount_tag = String::new();
         assert_eq!(
             input.validate().unwrap_err(),
-            ConfigError::WorkMountTagEmpty
+            ConfigError::WorkMountTagEmpty {
+                field: "--work-mount"
+            }
         );
     }
 
@@ -639,7 +693,12 @@ mod tests {
     fn work_mount_empty_rejected() {
         let mut input = valid_input();
         input.work_mount_host_path = Some(PathBuf::new());
-        assert_eq!(input.validate().unwrap_err(), ConfigError::WorkMountEmpty);
+        assert_eq!(
+            input.validate().unwrap_err(),
+            ConfigError::WorkMountEmpty {
+                field: "--work-mount"
+            }
+        );
     }
 
     #[test]
@@ -651,5 +710,72 @@ mod tests {
         let wm = cfg.work_mount.expect("work_mount should be Some");
         assert_eq!(wm.host_path, PathBuf::from("/var/lib/magpie/work/job-1"));
         assert_eq!(wm.tag, "work");
+        assert!(wm.read_only, "--work-mount must be read-only");
+        assert!(cfg.out_mount.is_none());
+    }
+
+    #[test]
+    fn out_mount_accepted_and_writable() {
+        let mut input = valid_input();
+        input.out_mount_host_path = Some(PathBuf::from("/var/lib/magpie/work/job-1-out"));
+        input.out_mount_tag = "out".to_string();
+        let cfg = input.validate().expect("out mount should validate");
+        let om = cfg.out_mount.expect("out_mount should be Some");
+        assert_eq!(
+            om.host_path,
+            PathBuf::from("/var/lib/magpie/work/job-1-out")
+        );
+        assert_eq!(om.tag, "out");
+        assert!(!om.read_only, "--out-mount must be writable");
+        assert!(cfg.work_mount.is_none());
+    }
+
+    #[test]
+    fn out_mount_empty_rejected() {
+        let mut input = valid_input();
+        input.out_mount_host_path = Some(PathBuf::new());
+        assert_eq!(
+            input.validate().unwrap_err(),
+            ConfigError::WorkMountEmpty {
+                field: "--out-mount"
+            }
+        );
+    }
+
+    #[test]
+    fn out_mount_empty_tag_rejected() {
+        let mut input = valid_input();
+        input.out_mount_host_path = Some(PathBuf::from("/var/lib/magpie/work/job-1-out"));
+        input.out_mount_tag = String::new();
+        assert_eq!(
+            input.validate().unwrap_err(),
+            ConfigError::WorkMountTagEmpty {
+                field: "--out-mount"
+            }
+        );
+    }
+
+    #[test]
+    fn relative_out_mount_host_path_rejected() {
+        let mut input = valid_input();
+        input.out_mount_host_path = Some(PathBuf::from("relative/out"));
+        let err = input.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::PathNotAbsolute {
+                field: "--out-mount",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn work_mount_and_out_mount_both_accepted_independently() {
+        let mut input = valid_input();
+        input.work_mount_host_path = Some(PathBuf::from("/var/lib/magpie/work/job-1"));
+        input.out_mount_host_path = Some(PathBuf::from("/var/lib/magpie/work/job-1-out"));
+        let cfg = input.validate().expect("both mounts should validate");
+        assert!(cfg.work_mount.unwrap().read_only);
+        assert!(!cfg.out_mount.unwrap().read_only);
     }
 }

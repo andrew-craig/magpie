@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConfigError, loadConfig, resolveDefaultConfigPath } from "./config.js";
+import { ConfigError, loadConfig, resolveDefaultConfigPath, resolveQueueConcurrency } from "./config.js";
+import type { Config } from "./config.js";
 
 const REQUIRED_ENV = {
   MAGPIE_WEBHOOK_SECRET: "test-webhook-secret",
@@ -86,6 +87,15 @@ describe("loadConfig", () => {
     // M8-B2: the review-container runtime defaults to rootless podman.
     expect(config.container.dockerBin).toBe("podman");
     expect(config.container).not.toHaveProperty("network");
+    // M8-C3: default reviewer tier is "crun" — an existing deployment's
+    // behavior (and the M8-B1 floor golden) must be unaffected by this
+    // field's mere existence.
+    expect(config.container.tier).toBe("crun");
+    expect(config.microvm.ramMib).toBe(1024);
+    expect(config.microvm.vcpus).toBe(2);
+    expect(config.microvm.rootfsPath).toBe("");
+    expect(config.microvm.hostRamBudgetMib).toBe(4096);
+    expect(config.microvm.launcherBin).toBe("magpie-krun-launch");
     expect(config.gateway.baseUrl).toBe("http://127.0.0.1:4100");
     expect(config.gateway.containerBaseUrl).toBe("http://127.0.0.1:4000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(0.5);
@@ -131,6 +141,14 @@ require_memory_limit = false
 cpus = "4"
 pids_limit = 512
 docker_bin = "/usr/local/bin/podman"
+tier = "microvm"
+
+[microvm]
+ram_mib = 2048
+vcpus = 4
+rootfs_path = "/var/lib/magpie/microvm-rootfs"
+host_ram_budget_mib = 8192
+launcher_bin = "/usr/local/bin/magpie-krun-launch"
 
 [gateway]
 base_url = "http://10.0.0.1:9100"
@@ -157,6 +175,12 @@ ttl_margin_seconds = 300
     expect(config.container.cpus).toBe("4");
     expect(config.container.pidsLimit).toBe(512);
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
+    expect(config.container.tier).toBe("microvm");
+    expect(config.microvm.ramMib).toBe(2048);
+    expect(config.microvm.vcpus).toBe(4);
+    expect(config.microvm.rootfsPath).toBe("/var/lib/magpie/microvm-rootfs");
+    expect(config.microvm.hostRamBudgetMib).toBe(8192);
+    expect(config.microvm.launcherBin).toBe("/usr/local/bin/magpie-krun-launch");
     expect(config.gateway.baseUrl).toBe("http://10.0.0.1:9100");
     expect(config.gateway.containerBaseUrl).toBe("http://10.0.0.2:9000/v1");
     expect(config.gateway.perJobBudgetUsd).toBe(1.25);
@@ -194,6 +218,58 @@ ttl_margin_seconds = 300
       expect(err).toBeInstanceOf(ConfigError);
       expect((err as ConfigError).message).toMatch(/workspace\.work_dir must be an absolute path/);
     }
+  });
+
+  it("fails closed when container.tier = \"microvm\" and microvm.rootfs_path is unset", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(MINIMAL_TOML(pemPath) + `\n[container]\ntier = "microvm"\n`);
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/microvm\.rootfs_path is required/);
+    }
+  });
+
+  it("fails closed when container.tier = \"microvm\" and microvm.rootfs_path is relative", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(
+      MINIMAL_TOML(pemPath) +
+        `\n[container]\ntier = "microvm"\n\n[microvm]\nrootfs_path = "relative/rootfs"\n`,
+    );
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect.assertions(2);
+    try {
+      loadConfig(configPath);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/microvm\.rootfs_path must be an absolute path/);
+    }
+  });
+
+  it("accepts container.tier = \"microvm\" with a valid absolute rootfs_path", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(
+      MINIMAL_TOML(pemPath) +
+        `\n[container]\ntier = "microvm"\n\n[microvm]\nrootfs_path = "/var/lib/magpie/rootfs"\n`,
+    );
+    Object.assign(process.env, REQUIRED_ENV);
+
+    const config = loadConfig(configPath);
+    expect(config.container.tier).toBe("microvm");
+    expect(config.microvm.rootfsPath).toBe("/var/lib/magpie/rootfs");
+  });
+
+  it("rejects an unknown container.tier value", () => {
+    const pemPath = writePemFile();
+    const configPath = writeConfig(MINIMAL_TOML(pemPath) + `\n[container]\ntier = "gvisor"\n`);
+    Object.assign(process.env, REQUIRED_ENV);
+
+    expect(() => loadConfig(configPath)).toThrow(ConfigError);
   });
 
   it("reports a missing required field by name", () => {
@@ -452,5 +528,46 @@ describe("resolveDefaultConfigPath", () => {
       rmSync(cwdA, { recursive: true, force: true });
       rmSync(cwdB, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveQueueConcurrency", () => {
+  function baseConfig(overrides: Partial<Pick<Config, "limits" | "container" | "microvm">> = {}) {
+    return {
+      limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
+      container: { tier: "crun" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
+      ...overrides,
+    };
+  }
+
+  it("returns limits.concurrency unchanged for the crun tier", () => {
+    const config = baseConfig({ limits: { jobTimeoutSeconds: 600, concurrency: 7, maxDiffLines: 4000 } });
+    expect(resolveQueueConcurrency(config)).toBe(7);
+  });
+
+  it("derives floor(host_ram_budget_mib / ram_mib) for the microvm tier", () => {
+    const config = baseConfig({
+      container: { tier: "microvm" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "/rootfs", hostRamBudgetMib: 4096, launcherBin: "magpie-krun-launch" },
+    });
+    expect(resolveQueueConcurrency(config)).toBe(4);
+  });
+
+  it("does not use limits.concurrency at all under the microvm tier", () => {
+    const config = baseConfig({
+      limits: { jobTimeoutSeconds: 600, concurrency: 999, maxDiffLines: 4000 },
+      container: { tier: "microvm" } as Config["container"],
+      microvm: { ramMib: 1024, vcpus: 2, rootfsPath: "/rootfs", hostRamBudgetMib: 2048, launcherBin: "magpie-krun-launch" },
+    });
+    expect(resolveQueueConcurrency(config)).toBe(2);
+  });
+
+  it("clamps microvm-tier concurrency to a minimum of 1 even when the budget is smaller than one guest", () => {
+    const config = baseConfig({
+      container: { tier: "microvm" } as Config["container"],
+      microvm: { ramMib: 4096, vcpus: 2, rootfsPath: "/rootfs", hostRamBudgetMib: 100, launcherBin: "magpie-krun-launch" },
+    });
+    expect(resolveQueueConcurrency(config)).toBe(1);
   });
 });
