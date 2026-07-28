@@ -2,14 +2,14 @@
 id: epic_d6c1
 title: Milestone 5 — Production hardening
 type: epic
-status: open
+status: closed
 priority: 2
 labels: [milestone-5]
-blocked_by: [epic_6730]
+blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-10T21:51:42Z
-updated_at: 2026-07-10T21:51:42Z
+updated_at: 2026-07-28T21:17:22Z
 ---
 Make magpie a real unattended service. This is PLAN.md milestone 5, minus what was already pulled forward: Cloudflare Tunnel ingress landed in M1 (cloudflared/, scripts/setup-cloudflared.sh, systemd/cloudflared.service), and timeouts/concurrency/diff-size caps landed in M1's queue/diff modules — verify their production defaults rather than rebuild them.
 
