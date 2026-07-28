@@ -158,6 +158,20 @@ fi
 #   2. "no host but the gateway is reachable" is unchanged from the task
 #      text (now sharpened by `--network none`, M7-1) and is implemented as
 #      a set of cheap reachability probes below.
+#
+# M8-C4 (task_3b48) extends check 2 with an interface/route-table
+# enumeration (defense-in-depth, catches a plainly wrong launch) AND an
+# explicit micro-VM-tier vsock-channel/port assertion -- see "no network by
+# construction" as a THREE-layer invariant: this script's checks are Layer 3
+# (in-guest, fail-closed at startup); Layer 1 is
+# rust/magpie-microvm-launcher/src/krun.rs's construction-time TSI-off pin;
+# Layer 2 is packages/orchestrator/src/reviewer.ts's
+# findMicrovmNetworkTransportViolations launch-argv preflight. No single
+# layer is trusted alone -- libkrun's TSI backend can give a guest real
+# egress via syscall interception with NO virtio-net device ever attached,
+# which is exactly why the ACTIVE egress canary below (not just the
+# interface/route check) is retained as the thing that actually proves no
+# hijacked path exists.
 # ---------------------------------------------------------------------------
 
 # --- 1. Virtual-key-only assertion -----------------------------------------
@@ -207,14 +221,26 @@ esac
 # feasibility spike (spike/m7-0/spike-entrypoint.sh).
 # ---------------------------------------------------------------------------
 
+# M8-C4 (task_3b48) Layer 3, single-sourced: the fixed vsock port the guest
+# dials under the micro-VM tier -- MUST match
+# packages/orchestrator/src/microvm-vsock.ts's MICROVM_VSOCK_PORT and
+# rust/vsock-client's own DEFAULT_VSOCK_PORT (both 1234; see that crate's
+# module doc comment's "Vsock port convention"). Declared here, ahead of
+# starting vsock-client, and passed to it EXPLICITLY via MAGPIE_VSOCK_PORT
+# below rather than relying on its built-in default -- so the "only
+# permitted egress port" this script later asserts (see the network-
+# confinement block) is a value THIS script chose and named, not an
+# implicit fact about a binary it doesn't control the source of.
+readonly MAGPIE_EXPECTED_VSOCK_PORT=1234
+
 # MAGPIE_IS_MICROVM captures the same /dev/vsock tier signal used to pick a
 # relay above, in a variable, for reuse further down this script (the
 # virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff -- need the
 # same tier decision and shouldn't re-derive it via a second `[ -c
 # /dev/vsock ]` probe scattered elsewhere).
 if [ -c /dev/vsock ]; then
-  echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host)" >&2
-  /opt/magpie/vsock-client &
+  echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port ${MAGPIE_EXPECTED_VSOCK_PORT})" >&2
+  MAGPIE_VSOCK_PORT="${MAGPIE_EXPECTED_VSOCK_PORT}" /opt/magpie/vsock-client &
   MAGPIE_FORWARDER_PID=$!
   MAGPIE_IS_MICROVM=1
 else
@@ -356,6 +382,66 @@ magpie_http_get_200() {
   esac
 }
 
+# --- 2a. Interface / route-table assertion (M8-C4, task_3b48) --------------
+#
+# Defense-in-depth AHEAD OF the active-egress canaries below, not a
+# replacement for them. `--network none` (crun tier) and TSI-off (micro-VM
+# tier -- see rust/magpie-microvm-launcher/src/krun.rs's "LAYER 1 PIN") are
+# both expected to leave this process/guest with exactly one network device
+# (`lo`) and an empty route table. This is a STATIC, structural property --
+# checkable without attempting any connection -- so it's cheap and catches
+# a plainly wrong launch (e.g. `--network bridge`, or a virtio-net device
+# somehow attached) immediately.
+#
+# IMPORTANT -- this check is NOT sufficient on its own to catch a TSI-hijack
+# mis-launch: libkrun's TSI backend gives a guest real egress via syscall
+# interception, which needs no virtio-net device and no route at all (see
+# spike/m8-a1/libkrun/src/init_blob/init/init.c's `tsi_enabled()` -- when
+# TSI hijack IS on it may bring up a `dummy0` interface, administratively
+# DOWN, which this check will also catch as a bonus, but that is an
+# implementation detail of one libkrun version, not something to rely on).
+# The ACTUAL TSI-catching mechanism is the active egress canary loop just
+# below this block, which is why it is retained unchanged.
+#
+# Confirmed empirically (`docker run --network none`, this task): the IPv4
+# route table (/proc/net/route) is genuinely empty (header line only), but
+# the IPv6 route table (/proc/net/ipv6_route) is NOT -- it carries two
+# routes intrinsic to having a loopback device at all (::1/128, ff00::/8
+# multicast), both via `lo`. So the IPv6 check below only rejects a route
+# whose OUTPUT DEVICE (the last whitespace-separated field of each
+# /proc/net/ipv6_route line) is something other than `lo`, rather than
+# requiring literal emptiness.
+magpie_non_lo_ifaces=""
+for magpie_iface_path in /sys/class/net/*; do
+  [ -e "${magpie_iface_path}" ] || continue
+  magpie_iface="$(basename "${magpie_iface_path}")"
+  if [ "${magpie_iface}" != "lo" ]; then
+    magpie_non_lo_ifaces="${magpie_non_lo_ifaces}${magpie_iface} "
+  fi
+done
+if [ -n "${magpie_non_lo_ifaces}" ]; then
+  echo "magpie-reviewer: refusing to run: non-loopback network interface(s) present (${magpie_non_lo_ifaces}) -- this reviewer must have no network transport beyond the gateway forwarder/vsock channel. Aborting before Pi starts." >&2
+  exit 1
+fi
+
+magpie_route_count=0
+if [ -r /proc/net/route ]; then
+  # Subtract 1 for the header line; a route-free table is exactly 1 line.
+  magpie_route_count=$(( $(wc -l < /proc/net/route) - 1 ))
+fi
+if [ "${magpie_route_count}" -gt 0 ]; then
+  echo "magpie-reviewer: refusing to run: IPv4 route table is not empty (${magpie_route_count} route(s)) -- this reviewer must have no route out of itself beyond the gateway forwarder/vsock channel. Aborting before Pi starts." >&2
+  exit 1
+fi
+
+if [ -r /proc/net/ipv6_route ]; then
+  magpie_non_lo_v6_routes="$(awk '$NF != "lo" { print }' /proc/net/ipv6_route)"
+  if [ -n "${magpie_non_lo_v6_routes}" ]; then
+    echo "magpie-reviewer: refusing to run: IPv6 route table has a route not scoped to lo -- this reviewer must have no route out of itself beyond the gateway forwarder/vsock channel. Aborting before Pi starts." >&2
+    exit 1
+  fi
+fi
+
 # Canaries that MUST be unreachable from this container. A raw public IP
 # (not just a hostname) is included deliberately -- it tests actual routing
 # (or rather, the total absence of any route -- `--network none` gives this
@@ -402,6 +488,35 @@ if ! magpie_http_get_200 "${magpie_gateway_host}" "${magpie_gateway_port}" "/hea
   echo "magpie-reviewer: refusing to run: gateway proxy plane at ${magpie_gateway_host}:${magpie_gateway_port}/healthz (derived from OPENAI_BASE_URL) is NOT reachable -- this container's only permitted egress is unavailable, so no review can be attempted. Aborting before Pi starts." >&2
   exit 1
 fi
+
+# --- 3. Micro-VM tier: explicit allowed-egress-channel assertion ------------
+# (M8-C4, task_3b48 Layer 3's "assert the allowed port explicitly"
+# requirement.) Belt-and-suspenders alongside magpie-vsock-client's own
+# `/dev/vsock` presence check (rust/vsock-client's
+# `assert_char_device_present`, which already ran before this script's wait
+# loop above ever observed the relay as up): re-assert, from THIS script's
+# own perspective, that the micro-VM tier's egress channel is exactly
+# `/dev/vsock` at the fixed port this script itself chose and named
+# (`MAGPIE_EXPECTED_VSOCK_PORT`, passed to vsock-client via
+# `MAGPIE_VSOCK_PORT` above) -- not whatever the vsock-client binary's own
+# built-in default happens to be. A future change that silently drifted this
+# port between this script and rust/vsock-client (or
+# packages/orchestrator/src/microvm-vsock.ts's MICROVM_VSOCK_PORT, the
+# host-side counterpart) would otherwise only surface as a confusing
+# "review failed" with no clear cause.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  if [ ! -c /dev/vsock ]; then
+    echo "magpie-reviewer: refusing to run: /dev/vsock is missing -- the micro-VM tier's only permitted egress path is gone. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  if [ "${MAGPIE_VSOCK_PORT:-}" != "${MAGPIE_EXPECTED_VSOCK_PORT}" ]; then
+    echo "magpie-reviewer: refusing to run: this script's own MAGPIE_VSOCK_PORT (${MAGPIE_VSOCK_PORT:-unset}) does not match the expected gateway vsock port (${MAGPIE_EXPECTED_VSOCK_PORT}) -- refusing to trust an unverified egress channel. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM egress channel confirmed -- /dev/vsock present, port ${MAGPIE_EXPECTED_VSOCK_PORT}" >&2
+fi
+
+echo "magpie-reviewer: network confinement verified -- no non-lo interface, empty route table, canaries unreachable, gateway reachable only via the permitted forwarder/vsock channel" >&2
 
 # HOME: the container's root filesystem is `--read-only` (see reviewer.ts's
 # dockerArgs) with only `/tmp` writable (`--tmpfs /tmp`). reviewer.ts runs
