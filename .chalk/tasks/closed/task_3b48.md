@@ -2,14 +2,14 @@
 id: task_3b48
 title: M8-C4: no-network-by-construction — TSI/passt built off + fail-closed in-guest assertion
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [security,microvm]
-blocked_by: [task_39ff]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:21Z
-updated_at: 2026-07-28T10:42:11Z
+updated_at: 2026-07-28T12:19:50Z
 ---
 Brief §5 caveat + §7.2. libkrun's TSI/passt transport can give a guest egress with NO virtio-net
 device visible in a config audit — the VMM analog of Proposal C's fail-open netns. "No network"

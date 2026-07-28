@@ -2,14 +2,14 @@
 id: task_39ff
 title: M8-C3: micro-VM tier end-to-end — port reviewer launch to krun under rootless podman (crun floor stays feature-flagged fallback)
 type: task
-status: in_progress
+status: closed
 priority: 1
 labels: [microvm,security]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:10Z
-updated_at: 2026-07-27T03:20:09Z
+updated_at: 2026-07-28T12:19:50Z
 ---
 Brief §8 phase 3: the core port. Launch the reviewer as a rootless KVM micro-VM (podman +
 krun OCI runtime) end-to-end, with the hardened crun tier remaining as the feature-flagged

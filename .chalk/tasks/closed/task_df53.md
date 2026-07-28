@@ -2,14 +2,14 @@
 id: task_df53
 title: M8-C5: orphan cleanup — reap VM/podman processes instead of docker kill targets
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: [microvm,reliability]
-blocked_by: [task_39ff]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:29Z
-updated_at: 2026-07-28T11:38:54Z
+updated_at: 2026-07-28T12:19:50Z
 ---
 orphan-cleanup.ts today reaps orphaned review containers via the docker CLI. Under the new
 substrate the orphan population changes: rootless podman containers (crun tier) and krun VM
