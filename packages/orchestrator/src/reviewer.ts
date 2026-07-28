@@ -661,6 +661,54 @@ export function findMissingMicrovmFlags(argv: readonly string[]): string[] {
   return MICROVM_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
 }
 
+// --- Layer 2 install/launch preflight (task_3b48 / M8-C4) -----------------
+//
+// "No network" is a THREE-layer invariant (construction, install/launch
+// preflight, in-guest fail-closed assertion), not something trusted to a
+// single launch flag — see rust/magpie-microvm-launcher/src/krun.rs's
+// "LAYER 1 PIN" doc comment for the full rationale (libkrun's TSI backend
+// can give a guest real egress with no virtio-net device ever attached).
+// This is Layer 2. `magpie-krun-launch`'s CLI grammar
+// (rust/magpie-microvm-launcher/src/cli.rs's USAGE) has NO flag that can
+// enable a network transport today — `buildMicrovmLaunchArgs` above has no
+// parameter that could emit one either. So the list below is empty today
+// BY DESIGN; it exists so that if a FUTURE change to either the launcher's
+// CLI or this builder ever adds such a flag (a deliberate passt/TSI opt-in,
+// or a copy-paste mistake), this preflight fails the job closed instead of
+// silently launching a networked VM, rather than relying on nobody ever
+// wiring one in.
+//
+// TODO(M8-D1 / task_2f46): once the dedicated tier-preflight module lands,
+// this check belongs there instead — kept minimal and self-contained here
+// in the meantime (this file is where the microvm-tier argv is actually
+// built and where `findMissingMicrovmFlags` already runs the analogous
+// "must be present" checks, so a "must be absent" check sits naturally
+// alongside it).
+const MICROVM_DISALLOWED_NETWORK_FLAGS: readonly string[] = [
+  "--net",
+  "--network",
+  "--tsi",
+  "--tsi-hijack",
+  "--enable-network",
+  "--enable-net",
+  "--passt",
+  "--virtio-net",
+  "--net-tap",
+  "--net-unix",
+];
+
+/**
+ * Returns any flags from {@link MICROVM_DISALLOWED_NETWORK_FLAGS} found in
+ * `argv` (empty array ⇒ no network-transport-enabling flag present — the
+ * expected result for every argv this codebase can currently produce). Pure
+ * — {@link runReview} calls it alongside {@link findMissingMicrovmFlags} just
+ * before spawning the micro-VM tier and fails the job closed (same pattern)
+ * if it returns anything non-empty.
+ */
+export function findMicrovmNetworkTransportViolations(argv: readonly string[]): string[] {
+  return MICROVM_DISALLOWED_NETWORK_FLAGS.filter((flag) => argv.includes(flag));
+}
+
 /**
  * Run Pi headless, inside a hardened review container, against a PR
  * checkout + diff, and return STRUCTURED review findings collected via the
@@ -862,6 +910,27 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       );
       await output.cleanup().catch(() => {});
       return { ok: false, reason: `microvm-flag preflight failed: missing ${missingFlags.join(", ")}` };
+    }
+
+    // Layer 2 (task_3b48 / M8-C4): the launch argv must never enable a
+    // network transport — see findMicrovmNetworkTransportViolations's doc
+    // comment. This check is expected to always pass today (no code path
+    // in this builder can emit one of these flags); it exists as a
+    // regression guard for a future change, not because this argv is ever
+    // expected to trip it.
+    const networkViolations = findMicrovmNetworkTransportViolations(argv);
+    if (networkViolations.length > 0) {
+      console.error(
+        `[reviewer] FAIL-CLOSED: refusing to launch review micro-VM — network-transport preflight ` +
+          `failed, found disallowed flag(s): ${networkViolations.join(", ")}. This VM must never have ` +
+          `a network transport enabled (see rust/magpie-microvm-launcher/src/krun.rs's LAYER 1 PIN); ` +
+          `no micro-VM was started.`,
+      );
+      await output.cleanup().catch(() => {});
+      return {
+        ok: false,
+        reason: `microvm network-transport preflight failed: found ${networkViolations.join(", ")}`,
+      };
     }
     binary = launcherBin;
   } else {

@@ -13,7 +13,11 @@
 //   - findMissingMicrovmFlags's fail-closed preflight.
 
 import { describe, expect, it } from "vitest";
-import { buildMicrovmLaunchArgs, findMissingMicrovmFlags } from "./reviewer.js";
+import {
+  buildMicrovmLaunchArgs,
+  findMicrovmNetworkTransportViolations,
+  findMissingMicrovmFlags,
+} from "./reviewer.js";
 
 /** A representative, fully-populated set of inputs — mirrors a real runReview() call under the microvm tier. */
 const GOLDEN_INPUT = {
@@ -187,5 +191,34 @@ describe("findMissingMicrovmFlags", () => {
 
   it("reports every missing flag at once, not just the first", () => {
     expect(findMissingMicrovmFlags([]).length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+// M8-C4 (task_3b48) Layer 2 — install/launch preflight: the argv this
+// module produces must never enable a network transport (no TSI/passt, no
+// virtio-net device — see rust/magpie-microvm-launcher/src/krun.rs's
+// "LAYER 1 PIN"). This launcher's CLI has no such flag today, so these
+// tests exist to catch a FUTURE regression, not because the golden argv is
+// expected to ever trip them.
+describe("findMicrovmNetworkTransportViolations", () => {
+  it("returns [] for the real builder's output — no network-enabling flag is ever emitted", () => {
+    const argv = buildMicrovmLaunchArgs({ ...GOLDEN_INPUT });
+    expect(findMicrovmNetworkTransportViolations(argv)).toEqual([]);
+  });
+
+  it("returns [] for an empty argv (nothing to violate)", () => {
+    expect(findMicrovmNetworkTransportViolations([])).toEqual([]);
+  });
+
+  it("catches a disallowed flag if one is ever accidentally present", () => {
+    const argv = [...buildMicrovmLaunchArgs({ ...GOLDEN_INPUT }), "--tsi-hijack", "on"];
+    expect(findMicrovmNetworkTransportViolations(argv)).toContain("--tsi-hijack");
+  });
+
+  it("catches every disallowed flag present, not just the first", () => {
+    const argv = ["--net", "bridge", "--passt", "--virtio-net"];
+    const violations = findMicrovmNetworkTransportViolations(argv);
+    expect(violations).toEqual(expect.arrayContaining(["--net", "--passt", "--virtio-net"]));
+    expect(violations.length).toBeGreaterThanOrEqual(3);
   });
 });
