@@ -3,8 +3,8 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_2f46** · P1 · in_progress · M8-D1: tier preflight + isolation-ladder selection module  (parent: epic_59b1)
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
-- **task_2f46** · P1 · open · M8-D1: tier preflight + isolation-ladder selection module  (parent: epic_59b1)
 - **task_67aa** · P1 · open · M8-D3: installer + systemd — rootless-Podman provisioning (subuid/subgid, linger, kvm group, AF_VSOCK)  (parent: epic_59b1)
 - **task_92d7** · P1 · open · M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer  (parent: epic_59b1)
 - **task_0716** · P2 · open · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)

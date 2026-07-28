@@ -27,6 +27,7 @@ import { JobQueue, jobQueueOptionsFromConfig } from "./queue.js";
 import { createWebhookServer } from "./server.js";
 import type { ShutdownLogger } from "./shutdown.js";
 import { drainQueue } from "./shutdown.js";
+import { resolveTier, TierSelectionError } from "./tier-ladder.js";
 
 /** Minimal logger this module needs: a single pre-serialized JSON line. */
 export interface JobOutcomeLogger {
@@ -94,7 +95,8 @@ export function formatStartupError(err: unknown): string {
   if (
     err instanceof ConfigError ||
     err instanceof DockerUnavailableError ||
-    err instanceof MemoryControllerUnavailableError
+    err instanceof MemoryControllerUnavailableError ||
+    err instanceof TierSelectionError
   ) {
     return `[magpie] ${err.message}`;
   }
@@ -125,6 +127,38 @@ async function main(): Promise<void> {
   // in-container backstop over this startup-time check.
   await assertMemoryControllerAvailable(config);
 
+  // Isolation-tier ladder preflight (M8-D1 / task_2f46): probe the host
+  // (KVM_CREATE_VM via rust/magpie-tier-probe, the crun runtime CLI, the
+  // micro-VM launcher binary — see tier-ladder.ts) and resolve which tier
+  // will actually launch review jobs, RIGHT NOW, on THIS boot of the
+  // process — not once at install time and then trusted forever. This is
+  // the runtime half of the ladder's tier-honesty invariant
+  // (docs/design/cto-decision-brief.md §5): a host that has silently lost
+  // capability since it was last configured (KVM access revoked, the
+  // launcher binary went missing, ...) must fail closed HERE, at startup,
+  // rather than degrade a running deployment's isolation posture without
+  // anyone noticing. `resolveTier` throws `TierSelectionError` (caught by
+  // this function's caller via `formatStartupError`, wired above) for
+  // exactly two cases: no tier at all is usable, or the resolved tier is
+  // weaker than `config.container.tier` and the operator hasn't set
+  // `MAGPIE_ACK_TIER` to that exact weaker tier — see that module's doc
+  // comment for the full design. `tierResult.resolvedTier` is threaded into
+  // `createReviewPipeline` below (NOT re-derived from raw config by
+  // reviewer.ts on each job) so "the tier this preflight resolved" and "the
+  // tier that actually launches jobs" can never drift apart.
+  const tierResult = await resolveTier(config);
+  console.log(
+    JSON.stringify({
+      level: "info",
+      event: "tier-resolved",
+      resolvedTier: tierResult.resolvedTier,
+      requestedTier: tierResult.requestedTier,
+      degraded: tierResult.degraded,
+      acknowledgedTier: tierResult.acknowledgedTier,
+      reasons: tierResult.reasons,
+    }),
+  );
+
   // Defence-in-depth (M3-D, extended M8-C5 for the micro-VM substrate — see
   // orphan-cleanup.ts): remove any `magpie-*` review containers, orphaned
   // `magpie-krun-launch` micro-VM processes, and orphaned per-job scratch
@@ -141,7 +175,7 @@ async function main(): Promise<void> {
   await cleanupOrphanScratchDirs(config);
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
-  const { runJob, cleanupJob } = createReviewPipeline(config);
+  const { runJob, cleanupJob } = createReviewPipeline(config, { resolvedTier: tierResult.resolvedTier });
   const filter = createPullRequestFilter(config, (job) => {
     // `JobQueue.enqueue` resolves with a `JobOutcome` and never rejects (see
     // queue.ts). We don't block the webhook handler on it, but we DO observe

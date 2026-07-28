@@ -1,0 +1,19 @@
+[package]
+name = "magpie-tier-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Install-time and runtime KVM preflight for the isolation-tier ladder (M8-D1 / task_2f46). Opens /dev/kvm and issues a real KVM_CREATE_VM ioctl -- never reads CPUID -- so the ladder never trusts a host that merely CLAIMS virtualization support. Standalone: runnable with no Node (the M8-D3 installer's contract), and shelled out to by packages/orchestrator/src/tier-ladder.ts at orchestrator startup. See src/main.rs's module doc comment."
+
+[[bin]]
+name = "magpie-tier-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Only dependency, matching vsock-client's and magpie-microvm-launcher's
+# posture (see those crates' Cargo.toml doc comments): this probe is
+# deliberately dependency-minimal -- no KVM-crate wrapper -- so the exact
+# ioctl it issues stays visible and auditable in src/main.rs, which is the
+# whole point of writing this probe instead of trusting CPUID.
+libc = "0.2"
