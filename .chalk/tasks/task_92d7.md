@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 1
 labels: [security,observability]
-blocked_by: [task_2f46]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:47Z
-updated_at: 2026-07-19T22:55:47Z
+updated_at: 2026-07-28T22:51:32Z
 ---
 CTO edit (their #2): the brief's original plan surfaced the active tier in the PR review summary
 footer — REMOVED. A prospective attacker crafting a malicious PR would learn whether the target
