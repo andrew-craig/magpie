@@ -150,6 +150,29 @@ webhook port — see `DISTRIBUTION.md` §3.3 for the supported ingress options
 (reverse proxy, Cloudflare Tunnel, other tunnels). The existing Cloudflare
 Tunnel path is documented separately in `docs/cloudflared.md`.
 
+### Checking the active isolation tier
+
+Magpie runs review jobs at the strongest isolation tier this host can
+actually deliver (micro-VM > gVisor > the hardened crun floor — see
+`PLAN.md`'s isolation-ladder milestone). You can see which tier is active,
+and why, in two operator-only places:
+
+- **`GET /healthz`** — returns JSON including the resolved tier, whether it's
+  degraded from what `config.toml`'s `container.tier` requested, and probe
+  details (KVM availability, container-runtime/launcher binary + version).
+  This is a liveness endpoint (always `200`, unauthenticated) meant for your
+  own monitoring — `curl localhost:<port>/healthz` on the host.
+- **The orchestrator's startup log** — a `tier-resolved` JSON log line at
+  every boot, and a `tier` field on each job's `running-review` log line.
+
+The active tier is **deliberately not surfaced anywhere in the PR itself**
+(the review comment/summary GitHub shows). This is intentional, not an
+oversight: publishing the tier on a PR would let anyone who can open a pull
+request against your repo learn, before submitting anything malicious,
+whether your deployment runs the weaker crun floor rather than the micro-VM
+tier — free reconnaissance for an attacker. Isolation posture stays strictly
+operator-facing information (`/healthz` + logs), never public.
+
 ## Upgrading
 
 Repeat steps 1–5 for the new tarball into the same prefix, then

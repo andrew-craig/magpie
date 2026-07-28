@@ -2,14 +2,14 @@
 id: task_92d7
 title: M8-D2: tier surfacing — /healthz + operator logs ONLY; never the public PR review footer
 type: task
-status: open
+status: in_progress
 priority: 1
 labels: [security,observability]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:47Z
-updated_at: 2026-07-28T22:51:32Z
+updated_at: 2026-07-28T22:52:02Z
 ---
 CTO edit (their #2): the brief's original plan surfaced the active tier in the PR review summary
 footer — REMOVED. A prospective attacker crafting a malicious PR would learn whether the target

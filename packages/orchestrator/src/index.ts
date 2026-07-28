@@ -24,7 +24,7 @@ import {
 import { createReviewPipeline } from "./pipeline.js";
 import type { JobOutcome } from "./queue.js";
 import { JobQueue, jobQueueOptionsFromConfig } from "./queue.js";
-import { createWebhookServer } from "./server.js";
+import { buildHealthzTierSnapshot, createWebhookServer } from "./server.js";
 import type { ShutdownLogger } from "./shutdown.js";
 import { drainQueue } from "./shutdown.js";
 import { resolveTier, TierSelectionError } from "./tier-ladder.js";
@@ -176,6 +176,14 @@ async function main(): Promise<void> {
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
   const { runJob, cleanupJob } = createReviewPipeline(config, { resolvedTier: tierResult.resolvedTier });
+  // M8-D2 (task_92d7): the ONLY place `tierResult` is projected onto an HTTP
+  // surface, and it goes to `/healthz` — an operator-facing liveness probe,
+  // never the PR review (publisher.ts never receives `tierResult` or any
+  // derivative of it at all — see that module's FORBIDDEN_TIER_STRINGS
+  // guard test). See server.ts's `buildHealthzTierSnapshot`/
+  // `HealthzTierSnapshot` doc comments for why this is a narrow, hand-picked
+  // projection rather than the raw `TierSelectionResult`.
+  const healthzTierSnapshot = buildHealthzTierSnapshot(tierResult);
   const filter = createPullRequestFilter(config, (job) => {
     // `JobQueue.enqueue` resolves with a `JobOutcome` and never rejects (see
     // queue.ts). We don't block the webhook handler on it, but we DO observe
@@ -188,7 +196,7 @@ async function main(): Promise<void> {
       logJobOutcome(outcome);
     });
   });
-  const server = createWebhookServer(config, filter);
+  const server = createWebhookServer(config, filter, healthzTierSnapshot);
 
   await server.listen();
   console.log(

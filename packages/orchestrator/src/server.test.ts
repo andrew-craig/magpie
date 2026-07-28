@@ -3,12 +3,15 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "./config.js";
 import {
+  buildHealthzTierSnapshot,
   createWebhookServer,
   HEALTHZ_PATH,
   WEBHOOK_PATH,
+  type HealthzTierSnapshot,
   type OnPullRequest,
   type WebhookServer,
 } from "./server.js";
+import type { TierSelectionResult } from "./tier-ladder.js";
 
 const WEBHOOK_SECRET = "test-webhook-secret";
 
@@ -73,14 +76,30 @@ function sign(body: string, secret: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
+/** A representative `/healthz` tier snapshot — a resolved, non-degraded crun floor. */
+function testTierSnapshot(): HealthzTierSnapshot {
+  return {
+    resolvedTier: "crun",
+    requestedTier: "crun",
+    degraded: false,
+    acknowledgedTier: null,
+    kvmAvailable: false,
+    crunRuntime: { present: true, binary: "docker", version: "Docker version 24.0.0" },
+    microvmLauncher: { present: false, binary: "magpie-krun-launch" },
+  };
+}
+
 let running: WebhookServer | undefined;
 
 /** Start a server on an ephemeral port and return it plus its base URL. */
-async function start(onPullRequest: OnPullRequest): Promise<{
+async function start(
+  onPullRequest: OnPullRequest,
+  tierSnapshot: HealthzTierSnapshot = testTierSnapshot(),
+): Promise<{
   server: WebhookServer;
   baseUrl: string;
 }> {
-  const server = createWebhookServer(testConfig(), onPullRequest);
+  const server = createWebhookServer(testConfig(), onPullRequest, tierSnapshot);
   await server.listen();
   running = server;
   const { port } = server.server.address() as AddressInfo;
@@ -169,16 +188,98 @@ describe("createWebhookServer", () => {
     expect(onPullRequest).not.toHaveBeenCalled();
   });
 
-  it("answers GET /healthz with 200", async () => {
-    const { baseUrl } = await start(vi.fn());
+  it("answers GET /healthz with 200 and the resolved isolation tier + probe details (M8-D2)", async () => {
+    const snapshot = testTierSnapshot();
+    const { baseUrl } = await start(vi.fn(), snapshot);
     const res = await fetch(`${baseUrl}${HEALTHZ_PATH}`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as { status: string; tier: HealthzTierSnapshot };
+    expect(body.status).toBe("ok");
+    expect(body.tier).toEqual(snapshot);
+  });
+
+  it("/healthz stays 200 even when the resolved tier is a DEGRADED, acknowledged fallback", async () => {
+    // See server.ts's `createWebhookServer` doc comment: /healthz is a
+    // liveness probe, not a health gate — a degraded-but-acknowledged tier
+    // is still a running, job-processing service and must not flip the HTTP
+    // status (that would restart-loop a perfectly running deployment under
+    // an orchestrator supervisor for no benefit).
+    const degradedSnapshot: HealthzTierSnapshot = {
+      ...testTierSnapshot(),
+      resolvedTier: "crun",
+      requestedTier: "microvm",
+      degraded: true,
+      acknowledgedTier: "crun",
+    };
+    const { baseUrl } = await start(vi.fn(), degradedSnapshot);
+    const res = await fetch(`${baseUrl}${HEALTHZ_PATH}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tier: HealthzTierSnapshot };
+    expect(body.tier.degraded).toBe(true);
   });
 
   it("returns 404 for unknown routes", async () => {
     const { baseUrl } = await start(vi.fn());
     const res = await fetch(`${baseUrl}/nope`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("buildHealthzTierSnapshot", () => {
+  /** Minimal-but-valid TierSelectionResult for exercising the projection in isolation. */
+  function testTierSelectionResult(overrides: Partial<TierSelectionResult> = {}): TierSelectionResult {
+    return {
+      resolvedTier: "crun",
+      requestedTier: "crun",
+      degraded: false,
+      acknowledgedTier: null,
+      probe: {
+        kvm: { available: true, reason: null },
+        microvmLauncher: { present: true, binary: "magpie-krun-launch", version: "0.1.0" },
+        microvmRootfsConfigured: false,
+        crunRuntime: { present: true, binary: "podman", version: "podman version 4.9.3" },
+        gvisor: { present: false },
+      },
+      availability: { microvm: false, gvisor: false, crun: true },
+      reasons: ["kvm: available", "resolution: \"crun\""],
+      ...overrides,
+    };
+  }
+
+  it("projects only the fields HealthzTierSnapshot declares — never the free-text `reasons` audit trail", () => {
+    const result = testTierSelectionResult();
+    const snapshot = buildHealthzTierSnapshot(result);
+    expect(snapshot).toEqual({
+      resolvedTier: "crun",
+      requestedTier: "crun",
+      degraded: false,
+      acknowledgedTier: null,
+      kvmAvailable: true,
+      crunRuntime: { present: true, binary: "podman", version: "podman version 4.9.3" },
+      microvmLauncher: { present: true, binary: "magpie-krun-launch", version: "0.1.0" },
+    });
+    expect(snapshot).not.toHaveProperty("reasons");
+  });
+
+  it("surfaces a degraded, acknowledged tier faithfully", () => {
+    const result = testTierSelectionResult({
+      resolvedTier: "crun",
+      requestedTier: "microvm",
+      degraded: true,
+      acknowledgedTier: "crun",
+      probe: {
+        kvm: { available: false, reason: "no /dev/kvm" },
+        microvmLauncher: { present: false, binary: "magpie-krun-launch", reason: "not found" },
+        microvmRootfsConfigured: false,
+        crunRuntime: { present: true, binary: "docker" },
+        gvisor: { present: false },
+      },
+      availability: { microvm: false, gvisor: false, crun: true },
+    });
+    const snapshot = buildHealthzTierSnapshot(result);
+    expect(snapshot.degraded).toBe(true);
+    expect(snapshot.acknowledgedTier).toBe("crun");
+    expect(snapshot.kvmAvailable).toBe(false);
   });
 });
