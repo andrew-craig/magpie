@@ -47,8 +47,9 @@ with a vsock-only gateway channel where configured (Pi over the diff either way)
 structured `report_findings` → post one `COMMENT` review with diff-anchored inline comments
 (incremental + deduped on re-push) → cleanup (workspace, virtual key, reviewer sandbox). The
 resolved tier is never part of that published review — it surfaces only on `GET /healthz` and
-in operator logs. Remaining open work is the M6 nice-to-haves and M5-D cost logging — see
-`PLAN.md` and `chalk ready`.
+in operator logs. Every job also writes exactly one durable per-job telemetry record (M5-D,
+`telemetry.ts`) — outcome, cost, duration — regardless of how the job exits. Remaining open
+work is the M6 nice-to-haves — see `PLAN.md` and `chalk ready`.
 
 ## Implemented so far (Milestones 1–8)
 
@@ -69,6 +70,7 @@ in operator logs. Remaining open work is the M6 nice-to-haves and M5-D cost logg
 - `rereview.ts` — incremental re-review on `synchronize` (review only `before...after`), hidden `<!-- magpie:reviewed:<sha> -->` marker to track last-reviewed commit statelessly, and `minimizeComment` of prior magpie summaries.
 - `publisher.ts` — posts exactly one `pulls.createReview` (`event: COMMENT`) per job with inline comments + summary (a clear failure note otherwise).
 - `pipeline.ts` — wires auth → workspace → diff → head-SHA-mismatch guard → mint key → containerized review → publish → cleanup into the single `JobRunner` the queue drives.
+- `telemetry.ts` — M5-D (`task_8a10`, closed): one durable, greppable per-job record (outcome/cost/duration/usage) on every exit path — success, dedup skip, force-push skip, timeout, abort, or a thrown error — logged as structured JSON and best-effort appended to a JSONL file (`config.telemetry.path`). Cost prefers the gateway's own tracked spend over Pi's self-reported usage.
 - `shutdown.ts` / `index.ts` — composition root; drains in-flight jobs on `SIGINT`/`SIGTERM` before exit.
 
 `packages/gateway/src/` — the host-side credential-injecting LLM gateway (own unprivileged user): OpenAI-compatible proxy plane served over a per-job unix socket, loopback-only management plane for mint/revoke, in-memory virtual keys with per-job USD budgets (the hard cost cap Pi lacks). See `packages/gateway/README.md`.
@@ -79,7 +81,7 @@ in operator logs. Remaining open work is the M6 nice-to-haves and M5-D cost logg
 
 Also implemented: `reviewer-prompt.md` (reviewer system prompt with untrusted-input handling); production systemd units (`systemd/magpie.service` — converted to the rootless-Podman + isolation-tier substrate in M8-D3, `task_67aa`, with its own header comment documenting exactly which seccomp-based hardening directives were removed to keep `newuidmap`/`newgidmap` working and what compensates; `systemd/magpie-gateway.service`, `systemd/cloudflared.service`) + `scripts/install.sh` (also provisions the rootless-Podman substrate and runs the KVM tier preflight as of M8-D3); a versioned host-service release tarball (`scripts/pack-host.sh` + release CI, now per-arch to bundle the native `magpie-tier-probe` binary); pluggable webhook ingress (`docs/ingress.md`: reverse proxy, Cloudflare Tunnel, other tunnels); and onboarding docs (`QUICKSTART.md`, `INSTALL.md` — both cover the isolation-tier ladder and the micro-VM opt-in).
 
-**Remaining open work:** M5-D cost logging (`task_8a10`); the M6 nice-to-haves — `@magpie review` on-demand command (`task_ad15`), per-repo `.magpie.toml` (`task_220f`), multi-provider support (`task_9c9d`); and gVisor (`task_624d`, now formally the M8 isolation ladder's deferred middle tier — see `PLAN.md`, still pending). M8's own rootless-micro-VM-sandbox epic (`epic_59b1`) retired the earlier M6-E rootless-docker-path direction as superseded. Run `chalk ready` for the current queue.
+**Remaining open work:** the M6 nice-to-haves — `@magpie review` on-demand command (`task_ad15`), per-repo `.magpie.toml` (`task_220f`), multi-provider support (`task_9c9d`); and gVisor (`task_624d`, now formally the M8 isolation ladder's deferred middle tier — see `PLAN.md`, still pending). M8's own rootless-micro-VM-sandbox epic (`epic_59b1`) retired the earlier M6-E rootless-docker-path direction as superseded. Run `chalk ready` for the current queue.
 
 ## Task Tracking
 
