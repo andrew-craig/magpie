@@ -128,6 +128,17 @@ const rawConfigSchema = z
         // the floor golden fixture, are BYTE-FOR-BYTE unaffected by this
         // field's mere existence.
         tier: z.enum(["crun", "microvm"]).default("crun"),
+        // M8-D1 (task_2f46): path to the `magpie-tier-probe` binary
+        // (rust/magpie-tier-probe) the isolation-tier ladder (tier-ladder.ts)
+        // shells out to for its KVM_CREATE_VM check. Mirrors
+        // `microvm.launcher_bin`'s "basename resolved via PATH, or a full
+        // path" contract exactly (see that field's doc comment) — this is
+        // the SAME pattern applied to a second Rust binary, not a new one.
+        // Defaulting to the bare basename means a normal install (which
+        // places both Rust binaries on PATH — see scripts/pack-host.sh) needs
+        // no config change at all; a dev checkout or non-standard layout can
+        // point this at rust/target/*/release/magpie-tier-probe directly.
+        tier_probe_bin: z.string().min(1).default("magpie-tier-probe"),
       })
       .strict()
       .prefault({}),
@@ -279,8 +290,10 @@ export interface Config {
     pidsLimit: number;
     /** Path to the review-container runtime CLI. Defaults to `podman` (rootless; M8-B2); any docker-compatible CLI works. See config schema above. */
     dockerBin: string;
-    /** Reviewer launch tier (M8-C3). `"crun"` (default) is today's docker/podman `docker run` path; `"microvm"` opts into the rootless-libkrun launcher (reviewer.ts's `buildMicrovmLaunchArgs`). */
+    /** Reviewer launch tier (M8-C3). `"crun"` (default) is today's docker/podman `docker run` path; `"microvm"` opts into the rootless-libkrun launcher (reviewer.ts's `buildMicrovmLaunchArgs`). This is the REQUESTED/configured tier — tier-ladder.ts's `resolveTier` is what decides the ACTUAL tier a job runs at (see that module's doc comment). */
     tier: "crun" | "microvm";
+    /** Path to the `magpie-tier-probe` binary (M8-D1) — see tier-ladder.ts. */
+    tierProbeBin: string;
   };
   /** Micro-VM guest knobs (M8-C3), only load-bearing when `container.tier === "microvm"`. See config schema above. */
   microvm: {
@@ -599,6 +612,7 @@ export function loadConfig(configPath?: string): Config {
       pidsLimit: data.container.pids_limit,
       dockerBin: data.container.docker_bin,
       tier: data.container.tier,
+      tierProbeBin: data.container.tier_probe_bin,
     },
     microvm: {
       ramMib: data.microvm.ram_mib,

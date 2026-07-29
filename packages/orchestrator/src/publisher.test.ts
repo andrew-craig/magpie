@@ -515,6 +515,126 @@ describe("publishReviewWithFindings", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// M8-D2 (task_92d7) regression guard: the active isolation tier is
+// OPERATOR-FACING INFORMATION ONLY (/healthz + logs — see server.ts's
+// buildHealthzTierSnapshot and index.ts's `tier-resolved` log line). The
+// design brief's original §8 text said the OPPOSITE — that the tier should
+// surface in the PR review footer — before the CTO's edit #4 reversed that
+// decision specifically because a prospective attacker crafting a malicious
+// PR must not be able to learn, pre-submission, whether the target runs the
+// weaker crun floor. This test exists to catch a FUTURE regression back
+// toward that original (now-rejected) design: it should pass today (neither
+// publish function has ever had any way to receive tier data — see
+// publisher.ts's module doc comment and PublishReviewParams /
+// PublishReviewWithFindingsParams, neither of which has a tier-shaped field)
+// and must fail loudly the moment some future change threads a
+// TierSelectionResult/Tier value into a summary, an inline comment, or a
+// failure reason.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every tier/runtime-identifying string that must NEVER appear in a
+ * published PR review (see this section's header comment). Case-insensitive
+ * matching is used at each call site below, since none of these are
+ * legitimate common English words that would produce false positives in a
+ * genuine code review's prose (e.g. a real finding is never going to
+ * casually say "gvisor" or "libkrun"). Exported as one named list rather
+ * than inlined per assertion so every assertion in this section checks the
+ * exact same set.
+ */
+const FORBIDDEN_TIER_STRINGS: readonly string[] = [
+  // The three Tier union members (tier-ladder.ts) — the literal identity of
+  // the active isolation tier.
+  "microvm",
+  "gvisor",
+  "crun",
+  // Runtime/technology names that would let an attacker infer the tier even
+  // without the tier's own name appearing verbatim.
+  "podman",
+  "docker",
+  "krun",
+  "libkrun",
+  "kvm",
+  // The word "tier" itself — catches any stray "isolation tier: ..." /
+  // "tier=..." debug text that might get threaded in without using one of
+  // the specific names above.
+  "tier",
+];
+
+/** Case-insensitively assert `text` contains none of {@link FORBIDDEN_TIER_STRINGS}. */
+function expectTierSilent(text: string): void {
+  const lower = text.toLowerCase();
+  for (const forbidden of FORBIDDEN_TIER_STRINGS) {
+    expect(lower).not.toContain(forbidden);
+  }
+}
+
+describe("M8-D2 tier-silence guard (task_92d7): the published PR review never carries tier/runtime data", () => {
+  it("publishReview: neither the ok:true summary nor the ok:false reason ever contains a tier/runtime string", async () => {
+    const { client: okClient, createComment: okCreateComment } = fakeClient();
+    const { client: failClient, createComment: failCreateComment } = fakeClient();
+
+    await publishReview({
+      ...BASE_PARAMS,
+      octokit: okClient,
+      result: {
+        ok: true,
+        summary: "Reviewed the diff. No blocking issues found; a couple of minor style nits below.",
+        usage: { turns: 2, totalTokens: 333, costUsd: 0.0042 },
+      },
+      reviewedSha: "abc123",
+    });
+    await publishReview({
+      ...BASE_PARAMS,
+      octokit: failClient,
+      result: { ok: false, reason: "pi exited with code 1: provider request timed out" },
+    });
+
+    const okBody = okCreateComment.mock.calls[0][0].body as string;
+    const failBody = failCreateComment.mock.calls[0][0].body as string;
+    expectTierSilent(okBody);
+    expectTierSilent(failBody);
+  });
+
+  it("publishReviewWithFindings: the summary, every inline comment, and the folded 'Other observations' body are all tier-silent", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall the diff looks reasonable; see the inline notes below.",
+      inline: [SINGLE_LINE_COMMENT, RANGE_COMMENT, CODE_BLOCK_COMMENT],
+      other: [OTHER_FINDING],
+      usage: { turns: 3, totalTokens: 1024, costUsd: 0.0117 },
+      reviewedSha: "def456",
+    });
+
+    const call = createReview.mock.calls[0][0];
+    expectTierSilent(call.body as string);
+    for (const comment of call.comments) {
+      expectTierSilent(comment.body as string);
+    }
+  });
+
+  it("publishReviewWithFindings: the 422-fallback folded body and the double-failure issues.createComment body are also tier-silent", async () => {
+    const { client, createReview, createComment } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    // Fail both createReview attempts so the double-failure issues.createComment path runs too.
+    createReview.mockRejectedValueOnce(conflictError).mockRejectedValueOnce(conflictError);
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall the diff looks reasonable.",
+      inline: [SINGLE_LINE_COMMENT, RANGE_COMMENT],
+      other: [OTHER_FINDING],
+    });
+
+    expectTierSilent(createComment.mock.calls[0][0].body as string);
+  });
+});
+
 describe("fenceReason", () => {
   it("uses a 3-backtick fence when the reason has no backticks", () => {
     expect(fenceReason("plain error")).toBe("```\nplain error\n```");

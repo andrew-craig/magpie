@@ -95,6 +95,7 @@ import type { Config } from "./config.js";
 import { assertGitStripped, createOutputDir, prepareReviewMount } from "./container-mounts.js";
 import { parseFindings, type Finding } from "./findings.js";
 import { microvmVsockChannel } from "./microvm-vsock.js";
+import type { Tier } from "./tier-ladder.js";
 
 /** Grace period between SIGTERM and SIGKILL when a job times out. */
 const KILL_GRACE_MS = 5_000;
@@ -192,6 +193,22 @@ export interface RunReviewParams {
    * resolves (never throws) with `{ ok: false, reason: "aborted" }`.
    */
   signal?: AbortSignal;
+  /**
+   * The tier RESOLVED by tier-ladder.ts's `resolveTier` (M8-D1 / task_2f46),
+   * computed ONCE at orchestrator startup (see index.ts) and threaded
+   * through pipeline.ts to every job. When set, this OVERRIDES
+   * `config.container.tier` below — the whole point of the isolation ladder
+   * is that "which tier actually launches jobs" is an active-probe decision
+   * (KVM_CREATE_VM, launcher/runtime presence — see tier-ladder.ts), not a
+   * static config read repeated per job; `runReview` must not re-derive its
+   * own answer to "which tier" independently of that decision. Optional
+   * (rather than required) so every existing reviewer.test.ts case — and
+   * any other caller that legitimately wants the static config value, e.g. a
+   * unit test exercising `config.container.tier` directly — keeps working
+   * unchanged: omitting it falls back to `config.container.tier` exactly as
+   * before this field existed.
+   */
+  resolvedTier?: Tier;
 }
 
 /** Token/cost telemetry summed across every assistant turn in the run. */
@@ -773,14 +790,22 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     return { ok: false, reason: "aborted" };
   }
 
-  // Tier selection (M8-C3): "crun" (default) is the docker/podman path
-  // below, byte-for-byte unchanged; "microvm" spawns `magpie-krun-launch`
-  // instead — see this module's "Micro-VM tier" section above. `piBinary`
-  // is the SAME test-seam field regardless of tier (it already documents
-  // itself generically as "the docker (or docker-compatible) binary this
-  // module spawns" — the micro-VM tier reuses it unchanged rather than
-  // adding a parallel override field).
-  const tier = config.container.tier;
+  // Tier selection (M8-C3, refined M8-D1): "crun" (default) is the
+  // docker/podman path below, byte-for-byte unchanged; "microvm" spawns
+  // `magpie-krun-launch` instead — see this module's "Micro-VM tier" section
+  // above. `piBinary` is the SAME test-seam field regardless of tier (it
+  // already documents itself generically as "the docker (or docker-
+  // compatible) binary this module spawns" — the micro-VM tier reuses it
+  // unchanged rather than adding a parallel override field).
+  //
+  // As of M8-D1 (task_2f46), `params.resolvedTier` — the isolation ladder's
+  // active-probe decision, computed ONCE at startup by tier-ladder.ts's
+  // `resolveTier` and threaded through pipeline.ts — takes priority over the
+  // static `config.container.tier` when set, so this module never launches
+  // a tier the ladder didn't actually resolve to. See `RunReviewParams
+  // .resolvedTier`'s doc comment for why this must win over reading config
+  // directly.
+  const tier = params.resolvedTier ?? config.container.tier;
   const dockerBin = params.piBinary ?? config.container.dockerBin;
   const launcherBin = params.piBinary ?? config.microvm.launcherBin;
   const jobTimeoutSeconds = config.limits.jobTimeoutSeconds;

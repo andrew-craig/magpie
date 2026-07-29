@@ -5,11 +5,11 @@ type: task
 status: open
 priority: 3
 labels: []
-blocked_by: [task_2f46]
+blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-10T21:53:21Z
-updated_at: 2026-07-19T22:56:12Z
+updated_at: 2026-07-28T22:51:32Z
 ---
 Rescoped 2026-07-19 by the CTO decision on docs/design/cto-decision-brief.md (was: M6-C, run
 the reviewer under gVisor via docker --runtime=runsc). gVisor is now the **middle tier of the

@@ -45,6 +45,63 @@ Prompt-level defenses cannot be relied on; the fix is **capability separation**:
 This is the same principle as GitHub's own `pull_request_target` guidance: never let untrusted
 PR content execute in a context holding secrets.
 
+## Isolation tiers (M8)
+
+The threat model above assumes the reviewer runs inside *some* sandbox. M8 makes the strength
+of that sandbox explicit and **tier-qualified** rather than a single unqualified claim: at
+startup Magpie probes the host and selects the strongest of three isolation tiers it can
+actually deliver, ranked **micro-VM (KVM) > gVisor (deferred, `task_624d`) > hardened crun**
+(see `docs/design/cto-decision-brief.md` §5 for the full design and rationale, and
+`packages/orchestrator/src/tier-ladder.ts` for the implementation):
+
+| Tier | Mechanism | Status |
+|---|---|---|
+| micro-VM (KVM) | rootless libkrun micro-VM under Podman — a real, separate guest kernel, vsock-only gateway channel | opt-in (needs `/dev/kvm` + `[microvm]` config — see `INSTALL.md`) |
+| gVisor | userspace kernel (`runsc`) | not yet implemented — deliberately deferred, `task_624d` |
+| hardened crun (the floor) | rootless Podman + crun — `--cap-drop=ALL`, `--read-only`, `--network none`, pids/mem caps, `.git`-stripped read-only `/work` | **the shipped default** |
+
+**No unqualified isolation claims.** A statement like "Magpie sandboxes the reviewer in a
+micro-VM" is only ever true for a host that has deliberately opted into that tier. **The
+default, out-of-the-box tier every install ships with is the hardened crun floor** — the
+mechanics documented in DISTRIBUTION.md §2 — unchanged in substance since M3/M7. The micro-VM
+tier is a strictly-stronger opt-in an operator provisions deliberately; Magpie never silently
+represents floor-tier isolation as micro-VM-grade.
+
+**Floor invariant.** The crun tier is *defined* to be exactly today's shipped hardened posture,
+byte-for-byte — not merely documented as such. `packages/orchestrator/src/reviewer-crun-floor-argv.test.ts`
+(M8-B1, `task_89c4`) pins the full container-runtime argv against a committed golden fixture, so
+the floor cannot silently erode while attention is on the micro-VM path. No operator on any host
+is worse off than before M8; the stronger tiers are strict gains where the hardware allows.
+
+**The one tier-invariant property: no network.** Every tier — floor or micro-VM — runs the
+reviewer with no network egress path; only the *depth* of the reviewer↔host-kernel boundary
+varies. At the crun floor this is `--network none` (no interfaces but loopback). At the
+micro-VM tier the guest is built with no network transport and this is preflight-asserted
+fail-closed (no virtio-net device, no TSI/passt socket passthrough — see reviewer.ts's
+`findMicrovmNetworkTransportViolations`). This is the single isolation property that never
+varies by tier.
+
+**Tier visibility is operator-only.** Which tier actually launched a given job is visible on
+`GET /healthz` and in the orchestrator's structured logs — **never** in the PR review body or
+comments (enforced by publisher.ts's M8-D2 tier-silence guard test). A prospective attacker
+must not be able to learn, from the PR itself, whether a target deployment runs the weaker
+crun floor rather than the micro-VM tier before deciding whether an escape is worth attempting.
+
+**Trusted computing base.** M8 moved the reviewer-launching substrate to rootless Podman: *"no
+root daemon and no root Magpie process; the only setuid-root surface is two shadow-utils
+binaries (newuidmap/newgidmap) at namespace setup."* Those two binaries are exactly what
+elevate to write the container's uid/gid map during rootless namespace setup — which is also
+why the M8-D3 rootless conversion had to relax several of the orchestrator's own systemd
+seccomp directives (`SystemCallFilter`, `RestrictAddressFamilies`, `RestrictSUIDSGID`,
+`LockPersonality`, most `Protect*` — see `systemd/magpie.service`'s header comment): each of
+those forces `NoNewPrivileges=1`, which blocks `newuidmap`/`newgidmap` from elevating and
+breaks every rootless review launch. The compensating argument: the orchestrator is *trusted*
+host code whose only job is to launch the sandbox around *untrusted* PR content — the
+confinement that matters lives in the reviewer container/micro-VM guest, not in the
+orchestrator's own seccomp profile. What the orchestrator unit keeps: `RestrictNamespaces`
+(narrowed to an explicit allow-list; verified not to force `NoNewPrivileges`),
+`ProtectSystem=strict`, `PrivateTmp`, and `StateDirectory` confinement.
+
 ## Architecture
 
 ```
@@ -331,6 +388,14 @@ magpie/
    and docs-only onboarding (`QUICKSTART.md`) covering GitHub App registration end to end. See
    [DISTRIBUTION.md](DISTRIBUTION.md) for the full design, threat-model preservation argument,
    and rejected alternatives.
+8. **Isolation-tier ladder (M8):** replace the single hardened-container assumption with a
+   ranked, auditable ladder — micro-VM (KVM, rootless libkrun under Podman) > gVisor (deferred,
+   `task_624d`) > hardened crun (the floor, byte-for-byte today's shipped posture) — resolved at
+   startup by probing the host, never silently degraded (a downgrade requires an explicit
+   `MAGPIE_ACK_TIER` operator acknowledgement), and surfaced only to the operator (`/healthz` +
+   logs), never the PR. Moves the reviewer-launching substrate to rootless Podman (no root
+   daemon) along the way. See "Isolation tiers (M8)" above and
+   `docs/design/cto-decision-brief.md` for the full design.
 
 ## Defaults chosen (easily changed, flag if you disagree)
 

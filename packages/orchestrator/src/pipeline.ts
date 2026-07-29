@@ -135,6 +135,7 @@ import type { ReviewState } from "./rereview.js";
 import { minimizeOutdated, readReviewState } from "./rereview.js";
 import type { ReviewResult } from "./reviewer.js";
 import { runReview } from "./reviewer.js";
+import type { Tier } from "./tier-ladder.js";
 import type { JobOutcome, TelemetryGatewaySpend } from "./telemetry.js";
 import { recordJobTelemetry } from "./telemetry.js";
 import { createWorkspace } from "./workspace.js";
@@ -277,6 +278,18 @@ export interface PipelineDeps {
    */
   revokeGatewayKey?: (config: Config, id: string) => Promise<GatewayKeyRevocation | undefined>;
   logger?: PipelineLogger;
+  /**
+   * The isolation tier RESOLVED by tier-ladder.ts's `resolveTier` (M8-D1 /
+   * task_2f46), computed ONCE at orchestrator startup (see index.ts) and
+   * forwarded to every job's `runReview` call as `RunReviewParams
+   * .resolvedTier` below — this is what makes "the tier tier-ladder.ts
+   * resolves is the tier that actually launches jobs" true: this pipeline
+   * never re-reads `config.container.tier` on its own to decide what to run.
+   * Optional (falls back to `config.container.tier` inside reviewer.ts) so
+   * every existing pipeline.test.ts case — which predates the ladder and has
+   * no reason to care about it — keeps working unchanged.
+   */
+  resolvedTier?: Tier;
 }
 
 /** The job runner + timeout-cleanup hook, ready to hand to `JobQueue.enqueue`. */
@@ -302,6 +315,12 @@ export function createReviewPipeline(
   const mintGatewayKey = deps.mintGatewayKey ?? mintGatewayKeyFromConfig;
   const revokeGatewayKey =
     deps.revokeGatewayKey ?? ((cfg: Config, id: string) => revokeGatewayKeyFromConfig(cfg, id, logger));
+  // No fallback here (unlike the deps above): `undefined` is itself the
+  // correct value when the ladder hasn't been wired in by the caller (e.g.
+  // most of pipeline.test.ts) — reviewer.ts's own `params.resolvedTier ??
+  // config.container.tier` is where that fallback to the static config
+  // value actually happens (see RunReviewParams.resolvedTier's doc comment).
+  const resolvedTier = deps.resolvedTier;
 
   const runJob: JobRunner = async (job, signal) => {
     // M5-D (task_8a10): per-job cost/outcome telemetry. Every exit path below
@@ -583,19 +602,26 @@ export function createReviewPipeline(
               verdict: "comment",
             };
           } else {
-            // M8-C3: which reviewer TIER runs is selected inside `runReview`
-            // from `config.container.tier` (crun/docker vs. the rootless
-            // libkrun micro-VM launcher — see reviewer.ts), so the call
-            // shape below is UNCHANGED across tiers: the pipeline passes the
-            // same `config` + `gatewaySocketDir` either way (the micro-VM
-            // path derives its `--vsock-uds` from that same socketDir via
-            // microvm-vsock.ts, so no new per-job input is threaded here).
-            // The tier is logged for operator observability ONLY (M8-D2's
-            // "operator logs, never the public PR footer" surfacing rule —
-            // this log object is ids/counts, never posted to the PR).
-            logger.info({ event: "running-review", ...jobLogFields(job), tier: config.container.tier });
+            // M8-C3, refined M8-D1: which reviewer TIER runs is selected
+            // inside `runReview` from `resolvedTier` (falling back to
+            // `config.container.tier` only if the ladder wasn't wired in —
+            // see reviewer.ts's `RunReviewParams.resolvedTier` doc comment),
+            // so the call shape below is UNCHANGED across tiers: the
+            // pipeline passes the same `config` + `gatewaySocketDir` either
+            // way (the micro-VM path derives its `--vsock-uds` from that
+            // same socketDir via microvm-vsock.ts, so no new per-job input
+            // is threaded here besides `resolvedTier` itself). The tier is
+            // logged for operator observability ONLY (M8-D2's "operator
+            // logs, never the public PR footer" surfacing rule — this log
+            // object is ids/counts, never posted to the PR).
+            logger.info({
+              event: "running-review",
+              ...jobLogFields(job),
+              tier: resolvedTier ?? config.container.tier,
+            });
             result = await runReview({
               workspaceDir: workspace.dir,
+              resolvedTier,
               // Not tooLarge, so diff.ts guarantees a non-null diff (see
               // diff.ts's PrDiffResult doc comment: "diff is null exactly when
               // tooLarge").

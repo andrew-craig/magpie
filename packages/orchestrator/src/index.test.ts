@@ -4,6 +4,7 @@ import { ConfigError } from "./config.js";
 import { DockerUnavailableError } from "./docker.js";
 import { formatStartupError, logJobOutcome } from "./index.js";
 import type { JobOutcome } from "./queue.js";
+import { TierSelectionError } from "./tier-ladder.js";
 
 /** Captures a single logger's `.error(line)` calls without touching console. */
 function makeRecordingLogger(): { error(line: string): void; lines: string[] } {
@@ -99,6 +100,9 @@ describe("formatStartupError (entrypoint catch wiring)", () => {
       // bug_df2d: a memory-controller failure must be surfaced as an actionable
       // message, NOT swallowed into a generic internal-fault trace.
       new MemoryControllerUnavailableError("cgroup memory-controller preflight failed: ..."),
+      // M8-D1 (task_2f46): an unacknowledged isolation-tier degradation must
+      // be surfaced the same way — actionable, no stack noise.
+      new TierSelectionError("isolation-tier DEGRADATION: ..."),
     ]) {
       const out = formatStartupError(err);
       expect(out).toBe(`[magpie] ${(err as Error).message}`);

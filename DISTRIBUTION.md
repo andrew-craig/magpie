@@ -47,6 +47,15 @@ packaging work.
 
 ## 2. Target architecture — "Design D": `--network none` reviewer + unix-socket gateway
 
+> **Tier note (M8).** Design D as described in §2.1–§2.6 below is the **hardened crun floor** —
+> the tier every Magpie install ships with by default, unchanged in substance since M7. M8
+> layers a ranked isolation ladder on top of this floor — micro-VM (KVM) > gVisor (deferred) >
+> this crun floor — selected per host at startup; see §2.7 for the ladder itself. Every claim
+> in §2.1–§2.6 holds **at the crun-floor tier**. The opt-in micro-VM tier delivers the same
+> no-network / no-secret-in-reviewer properties by different mechanics (a vsock channel instead
+> of a bind-mounted unix socket, a real guest kernel instead of `--network none`) — it does not
+> weaken anything described below, it is a strictly stronger alternative.
+
 ### 2.1 The trust boundary (unchanged)
 
 - **Untrusted:** the reviewer (runs Pi over attacker-influenced PR content).
@@ -175,8 +184,9 @@ at startup and per job rather than running an unbounded reviewer; see `INSTALL.m
    entangling the two principals this architecture exists to separate. (Abstract-namespace sockets
    are likewise rejected: they are scoped to the network namespace, so `--network none` cannot see
    them; and random socket *names* are not access control, since `/proc/net/unix` lists every bound
-   path. If Magpie ever moves to podman, `--preserve-fds` lets us pass the connected fd and delete
-   the pathname socket entirely.)
+   path. **Update (M8-B2): Magpie now runs rootless Podman by default** — `--preserve-fds` remains
+   an available future refinement to pass the connected fd and delete the pathname socket entirely,
+   but is not implemented; the pathname-socket + `0711`/`0666` scheme above is what ships.)
 3. **Fail-closed runtime assertion (cheap belt-and-suspenders).** The reviewer entrypoint asserts
    at startup that it has **no** external route (e.g. a connect to a public IP fails) and that the
    gateway socket is present, and refuses to run otherwise — mirroring PLAN.md M4's "fail closed if
@@ -188,6 +198,60 @@ at startup and per job rather than running an unbounded reviewer; see `INSTALL.m
    least-privileged component (no secret, no socket, no network). Still pin it by digest and sign
    it (cosign/provenance); a compromised reviewer image is far less catastrophic than a compromised
    orchestrator image would have been under the rejected compose model.
+
+### 2.7 The isolation-tier ladder (M8): crun floor is the default, not the ceiling
+
+Design D above answers "how does the reviewer reach the gateway with no network egress." M8
+answers a broader question — "what is the reviewer↔host-kernel boundary itself" — with a
+ranked, auditable ladder rather than one fixed answer (see
+`docs/design/cto-decision-brief.md` §5 and `packages/orchestrator/src/tier-ladder.ts`):
+
+**micro-VM (KVM) > gVisor (deferred, `task_624d`) > hardened crun (the floor).** The floor is
+exactly the Design D mechanics of §2.1–§2.6, and is what every install runs by default. The
+micro-VM tier is an opt-in a host must explicitly provision (`/dev/kvm` + `[microvm]` config):
+a rootless libkrun micro-VM gives a real, separate guest kernel instead of a shared host kernel,
+with the gateway reached over a per-job hybrid-vsock channel instead of the bind-mounted unix
+socket §2.2 describes (a VM guest can't share a host unix socket by bind mount). gVisor is
+wired as a wholly empty, always-unavailable slot in `tier-ladder.ts` — deliberately deferred,
+not "coming soon" scope creep.
+
+**No unqualified isolation claims.** Nothing in this document should be read as "the reviewer
+always runs in a micro-VM" — say which tier, every time. The crun floor is the shipped default.
+
+**Floor invariant.** `packages/orchestrator/src/reviewer-crun-floor-argv.test.ts` (M8-B1,
+`task_89c4`) pins the crun tier's full container-runtime argv against a golden fixture, so §2.5's
+"reviewer hardening is unchanged" claim is enforced by a regression test, not just prose — the
+floor cannot silently erode while attention is on the micro-VM path.
+
+**No-network is the one tier-invariant property.** §2.3's `--network none` argument is specific
+to the crun floor's container network namespace; the micro-VM tier achieves the identical
+"no network path at all" property by different, VM-native means — the guest is built with no
+network transport and this is preflight-asserted fail-closed (no virtio-net device, no TSI/passt
+socket passthrough — see reviewer.ts's `findMicrovmNetworkTransportViolations`). Whichever tier
+is active, the reviewer has no network egress; only the depth of the isolation boundary varies.
+
+**Tier visibility is operator-only.** The resolved tier is exposed on `GET /healthz` and in
+structured orchestrator logs — never in the published PR review (publisher.ts's M8-D2
+tier-silence guard test asserts this). The rationale is attacker recon: a PR is untrusted-input
+territory, so a field on it that says "this deployment runs the weaker crun floor" would hand a
+prospective attacker free information about which target is worth an escape attempt.
+
+**Trusted computing base.** M8 also moved the orchestrator's own reviewer-launching substrate to
+rootless Podman, which changes the honest TCB claim to: *"no root daemon and no root Magpie
+process; the only setuid-root surface is two shadow-utils binaries (newuidmap/newgidmap) at
+namespace setup."* Those two setuid helpers are exactly what elevate to write the container's
+uid/gid map during rootless namespace setup — and that is also why several of
+`systemd/magpie.service`'s own seccomp-based hardening directives (`SystemCallFilter`,
+`RestrictAddressFamilies`, `RestrictSUIDSGID`, `LockPersonality`, most `Protect*`) had to be
+*removed* rather than kept: every one of them forces `NoNewPrivileges=1`, which blocks
+`newuidmap`/`newgidmap` from elevating and breaks every rootless review launch (verified
+on-target; see that unit's header comment for the full, per-directive account). This is a real,
+honest reduction in the orchestrator's own sandbox, not a paper cut to gloss over — the
+compensating argument is that the orchestrator is *trusted* host code whose only job is to
+launch the sandbox around *untrusted* PR content, so the confinement that matters lives in the
+reviewer container/micro-VM guest, not in the orchestrator's own seccomp profile. What the unit
+keeps: `RestrictNamespaces` (narrowed to an explicit allow-list, verified not to force
+`NoNewPrivileges`), `ProtectSystem=strict`, `PrivateTmp`, and `StateDirectory` confinement.
 
 ---
 
@@ -202,6 +266,16 @@ at startup and per job rather than running an unbounded reviewer; see `INSTALL.m
   a versioned release artifact (tarball or npm package with a committed lockfile and pinned deps),
   the existing systemd units, and an install script that no longer assumes a single hardcoded
   prefix or node path. Keep the graceful-drain `TimeoutStopSec` the units already have.
+  - **Per-arch host tarballs (M8-D3).** The host tarball was pure-JS and therefore
+    architecture-independent through M7. As of the isolation-tier work it also bundles the native
+    `magpie-tier-probe` binary (the `/dev/kvm` `KVM_CREATE_VM` preflight, `rust/magpie-tier-probe`)
+    at `bin/magpie-tier-probe`, which is per-arch (static-musl amd64 / arm64). `scripts/pack-host.sh`
+    therefore now emits **one tarball per arch** — `magpie-<version>-<arch>.tar.gz` — and
+    `.github/workflows/release-host.yml` builds the matrix natively (amd64 on `ubuntu-24.04`, arm64
+    on `ubuntu-24.04-arm`) and attaches both to a single Release. `install.sh` installs the bundled
+    probe to `/usr/local/bin`. The `magpie-microvm-launcher` binary is **not** bundled (it
+    dynamically links host-installed `libkrun.so`); micro-VM-tier operators build it from
+    `rust/magpie-microvm-launcher` themselves (see `INSTALL.md`).
 
 ### 3.2 Config portability
 

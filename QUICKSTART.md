@@ -20,11 +20,17 @@ model.
 
 ## 2. Prerequisites
 
-- A Linux host with **systemd**, **amd64 or arm64** (a Raspberry Pi works;
-  so does any cloud VM).
-- **Docker**, to run the reviewer image per review job. Your user (or the
-  `magpie` system user `install.sh` creates) needs access to the Docker
-  daemon.
+- A Linux host with **systemd** (cgroup v2 unified hierarchy) and **amd64 or
+  arm64** (a Raspberry Pi works; so does any cloud VM). Download the tarball
+  matching your architecture (`…-amd64.tar.gz` / `…-arm64.tar.gz`).
+- **Rootless Podman** (no root daemon, no `docker` group), to run the reviewer
+  container per review job. `install.sh` provisions the rest of the rootless
+  substrate for the `magpie` user it creates — subuid/subgid ranges and
+  `loginctl enable-linger` — so you only need podman installed
+  (`apt install podman` or your distro's equivalent). *(Optional, strongest
+  tier: to run reviews inside a rootless KVM **micro-VM** instead of the crun
+  floor, the host also needs `/dev/kvm` + libkrun — see
+  [`INSTALL.md`](INSTALL.md) "Opt into the micro-VM tier".)*
 - The kernel's **cgroup v2 `memory` controller** enabled, so the per-review
   `--memory` limit is actually enforced. Check with
   `cat /sys/fs/cgroup/cgroup.controllers` — the list must include `memory`.
@@ -46,31 +52,42 @@ Download the release tarball, verify its checksum (and optionally its SLSA
 provenance), unpack it to `/opt/magpie`, run the install script, and
 materialize dependencies:
 
+The release ships **one tarball per architecture** (each bundles the matching
+native `magpie-tier-probe` KVM preflight binary), so pick `<arch>` = `amd64`
+or `arm64` to match your host:
+
 ```bash
-curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>.tar.gz
-curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>.tar.gz.sha256
-sha256sum -c magpie-<version>.tar.gz.sha256
+curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>-<arch>.tar.gz
+curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>-<arch>.tar.gz.sha256
+sha256sum -c magpie-<version>-<arch>.tar.gz.sha256
 
 sudo mkdir -p /opt/magpie
-sudo tar xzf magpie-<version>.tar.gz --strip-components=1 -C /opt/magpie
+sudo tar xzf magpie-<version>-<arch>.tar.gz --strip-components=1 -C /opt/magpie
 cd /opt/magpie
 sudo ./scripts/install.sh
 npm ci --omit=dev
 ```
 
 `install.sh` creates the `magpie` / `magpie-gateway` system users, the
-`/etc/magpie` and `/etc/magpie-gateway` config/secret directories, seeds
-empty secret env-file templates and `config.toml`, and installs the two
-systemd units. It does not start anything yet. Full detail, including the
-`/opt/magpie` prefix requirement and how to relocate it: **[`INSTALL.md`](INSTALL.md)**.
+`/etc/magpie` and `/etc/magpie-gateway` config/secret directories, provisions
+the rootless-podman substrate for `magpie` (subuid/subgid ranges, linger),
+installs the `magpie-tier-probe` binary and runs the KVM tier preflight, seeds
+empty secret env-file templates and `config.toml`, and installs the two systemd
+units. It does not start anything yet. Full detail, including the `/opt/magpie`
+prefix requirement, the tier preflight's `MAGPIE_INSTALL_TIER` /
+`MAGPIE_ACK_TIER` env vars, and the micro-VM opt-in:
+**[`INSTALL.md`](INSTALL.md)**.
 
 ## 4. Pull the reviewer image
 
 The reviewer is a published, multi-arch, signed GHCR image — the only thing
-in the product you don't build yourself:
+in the product you don't build yourself. Rootless Podman keeps per-user image
+storage, so pull it **as the `magpie` user** (a root/other-user pull would be
+invisible to the service):
 
 ```bash
-docker pull ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed
+sudo -u magpie XDG_RUNTIME_DIR=/run/user/$(id -u magpie) HOME=/var/lib/magpie \
+  podman pull ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed
 ```
 
 Optionally verify it was signed by this repo's release workflow before

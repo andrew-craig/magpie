@@ -2,14 +2,14 @@
 id: task_2f46
 title: M8-D1: tier preflight + isolation-ladder selection module
 type: task
-status: open
+status: closed
 priority: 1
 labels: [security,ladder]
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-19T22:55:40Z
-updated_at: 2026-07-23T08:28:41Z
+updated_at: 2026-07-28T22:51:32Z
 ---
 Brief §5 tier-honesty invariant. A module that probes the host and selects the strongest
 available tier: micro-VM (KVM) > gVisor (deferred, slot exists) > hardened crun.

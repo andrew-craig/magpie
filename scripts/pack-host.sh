@@ -14,8 +14,19 @@
 # dev and CI (.github/workflows/release-host.yml) call this script. The
 # adopter host does NOT run TypeScript at all — dist is prebuilt into the
 # tarball; the adopter only runs `npm ci --omit=dev` to materialize
-# node_modules for the two pure-JS workspaces (no native modules, so the
-# tarball is architecture-independent).
+# node_modules for the two pure-JS workspaces.
+#
+# PER-ARCH (M8-D3): as of the isolation-tier work the tarball ALSO bundles the
+# native `magpie-tier-probe` binary (the /dev/kvm KVM_CREATE_VM preflight,
+# rust/magpie-tier-probe) at `bin/magpie-tier-probe`. That binary is per-arch
+# (static-musl amd64 / arm64 — built by .github/workflows/rust.yml), so the host
+# artifact is NO LONGER architecture-independent: this script produces ONE
+# tarball PER ARCH, named `magpie-<version>-<arch>.tar.gz`. The JS half is still
+# pure-JS and identical across arches; only the bundled probe differs.
+#
+# The `magpie-microvm-launcher` binary is deliberately NOT bundled — it
+# dynamically links a host-installed libkrun.so (see rust.yml's top comment), so
+# operators opting into the micro-VM tier build it themselves (INSTALL.md).
 #
 # Usage:
 #   npm run build && npm run gateway:build   # build first -- this script does not build
@@ -26,13 +37,20 @@
 #             the root package.json version if that fails (e.g. no tags, or
 #             not a git checkout at all).
 #
+# Env:
+#   MAGPIE_ARCH            amd64|arm64 — the arch this tarball targets (used in
+#                          the tarball name). Default: derived from `uname -m`.
+#   MAGPIE_TIER_PROBE_BIN  path to the matching magpie-tier-probe binary to
+#                          bundle. Default: the arch's static-musl build under
+#                          rust/target/<triple>/release, else rust/target/release.
+#
 # Output:
-#   dist-release/magpie-<version>.tar.gz
-#   dist-release/magpie-<version>.tar.gz.sha256
+#   dist-release/magpie-<version>-<arch>.tar.gz
+#   dist-release/magpie-<version>-<arch>.tar.gz.sha256
 #
 # The tarball unpacks to a single top-level `magpie-<version>/` directory that
 # mirrors the parts of the repo scripts/install.sh needs, so install.sh runs
-# unchanged from inside an unpacked tarball.
+# unchanged from inside an unpacked tarball (and finds the probe at bin/).
 
 set -euo pipefail
 
@@ -61,6 +79,39 @@ VERSION="${VERSION#v}"
 [[ -n "$VERSION" ]] || die "resolved an empty version"
 
 log "packaging version: $VERSION"
+
+# ---------------------------------------------------------------------------
+# 1b. Resolve the target arch + the matching magpie-tier-probe binary (M8-D3).
+# ---------------------------------------------------------------------------
+
+ARCH="${MAGPIE_ARCH:-}"
+if [[ -z "$ARCH" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64)  ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) die "cannot derive MAGPIE_ARCH from uname -m='$(uname -m)' — set MAGPIE_ARCH=amd64|arm64 explicitly" ;;
+  esac
+fi
+case "$ARCH" in
+  amd64) MUSL_TRIPLE="x86_64-unknown-linux-musl" ;;
+  arm64) MUSL_TRIPLE="aarch64-unknown-linux-musl" ;;
+  *) die "unsupported MAGPIE_ARCH='$ARCH' — use amd64 or arm64" ;;
+esac
+log "packaging for arch: $ARCH"
+
+# Locate the probe binary to bundle: explicit override, else the arch's
+# static-musl build (what rust.yml produces / CI passes), else a plain
+# native release build (local dev convenience).
+TIER_PROBE_BIN="${MAGPIE_TIER_PROBE_BIN:-}"
+if [[ -z "$TIER_PROBE_BIN" ]]; then
+  for cand in \
+    "$REPO_ROOT/rust/target/$MUSL_TRIPLE/release/magpie-tier-probe" \
+    "$REPO_ROOT/rust/target/release/magpie-tier-probe"; do
+    if [[ -f "$cand" ]]; then TIER_PROBE_BIN="$cand"; break; fi
+  done
+fi
+[[ -n "$TIER_PROBE_BIN" && -f "$TIER_PROBE_BIN" ]] || die "magpie-tier-probe binary not found for arch '$ARCH' — build it (cargo build --release --target $MUSL_TRIPLE -p magpie-tier-probe in rust/) or set MAGPIE_TIER_PROBE_BIN"
+log "bundling tier-probe: $TIER_PROBE_BIN"
 
 # ---------------------------------------------------------------------------
 # 2. Preconditions: both packages must already be built.
@@ -115,6 +166,12 @@ chmod +x "$STAGE/scripts/install.sh"
 cp "$REPO_ROOT/config.example.toml" "$STAGE/config.example.toml"
 cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE"
 cp "$REPO_ROOT/INSTALL.md" "$STAGE/INSTALL.md"
+
+# -- native per-arch magpie-tier-probe (M8-D3): install.sh installs it from
+# bin/magpie-tier-probe onto PATH at /usr/local/bin.
+mkdir -p "$STAGE/bin"
+install -m 0755 "$TIER_PROBE_BIN" "$STAGE/bin/magpie-tier-probe"
+log "staged bin/magpie-tier-probe ($ARCH)"
 
 # -- root package.json: same file, but workspaces trimmed to the two host
 # services (review-extension excluded) and dev-only build/reviewer-image
@@ -229,7 +286,7 @@ log "verified: orchestrator/gateway dependency versions unchanged vs source lock
 # 5. Archive + checksum.
 # ---------------------------------------------------------------------------
 
-TARBALL="$OUT_DIR/magpie-$VERSION.tar.gz"
+TARBALL="$OUT_DIR/magpie-$VERSION-$ARCH.tar.gz"
 SHAFILE="$TARBALL.sha256"
 
 tar czf "$TARBALL" -C "$STAGE_PARENT" "$STAGE_NAME"

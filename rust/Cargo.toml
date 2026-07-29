@@ -4,8 +4,10 @@
 # exists alongside the npm workspaces at the repo root; it is the build lane
 # for Magpie's native (Rust) process-boundary components — today the
 # scaffolding crates (`vsock-framing`, `vsock-client`) plus the production
-# host-side libkrun launcher (`magpie-microvm-launcher`, task_76d6). The
-# guest-side vsock client (task_2d6c) still needs to land in `vsock-client`.
+# host-side libkrun launcher (`magpie-microvm-launcher`, task_76d6) plus the
+# install-time/runtime KVM preflight (`magpie-tier-probe`, M8-D1 /
+# task_2f46). The guest-side vsock client (task_2d6c) still needs to land in
+# `vsock-client`.
 #
 # NOTE on `magpie-microvm-launcher`: unlike the other members, it dynamically
 # links a HOST-installed `libkrun.so` (see its Cargo.toml/build.rs doc
@@ -14,12 +16,18 @@
 # deliberately EXCLUDES it from the shared workspace-wide lint/build steps
 # (which run on generic GitHub-hosted runners that don't have libkrun
 # installed) — see that file's comments for the excluded commands and why.
+# `magpie-tier-probe` has NO such exclusion: it depends only on `libc` (like
+# `vsock-client`), needs no host-installed library to build, and its `cargo
+# test` suite deliberately doesn't assert a specific KVM_CREATE_VM outcome
+# (see that crate's tests) so it passes on a generic runner with no
+# `/dev/kvm` at all, same as it will on a real KVM-capable self-hosted box.
 [workspace]
 resolver = "2"
 members = [
     "vsock-framing",
     "vsock-client",
     "magpie-microvm-launcher",
+    "magpie-tier-probe",
 ]
 
 [workspace.package]

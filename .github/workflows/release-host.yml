@@ -1,11 +1,25 @@
-# release-host.yml — publish the magpie HOST-SERVICE release tarball (M7-3).
+# release-host.yml — publish the magpie HOST-SERVICE release tarballs (M7-3;
+# per-arch as of M8-D3).
 #
 # WHAT THIS DOES
-#   On a `v*` release tag (e.g. `v0.3.0`) this builds the two host systemd
+#   On a `v*` release tag (e.g. `v0.4.0`) this builds the two host systemd
 #   services — @magpie/orchestrator and @magpie/gateway — compiles their
-#   TypeScript, packages prebuilt `dist/**` plus a lockfile pruned to exactly
-#   those two workspaces via `scripts/pack-host.sh`, attaches SLSA build
-#   provenance, and publishes a GitHub Release with the tarball + checksum.
+#   TypeScript, builds the native per-arch `magpie-tier-probe` KVM preflight
+#   binary (static-musl, natively per arch — same approach as rust.yml),
+#   packages prebuilt `dist/**` + the probe + a lockfile pruned to exactly those
+#   two workspaces via `scripts/pack-host.sh`, attaches SLSA build provenance,
+#   and publishes ONE GitHub Release carrying BOTH per-arch tarballs.
+#
+# PER-ARCH (M8-D3)
+#   The tarball now bundles the native `magpie-tier-probe` binary, which is
+#   per-arch, so the host artifact is NO LONGER architecture-independent. The
+#   `build` job is a matrix (linux/amd64 on ubuntu-24.04, linux/arm64 on
+#   ubuntu-24.04-arm), each producing `magpie-<version>-<arch>.tar.gz`; a final
+#   `release` job collects both into a single Release. The probe is built
+#   natively per arch (no musl cross-linker), mirroring rust.yml. The micro-VM
+#   launcher (magpie-microvm-launcher) is deliberately NOT built/bundled here —
+#   it dynamically links host libkrun (see rust.yml) and is an operator
+#   build-from-source step (INSTALL.md).
 #
 # HOST-SERVICES-ONLY SCOPE
 #   The reviewer is the ONLY container in the product and is published
@@ -16,10 +30,10 @@
 #
 # PROVENANCE
 #   `actions/attest-build-provenance` records a signed SLSA provenance
-#   attestation for the tarball via GitHub's Sigstore-backed attestations API
+#   attestation for each tarball via GitHub's Sigstore-backed attestations API
 #   (the same keyless/OIDC model release-reviewer.yml uses for the image).
 #   Adopters verify with:
-#     gh attestation verify magpie-<version>.tar.gz --repo andrew-craig/magpie
+#     gh attestation verify magpie-<version>-<arch>.tar.gz --repo andrew-craig/magpie
 
 name: release-host
 
@@ -39,8 +53,21 @@ permissions:
   attestations: write # actions/attest-build-provenance
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  # Per-arch build: each runs natively on its own architecture so the
+  # static-musl magpie-tier-probe links without a cross-linker (mirrors
+  # rust.yml's matrix), and produces magpie-<version>-<arch>.tar.gz.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +97,22 @@ jobs:
       - name: Build gateway
         run: npm run gateway:build
 
+      # Build the native per-arch KVM preflight probe (static-musl), the same
+      # binary rust.yml's `build` matrix produces — built here natively so a
+      # `v*` host-release tag (which does NOT trigger rust.yml's `rust-v*` lane)
+      # still gets a probe to bundle, with no reliance on a cross-workflow
+      # artifact. Only this one crate is built (the launcher is excluded — it
+      # needs host libkrun, see rust.yml).
+      - name: Install pinned Rust toolchain + musl target
+        working-directory: rust
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - name: Build magpie-tier-probe (static-musl)
+        working-directory: rust
+        run: cargo build --release --target ${{ matrix.target }} -p magpie-tier-probe
+
       - name: Derive version
         id: version
         run: |
@@ -81,40 +124,58 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Pack host release artifact
+        env:
+          MAGPIE_ARCH: ${{ matrix.arch }}
+          MAGPIE_TIER_PROBE_BIN: rust/target/${{ matrix.target }}/release/magpie-tier-probe
         run: bash scripts/pack-host.sh "${{ steps.version.outputs.version }}"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist-release/magpie-*.tar.gz
+          subject-path: dist-release/magpie-*-${{ matrix.arch }}.tar.gz
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-host-${{ matrix.arch }}
+          path: |
+            dist-release/magpie-*-${{ matrix.arch }}.tar.gz
+            dist-release/magpie-*-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Job summary
+        run: |
+          {
+            echo "## magpie host-service tarball packaged (${{ matrix.arch }})"
+            echo ""
+            echo "**Version:** \`${{ steps.version.outputs.version }}\`"
+            echo '```'
+            ls dist-release/magpie-*-${{ matrix.arch }}.tar.gz
+            cat dist-release/magpie-*-${{ matrix.arch }}.tar.gz.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Collect both per-arch tarballs into ONE GitHub Release (tag pushes only).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download per-arch tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: magpie-host-*
+          path: dist-release
+          merge-multiple: true
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist-release/magpie-*.tar.gz \
             dist-release/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
             --title "magpie $GITHUB_REF_NAME (host services)" \
-            --notes "Host-service release: @magpie/orchestrator + @magpie/gateway. See INSTALL.md for install steps and DISTRIBUTION.md for the design. The reviewer container is published separately (see docker/reviewer/README.md)."
-
-      - name: Job summary
-        run: |
-          {
-            echo "## magpie host-service release packaged"
-            echo ""
-            echo "**Version:** \`${{ steps.version.outputs.version }}\`"
-            echo ""
-            echo "**Tarball:**"
-            echo '```'
-            ls dist-release/magpie-*.tar.gz
-            echo '```'
-            echo ""
-            echo "**SHA256:**"
-            echo '```'
-            cat dist-release/*.sha256
-            echo '```'
-            echo ""
-            echo "Build provenance attestation attached via actions/attest-build-provenance."
-          } >> "$GITHUB_STEP_SUMMARY"
+            --notes "Host-service release: @magpie/orchestrator + @magpie/gateway, one tarball PER ARCH (each bundles the matching magpie-tier-probe KVM preflight binary — see INSTALL.md). Pick the tarball matching your host's architecture. See INSTALL.md for install steps and DISTRIBUTION.md for the design. The reviewer container is published separately (see docker/reviewer/README.md)."

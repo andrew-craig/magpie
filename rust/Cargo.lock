@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "magpie-tier-probe"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "magpie-vsock-client"
 version = "0.0.0"
 dependencies = [

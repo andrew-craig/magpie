@@ -184,6 +184,46 @@ pids_limit = 256
 # Default: "podman"
 docker_bin = "podman"
 
+# Isolation tier the reviewer runs at (M8). "crun" (the default) is today's
+# hardened rootless `podman run` floor — seccomp + --cap-drop=ALL +
+# no-new-privileges + read-only rootfs + --pids-limit + --network none. "microvm"
+# opts into the strongest tier: a rootless KVM micro-VM (libkrun via
+# `magpie-microvm-launcher`), which additionally needs /dev/kvm (kvm group), the
+# host-built launcher binary on PATH, and `[microvm] rootfs_path` set below.
+# This is the REQUESTED tier; the orchestrator probes the host at startup and
+# runs the STRONGEST tier actually available, failing closed (unless
+# MAGPIE_ACK_TIER acknowledges a weaker one) rather than silently degrading —
+# see tier-ladder.ts and INSTALL.md's micro-VM opt-in section.
+# Default: "crun"
+tier = "crun"
+
+# Path (or bare PATH name) of the `magpie-tier-probe` binary the tier ladder and
+# the installer run for their /dev/kvm KVM_CREATE_VM check. scripts/install.sh
+# installs it to /usr/local/bin (on PATH), so the default basename resolves with
+# no change; a dev checkout can point this at rust/target/release/magpie-tier-probe.
+# Default: "magpie-tier-probe"
+tier_probe_bin = "magpie-tier-probe"
+
+# [microvm] — guest knobs, load-bearing ONLY when tier = "microvm" (above).
+# A crun-floor deployment can ignore this whole block.
+[microvm]
+# Absolute host path to the prepared guest rootfs (an unpacked OCI image dir —
+# see rust/magpie-microvm-launcher). REQUIRED when tier = "microvm"; the
+# orchestrator refuses to start with tier = "microvm" and this unset.
+# rootfs_path = "/var/lib/magpie/reviewer-rootfs"
+# Guest RAM ceiling in MiB — enforced by the VMM regardless of host cgroups
+# (this is how the micro-VM tier closes the memory-cap gap). Default: 1024
+ram_mib = 1024
+# Guest vCPUs. Default: 2
+vcpus = 2
+# Soft host-RAM budget (MiB) used to bound micro-VM concurrency. Default: 4096
+host_ram_budget_mib = 4096
+# Path (or bare PATH name) of the host-side libkrun launcher. It is NOT shipped
+# in the release tarball (it dynamically links host-installed libkrun.so — see
+# rust.yml) so operators build it themselves (INSTALL.md micro-VM section).
+# Default: "magpie-krun-launch"
+launcher_bin = "magpie-krun-launch"
+
 # NOTE: there is deliberately no `network` field. As of Milestone 7 (Design D,
 # DISTRIBUTION.md §2) the review container is ALWAYS launched with
 # `--network none` — it has no network interfaces at all, only loopback. Its

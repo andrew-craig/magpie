@@ -91,6 +91,10 @@ describe("loadConfig", () => {
     // behavior (and the M8-B1 floor golden) must be unaffected by this
     // field's mere existence.
     expect(config.container.tier).toBe("crun");
+    // M8-D1 (task_2f46): default path for the KVM-preflight probe binary
+    // tier-ladder.ts shells out to — a bare basename, resolved via PATH,
+    // mirroring `microvm.launcher_bin`'s own default convention.
+    expect(config.container.tierProbeBin).toBe("magpie-tier-probe");
     expect(config.microvm.ramMib).toBe(1024);
     expect(config.microvm.vcpus).toBe(2);
     expect(config.microvm.rootfsPath).toBe("");
@@ -142,6 +146,7 @@ cpus = "4"
 pids_limit = 512
 docker_bin = "/usr/local/bin/podman"
 tier = "microvm"
+tier_probe_bin = "/usr/local/bin/magpie-tier-probe"
 
 [microvm]
 ram_mib = 2048
@@ -176,6 +181,7 @@ ttl_margin_seconds = 300
     expect(config.container.pidsLimit).toBe(512);
     expect(config.container.dockerBin).toBe("/usr/local/bin/podman");
     expect(config.container.tier).toBe("microvm");
+    expect(config.container.tierProbeBin).toBe("/usr/local/bin/magpie-tier-probe");
     expect(config.microvm.ramMib).toBe(2048);
     expect(config.microvm.vcpus).toBe(4);
     expect(config.microvm.rootfsPath).toBe("/var/lib/magpie/microvm-rootfs");
