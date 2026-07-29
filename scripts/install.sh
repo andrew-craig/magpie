@@ -13,6 +13,20 @@
 # none`, so there is no bridge/iptables apparatus to provision at boot
 # (magpie-firewall.service and scripts/setup-network.sh are deleted).
 #
+# As of M8-D3 (task_67aa) the reviewer runs under ROOTLESS podman — no root
+# daemon, no `docker` group. This installer therefore provisions the rootless
+# substrate for the `magpie` user instead of a docker-group grant:
+#   * subuid/subgid ranges (so newuidmap/newgidmap can map the container uids),
+#   * `loginctl enable-linger magpie` (a persistent per-user systemd session,
+#     which is what actually ENFORCES the per-review `--memory` cap — see
+#     systemd/magpie.service's header and cgroup-preflight.ts),
+#   * `kvm`-group membership (so the optional micro-VM tier can open /dev/kvm),
+#   * the numeric magpie uid rewritten into magpie.service's XDG_RUNTIME_DIR /
+#     DBUS_SESSION_BUS_ADDRESS.
+# It also installs the `magpie-tier-probe` binary and runs the M8-D1 KVM
+# PREFLIGHT, failing loud (and requiring MAGPIE_ACK_TIER acknowledgement) when
+# the host can't reach the isolation tier the operator asked for.
+#
 # It does NOT install dependencies or build the code, and does NOT start the
 # services — that runs as the operator (not root), and enabling is a
 # deliberate final step once secrets are filled in. Both are printed as clear
@@ -31,6 +45,17 @@
 #   sudo ./scripts/install.sh            # install units + scaffolding
 #   sudo MAGPIE_PREFIX=/opt/magpie ./scripts/install.sh
 #   sudo ./scripts/install.sh --enable   # also `systemctl enable` the units
+#
+# Tier preflight env vars (M8-D3):
+#   MAGPIE_INSTALL_TIER=crun|microvm   the isolation tier you intend to run
+#                                      (default: crun — today's hardened floor).
+#   MAGPIE_ACK_TIER=crun               explicit acknowledgement that a
+#                                      weaker-than-requested tier is acceptable
+#                                      on this host (mirrors the orchestrator's
+#                                      runtime MAGPIE_ACK_TIER — tier-ladder.ts).
+#   MAGPIE_KVM_SETFACL=1               also grant /dev/kvm via an ACL scoped to
+#                                      the magpie user (crun #1894 fallback) in
+#                                      addition to the kvm-group grant.
 #
 # MAGPIE_PREFIX defaults to the repo root this script lives in (its scripts/..).
 # systemd runs the services from that path on every boot, so the checkout must
@@ -58,7 +83,7 @@ ENABLE_UNITS=0
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE_UNITS=1 ;;
-    -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,63p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -158,17 +183,75 @@ ensure_system_user() {
 ensure_system_user magpie
 ensure_system_user magpie-gateway
 
-# The orchestrator needs docker socket access to run review containers; the
-# gateway deliberately does NOT (it must never be able to launch a container).
-if getent group docker >/dev/null 2>&1; then
-  if id -nG magpie | tr ' ' '\n' | grep -qx docker; then
-    log "user 'magpie' already in 'docker' group"
+# ---------------------------------------------------------------------------
+# 1a. Rootless-podman substrate for the `magpie` user (M8-D3).
+# ---------------------------------------------------------------------------
+#
+# Replaces the pre-M8 docker-group grant entirely: rootless podman needs NO
+# privileged group, only (a) subuid/subgid ranges to map the container uids and
+# (b) a lingering user session. The gateway user gets NONE of this — it must
+# never be able to launch a container.
+
+# (a) subuid/subgid ranges. newuidmap/newgidmap refuse to map a range the user
+# has no /etc/subuid + /etc/subgid entry for, so a range >1 is mandatory for
+# rootless podman. Idempotent: only assign when magpie has no entry yet, and
+# pick a base that does not overlap any existing allocation.
+SUBID_COUNT=65536
+ensure_subid_range() {
+  local file="$1" user="magpie"
+  if grep -q "^${user}:" "$file" 2>/dev/null; then
+    log "$file already has a range for '$user' ($(grep "^${user}:" "$file" | head -1))"
+    return
+  fi
+  # Highest end-of-range already allocated in this file (0 if empty/missing), so
+  # the new range starts strictly above every existing one — no overlap.
+  local max_end base
+  max_end="$(awk -F: 'NF>=3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {e=$2+$3; if (e>m) m=e} END {print m+0}' "$file" 2>/dev/null)"
+  base=$(( max_end > 100000 ? max_end : 100000 ))
+  printf '%s:%s:%s\n' "$user" "$base" "$SUBID_COUNT" >> "$file"
+  log "granted '$user' the range ${base}:${SUBID_COUNT} in $file"
+}
+ensure_subid_range /etc/subuid
+ensure_subid_range /etc/subgid
+
+# (b) Persistent user session (linger). This starts user@<uid>.service, whose
+# delegated memory/cpu/pids cgroup controllers are what actually ENFORCE each
+# review container's `--memory`/`--cpus`/`--pids-limit` (see
+# systemd/magpie.service's header + cgroup-preflight.ts). Without it the caps
+# silently no-op. Idempotent.
+MAGPIE_UID="$(id -u magpie)"
+if [[ "$(loginctl show-user magpie -p Linger --value 2>/dev/null || echo no)" == "yes" ]]; then
+  log "linger already enabled for 'magpie' (user@${MAGPIE_UID}.service persists)"
+else
+  log "enabling linger for 'magpie' (persistent user session -> memory-cap enforcement)"
+  loginctl enable-linger magpie
+fi
+
+# (c) /dev/kvm access for the OPTIONAL micro-VM tier. Preferred: kvm-group
+# membership (systemd includes the User='s db groups automatically, so no
+# SupplementaryGroups= line is needed in the unit). The crun floor needs no
+# /dev/kvm, so a host with no kvm group is fine — this is best-effort.
+if getent group kvm >/dev/null 2>&1; then
+  if id -nG magpie | tr ' ' '\n' | grep -qx kvm; then
+    log "user 'magpie' already in 'kvm' group (micro-VM tier can open /dev/kvm)"
   else
-    log "adding 'magpie' to the 'docker' group (needed to run review containers)"
-    usermod -aG docker magpie
+    log "adding 'magpie' to the 'kvm' group (micro-VM tier: opens /dev/kvm)"
+    usermod -aG kvm magpie
+  fi
+  # crun #1894 fallback: some hosts need an ACL on /dev/kvm beyond group
+  # membership. Opt-in only (MAGPIE_KVM_SETFACL=1) and scoped to the magpie
+  # user — NEVER world-0666 (that would be a real permission regression).
+  if [[ "${MAGPIE_KVM_SETFACL:-0}" == "1" ]]; then
+    if command -v setfacl >/dev/null 2>&1 && [[ -e /dev/kvm ]]; then
+      setfacl -m u:magpie:rw /dev/kvm
+      log "applied ACL u:magpie:rw on /dev/kvm (MAGPIE_KVM_SETFACL=1; crun #1894 fallback)"
+      warn "the /dev/kvm ACL is NOT persistent across reboot — re-apply it via a udev rule or systemd-tmpfiles if you rely on it."
+    else
+      warn "MAGPIE_KVM_SETFACL=1 requested but 'setfacl' (package 'acl') is missing or /dev/kvm is absent — skipping the ACL fallback."
+    fi
   fi
 else
-  warn "no 'docker' group on this host — install docker and run 'usermod -aG docker magpie' before starting magpie.service"
+  log "no 'kvm' group on this host — the micro-VM tier is unavailable here; the crun floor (default) needs no /dev/kvm."
 fi
 
 # ---------------------------------------------------------------------------
@@ -250,6 +333,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4a. Install the KVM tier-probe binary + run the install-time preflight (M8-D3).
+# ---------------------------------------------------------------------------
+#
+# `magpie-tier-probe` is the SAME binary the orchestrator shells out to at
+# startup (packages/orchestrator/src/tier-ladder.ts) — a standalone,
+# static-musl, per-arch native helper that opens /dev/kvm and issues a real
+# KVM_CREATE_VM (no Node in this path). A release tarball ships it at
+# $PREFIX/bin/magpie-tier-probe (see scripts/pack-host.sh); we install it onto
+# PATH at /usr/local/bin so both this installer and the orchestrator find it via
+# config.toml's default container.tier_probe_bin = "magpie-tier-probe".
+TIER_PROBE_SRC="$REPO_ROOT/bin/magpie-tier-probe"
+TIER_PROBE_DST="/usr/local/bin/magpie-tier-probe"
+if [[ -f "$TIER_PROBE_SRC" ]]; then
+  install -o root -g root -m 0755 "$TIER_PROBE_SRC" "$TIER_PROBE_DST"
+  log "installed KVM tier-probe: $TIER_PROBE_DST"
+elif command -v magpie-tier-probe >/dev/null 2>&1; then
+  TIER_PROBE_DST="$(command -v magpie-tier-probe)"
+  log "using magpie-tier-probe already on PATH: $TIER_PROBE_DST"
+else
+  TIER_PROBE_DST=""
+  warn "magpie-tier-probe not found at $TIER_PROBE_SRC or on PATH — this is expected only for a raw git checkout (build it: cargo build --release -p magpie-tier-probe in rust/, then copy target/release/magpie-tier-probe to $TIER_PROBE_DST). The isolation-tier preflight is SKIPPED; the orchestrator will still run its own KVM probe at startup."
+fi
+
+# The tier preflight: mirror tier-ladder.ts's degrade+acknowledge semantics.
+# The operator declares the tier they intend to run via MAGPIE_INSTALL_TIER
+# (default: crun, today's hardened floor). We probe /dev/kvm; if they asked for
+# "microvm" but KVM is unreachable, FAIL LOUD unless they have explicitly
+# acknowledged the weaker tier with MAGPIE_ACK_TIER (exactly the orchestrator's
+# runtime env var, so the acknowledgement is the same live, per-host decision).
+REQUESTED_TIER="${MAGPIE_INSTALL_TIER:-crun}"
+case "$REQUESTED_TIER" in
+  crun|microvm) : ;;
+  *) die "MAGPIE_INSTALL_TIER='$REQUESTED_TIER' is not a recognized tier — use 'crun' or 'microvm'." ;;
+esac
+if [[ -n "$TIER_PROBE_DST" ]]; then
+  # The probe exits 0 for kvm:true, 1 for kvm:false (an ORDINARY negative
+  # answer, not an error) and prints one line of JSON either way — so capture
+  # output without letting `set -e` abort on the expected exit 1.
+  KVM_JSON="$("$TIER_PROBE_DST" 2>/dev/null || true)"
+  if printf '%s' "$KVM_JSON" | grep -q '"kvm":true'; then
+    KVM_AVAILABLE=1
+    log "KVM preflight: /dev/kvm usable (KVM_CREATE_VM succeeded) — the micro-VM tier is reachable on this host."
+  else
+    KVM_AVAILABLE=0
+    KVM_REASON="$(printf '%s' "$KVM_JSON" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+    log "KVM preflight: /dev/kvm NOT usable (${KVM_REASON:-no KVM}) — only the crun floor is reachable on this host right now."
+  fi
+
+  if [[ "$REQUESTED_TIER" == "microvm" && "$KVM_AVAILABLE" -ne 1 ]]; then
+    if [[ "${MAGPIE_ACK_TIER:-}" == "crun" ]]; then
+      warn "MAGPIE_INSTALL_TIER=microvm but KVM is unavailable; proceeding on the crun floor because MAGPIE_ACK_TIER=crun acknowledges the weaker tier. Set [container] tier = \"crun\" in $ETC_MAGPIE/config.toml to match, or the orchestrator will fail closed at startup."
+    else
+      die "isolation-tier PREFLIGHT FAILED: you requested MAGPIE_INSTALL_TIER=microvm, but /dev/kvm is not usable on this host (${KVM_REASON:-no hardware virtualization / not in the kvm group}). Magpie will not silently install a weaker isolation posture than you asked for. Fix the host (enable nested virt / add 'magpie' to the kvm group and re-login) and re-run, OR explicitly accept the crun floor by re-running with MAGPIE_ACK_TIER=crun. (This mirrors the orchestrator's own runtime MAGPIE_ACK_TIER gate — see tier-ladder.ts.)"
+    fi
+  fi
+
+  if [[ "$REQUESTED_TIER" == "microvm" && "$KVM_AVAILABLE" -eq 1 ]]; then
+    log "NOTE: the micro-VM tier ALSO needs the host-built magpie-microvm-launcher on PATH and [microvm] rootfs_path set in config.toml — see INSTALL.md's micro-VM opt-in section. The orchestrator re-probes all three at startup and fails closed if any is missing."
+  fi
+else
+  log "isolation-tier preflight skipped (no probe binary); requested tier: $REQUESTED_TIER."
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Install the systemd units (rewriting the prefix to $PREFIX).
 # ---------------------------------------------------------------------------
 
@@ -262,8 +409,15 @@ install_unit() {
   # globally rather than anchored to a specific `ExecStart=<node> ` shape so the
   # rewrite is robust to unit reformatting; the template node path only ever
   # appears in ExecStart, so a global replace has no other effect.
+  #
+  # For magpie.service ALSO rewrite the MAGPIE_RUNTIME_UID placeholder (in
+  # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS) to the numeric magpie uid.
+  # systemd's %U specifier resolves to the MANAGER uid (not User=) on systemd
+  # 252, so the uid must be baked in at install time. The gateway unit has no
+  # such placeholder, so this substitution is a no-op there.
   sed -e "s|$UNIT_TEMPLATE_PREFIX|$PREFIX|g" \
       -e "s|$UNIT_TEMPLATE_NODE|$NODE_BIN|g" \
+      -e "s|MAGPIE_RUNTIME_UID|$MAGPIE_UID|g" \
       "$src" > "$dst"
   chmod 0644 "$dst"
   log "installed $dst"
@@ -334,11 +488,21 @@ fi
 
 cat <<NOTES
 
-  5. Cloudflare Tunnel ingress (from Milestone 1) is a separate unit:
+  5. Pull the reviewer image AS THE magpie USER (rootless podman has per-user
+     storage, so a root/other-user pull would not be visible to the service):
+       sudo -u magpie XDG_RUNTIME_DIR=/run/user/$MAGPIE_UID \\
+         HOME=$STATE_DIR podman pull \\
+         \$(grep -E '^image *=' $ETC_MAGPIE/config.toml | cut -d'"' -f2)
+
+  6. Cloudflare Tunnel ingress (from Milestone 1) is a separate unit:
      systemd/cloudflared.service + scripts/setup-cloudflared.sh. Install/enable
      it per docs/cloudflared.md if you haven't already.
 
-  6. Enable + start (or reboot to prove boot ordering):
+  7. (Micro-VM tier only) build + install the host launcher and set the rootfs —
+     see INSTALL.md "Opt into the micro-VM tier". The crun floor (default) needs
+     no extra steps.
+
+  8. Enable + start (or reboot to prove boot ordering):
        sudo systemctl enable --now magpie-gateway.service magpie.service
      Boot order is enforced by the units: gateway -> orchestrator.
      Check: systemctl status magpie-gateway magpie
