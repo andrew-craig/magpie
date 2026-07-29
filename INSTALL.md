@@ -14,11 +14,14 @@ of this bundle — it's a published container image; see
 
 Grab the tarball and its checksum from the
 [GitHub Releases page](https://github.com/andrew-craig/magpie/releases) (tag
-`v<version>`, e.g. `v0.3.0`):
+`v<version>`, e.g. `v0.4.0`). The release ships **one tarball per
+architecture** — each bundles the matching native `magpie-tier-probe` KVM
+preflight binary — so choose `<arch>` = `amd64` or `arm64` to match your host
+(`uname -m`: `x86_64` → amd64, `aarch64` → arm64):
 
 ```
-curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>.tar.gz
-curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>.tar.gz.sha256
+curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>-<arch>.tar.gz
+curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/magpie-<version>-<arch>.tar.gz.sha256
 ```
 
 ## 2. Verify
@@ -26,25 +29,24 @@ curl -LO https://github.com/andrew-craig/magpie/releases/download/v<version>/mag
 Checksum (required):
 
 ```
-sha256sum -c magpie-<version>.tar.gz.sha256
+sha256sum -c magpie-<version>-<arch>.tar.gz.sha256
 ```
 
 SLSA build provenance (optional, recommended — proves the tarball was built
 by this repo's release workflow, not hand-assembled):
 
 ```
-gh attestation verify magpie-<version>.tar.gz --repo andrew-craig/magpie
+gh attestation verify magpie-<version>-<arch>.tar.gz --repo andrew-craig/magpie
 ```
 
 ## 3. Unpack
 
-Unpack to `/opt/magpie` — the documented prefix, and required unless you
-relax the systemd units' `ProtectHome=true` (see `scripts/install.sh`, which
-refuses a `/home/*` prefix by default):
+Unpack to `/opt/magpie` — the documented prefix (`scripts/install.sh` refuses a
+`/home/*` prefix by default as a convention; deploy outside `/home`):
 
 ```
 sudo mkdir -p /opt/magpie
-sudo tar xzf magpie-<version>.tar.gz --strip-components=1 -C /opt/magpie
+sudo tar xzf magpie-<version>-<arch>.tar.gz --strip-components=1 -C /opt/magpie
 cd /opt/magpie
 ```
 
@@ -57,11 +59,31 @@ sudo ./scripts/install.sh
 ```
 
 This creates the `magpie` / `magpie-gateway` system users, `/etc/magpie`,
-`/etc/magpie-gateway`, `/var/lib/magpie`, seeds (empty) secret env-file
-templates and `config.toml`, and installs the two systemd units — rewritten
-to your prefix and resolved `node` path. It does **not** build anything and
-does **not** start the services. Safe to re-run (idempotent; never
-overwrites an existing secret or config file).
+`/etc/magpie-gateway`, `/var/lib/magpie`, provisions the **rootless-podman
+substrate** for the `magpie` user (subuid/subgid ranges in `/etc/subuid`,
+`/etc/subgid` + `loginctl enable-linger magpie` — the latter is what actually
+enforces each review's `--memory` cap), installs the bundled
+`magpie-tier-probe` to `/usr/local/bin` and runs the **KVM tier preflight**,
+seeds (empty) secret env-file templates and `config.toml`, and installs the two
+systemd units — rewritten to your prefix, resolved `node` path, and the numeric
+`magpie` uid. It does **not** build anything and does **not** start the
+services. Safe to re-run (idempotent; never overwrites an existing secret or
+config file).
+
+**Rootless — no root daemon anywhere.** There is no Docker daemon and no
+`docker` group: the reviewer runs under rootless Podman as the unprivileged
+`magpie` user. Install `podman` first (`sudo apt install podman` or your
+distro's package) — `install.sh` does the rest of the rootless wiring.
+
+**Tier preflight (`MAGPIE_INSTALL_TIER` / `MAGPIE_ACK_TIER`).** By default the
+installer targets the hardened **crun floor** (`MAGPIE_INSTALL_TIER=crun`) and
+just reports whether the stronger micro-VM tier is *also* reachable. If you
+intend to run the micro-VM tier, run `sudo MAGPIE_INSTALL_TIER=microvm
+./scripts/install.sh`: the preflight opens `/dev/kvm` and issues a real
+`KVM_CREATE_VM`, and **fails loud** if KVM is unreachable rather than silently
+installing a weaker posture. To proceed on the floor anyway, acknowledge it
+explicitly with `MAGPIE_ACK_TIER=crun` (the same env var the orchestrator honors
+at runtime).
 
 ## 5. Install production dependencies
 
@@ -172,6 +194,52 @@ request against your repo learn, before submitting anything malicious,
 whether your deployment runs the weaker crun floor rather than the micro-VM
 tier — free reconnaissance for an attacker. Isolation posture stays strictly
 operator-facing information (`/healthz` + logs), never public.
+
+## Opt into the micro-VM tier (optional, strongest isolation)
+
+The default install runs the hardened **crun floor** — today's rootless-Podman
+posture, and no operator is worse off than before. The strongest tier runs each
+review inside a **rootless KVM micro-VM** (libkrun), which the installer's
+preflight will tell you is reachable when `/dev/kvm` is usable. To actually
+switch to it there are three host-side steps the release tarball intentionally
+does **not** automate (the launcher links host-specific `libkrun.so`, so it is
+built on the host, not shipped prebuilt):
+
+1. **Host virtualization + `/dev/kvm`.** You need hardware virtualization
+   (bare metal, or a nested-virt-enabled VM) and the `magpie` user in the `kvm`
+   group — `install.sh` adds it (re-run after installing KVM if needed). If
+   `krun` still can't open `/dev/kvm` after group membership (crun #1894),
+   re-run the installer with `MAGPIE_KVM_SETFACL=1` for a `magpie`-scoped ACL
+   (never world-`0666`).
+
+2. **Install libkrun and build the launcher.** Install `libkrun` +
+   `libkrunfw` (your distro's packages, or from source per the libkrun README),
+   then build the launcher from source and put it on `PATH`:
+
+   ```
+   cd /opt/magpie/rust        # or your repo checkout
+   cargo build --release -p magpie-microvm-launcher
+   sudo install -m 0755 target/release/magpie-krun-launch /usr/local/bin/
+   ```
+
+   (`magpie-krun-launch` is `config.toml`'s default `[microvm] launcher_bin`.)
+
+3. **Prepare a guest rootfs and point config at it.** Export the reviewer
+   image to an unpacked rootfs directory readable by `magpie`, then set, in
+   `/etc/magpie/config.toml`:
+
+   ```toml
+   [container]
+   tier = "microvm"
+
+   [microvm]
+   rootfs_path = "/var/lib/magpie/reviewer-rootfs"   # absolute; required for microvm
+   ```
+
+Restart the services. The orchestrator re-probes KVM + the launcher + the rootfs
+at startup and **fails closed** (unless `MAGPIE_ACK_TIER` acknowledges a weaker
+tier) if any is missing — it never silently downgrades. Confirm the active tier
+on `/healthz` (see below). No root daemon is involved at any tier.
 
 ## Upgrading
 
