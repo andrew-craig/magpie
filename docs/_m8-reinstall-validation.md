@@ -10,3 +10,13 @@ function addNumbers(a, b) {
 }
 module.exports = { addNumbers };
 ```
+
+## micro-VM tier pass
+
+Second commit to trigger a re-review under the rootless libkrun micro-VM tier.
+
+```js
+function multiply(a, b) {
+  return a + b;   // note: adds despite the name
+}
+```
