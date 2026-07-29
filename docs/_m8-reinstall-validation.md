@@ -20,3 +20,5 @@ function multiply(a, b) {
   return a + b;   // note: adds despite the name
 }
 ```
+
+<!-- microvm retest with M8 image 233625 -->
