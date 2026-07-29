@@ -11,8 +11,8 @@ conventions.
 | Requirement | Detail |
 |---|---|
 | OS | Any Linux host with **systemd** |
-| Container runtime | **Docker** (runs the one reviewer container per review) |
-| Architecture | **amd64 and arm64** — the reviewer image is published multi-arch; the host services are pure JS and arch-independent |
+| Container runtime | **Rootless Podman** (default; any docker-compatible CLI works) — runs the reviewer at the hardened **crun floor** tier by default, with an opt-in **micro-VM (KVM)** tier for stronger isolation; see PLAN.md's isolation-tier ladder |
+| Architecture | **amd64 and arm64** — the reviewer image is published multi-arch; the host services are pure JS and arch-independent (the micro-VM tier's native `magpie-tier-probe` preflight binary is per-arch, bundled in the release tarball) |
 | Host | A **cloud VM or a Raspberry Pi** alike — this project runs on a Pi in production |
 | Ingress | Pluggable — reverse proxy, Cloudflare Tunnel, or another outbound tunnel; see [docs/ingress.md](docs/ingress.md) |
 
@@ -22,9 +22,12 @@ New to Magpie? Start with [QUICKSTART.md](QUICKSTART.md) for the end-to-end inst
 ## Prerequisites
 
 - **Node.js 22+** and npm (workspaces are used, so a recent npm is required)
-- **Docker** — the review agent runs in a container; the user running the orchestrator
-  needs permission to use the Docker daemon (e.g. membership in the `docker` group) since
-  later milestones assume rootless/no-`sudo` `docker run`
+- **Podman** — the review agent runs in a container/micro-VM launched by rootless Podman
+  (M8-B2/D3): no root daemon, no `docker`/root group membership needed, just the `magpie`
+  user's own subuid/subgid ranges and a lingering session (see `INSTALL.md`). Any
+  docker-compatible CLI can be substituted via `config.toml`'s `container.docker_bin`. The
+  isolation tier actually launching reviews (hardened crun floor by default, or an opt-in
+  micro-VM) is resolved at startup — see PLAN.md's isolation-tier ladder.
 - **git**
 
 ## Setup
@@ -75,8 +78,10 @@ Both scripts boot the full pipeline (`packages/orchestrator/src/index.ts`): a we
 filter (`filter.ts`) into an in-process job queue (`queue.ts`), which runs each accepted PR
 through the review pipeline (`pipeline.ts`) — mint a GitHub App installation token, clone the
 PR head credential-free (`workspace.ts`), fetch the diff (`diff.ts`), mint a per-job gateway
-virtual key (`gateway.ts`), run the Pi reviewer in a hardened `--network none` `docker`
-container (`reviewer.ts`), parse its structured `report_findings` output (`findings.ts`,
+virtual key (`gateway.ts`), run the Pi reviewer (`reviewer.ts`) at the isolation tier resolved
+for this host — the hardened, `--network none`, rootless-Podman crun floor by default, or an
+opt-in micro-VM tier where configured (see PLAN.md's isolation-tier ladder) — parse its
+structured `report_findings` output (`findings.ts`,
 `anchor.ts`), and publish exactly one `COMMENT` review with diff-anchored inline comments back
 to the PR (`publisher.ts`) — incremental and deduped on re-push (`rereview.ts`). The process
 shuts down gracefully on `SIGINT`/`SIGTERM`. Running from source this way still requires the
@@ -98,8 +103,10 @@ install use the release tarball instead (see [QUICKSTART.md](QUICKSTART.md) /
 4. Open a non-draft pull request on the allowlisted repo (or push a commit to an existing
    one).
 5. Magpie mints an installation token, clones the PR head, mints a per-job gateway virtual
-   key, runs the reviewer in a `--network none` container, and posts one `## 🐦 Magpie review`
-   (`COMMENT`-type) review — with diff-anchored inline comments — on the PR.
+   key, runs the reviewer with no network egress path at whichever isolation tier this host
+   resolved (the hardened crun floor's `--network none` container by default), and posts one
+   `## 🐦 Magpie review` (`COMMENT`-type) review — with diff-anchored inline comments — on the
+   PR.
 
 ## Webhook ingress (production)
 

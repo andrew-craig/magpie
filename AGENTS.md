@@ -13,39 +13,57 @@ self-hosting architecture — this file only tracks what's actually implemented.
 are structural, not prompt-based: the agent holds no secret worth stealing (no GitHub token,
 no long-lived LLM key — only a short-lived, budget-capped per-job virtual key), the host
 orchestrator does all privileged work (mints tokens, clones, publishes), and the reviewer
-container runs `--network none` with its only channel out being a per-job unix socket to a
+sandbox has no network egress path in *every* isolation tier — at the shipped default (hardened
+crun) tier this is `--network none` with the only channel out a per-job unix socket to a
 host-side gateway that holds the real provider key. All three legs are now built (M1 delivered
 the orchestrator/no-secrets split; M3 containerized the reviewer; M4 added the gateway; M7's
-"Design D" made the egress isolation provable and config-independent).
+"Design D" made the egress isolation provable and config-independent). M8 layers a ranked,
+auditable isolation-tier ladder on top of that floor — **micro-VM (KVM, rootless libkrun) >
+gVisor (deferred, `task_624d`) > hardened crun (the shipped default/floor)** — resolved at
+startup by probing the host, never silently degraded (a downgrade requires an explicit
+`MAGPIE_ACK_TIER` operator acknowledgement), and visible only to the operator (`GET /healthz`
++ structured logs — never the PR itself). M8 also moved the reviewer-launching substrate to
+**rootless Podman**; the honest TCB claim as of M8 is *"no root daemon and no root Magpie
+process; the only setuid-root surface is two shadow-utils binaries (newuidmap/newgidmap) at
+namespace setup."*
 
-**Stack:** TypeScript/Node, npm workspaces. `packages/orchestrator` — webhook server, queue,
-git ops, diff, docker reviewer runner, gateway client, publisher. `packages/review-extension`
-— the Pi `report_findings` tool. `packages/gateway` (`@magpie/gateway`) — the host-side
+**Stack:** TypeScript/Node, npm workspaces, plus small native Rust helpers under `rust/`
+(M8). `packages/orchestrator` — webhook server, queue, git ops, diff, container/micro-VM
+reviewer runner, gateway client, publisher. `packages/review-extension` — the Pi
+`report_findings` tool. `packages/gateway` (`@magpie/gateway`) — the host-side
 credential-injecting LLM proxy. `docker/reviewer` — the published `magpie-reviewer` image.
-All present and implemented (see below).
+`rust/magpie-tier-probe` — the `/dev/kvm` `KVM_CREATE_VM` preflight the isolation-tier ladder
+shells out to; `rust/magpie-microvm-launcher` — the rootless-libkrun launcher for the opt-in
+micro-VM tier. All present and implemented (see below).
 
-**Status:** Milestones 1–7 are implemented and merged; Magpie works end-to-end and is
+**Status:** Milestones 1–8 are implemented and merged; Magpie works end-to-end and is
 self-hostable. The pipeline is: webhook → HMAC verify → event/allowlist filter → queue →
-GitHub App auth → credential-free clone → GitHub-API diff → mint per-job gateway virtual key →
-`docker run` the `--network none` reviewer container (Pi over the diff, reaching the gateway
-only via a bind-mounted unix socket) → parse structured `report_findings` → post one `COMMENT`
-review with diff-anchored inline comments (incremental + deduped on re-push) → cleanup
-(workspace, virtual key, container). Remaining open work is the M6 nice-to-haves and M5-D cost
-logging — see `PLAN.md` and `chalk ready`.
+GitHub App auth → credential-free clone → GitHub-API diff → resolve the isolation tier this
+host can actually deliver (probe `/dev/kvm`/the micro-VM launcher/the crun runtime, pick the
+strongest available, fail loud on an unacknowledged downgrade) → mint per-job gateway virtual
+key → launch the reviewer at that tier — the hardened, rootless-Podman `--network none`
+container at the shipped **crun-floor default**, or an opt-in rootless libkrun **micro-VM**
+with a vsock-only gateway channel where configured (Pi over the diff either way) → parse
+structured `report_findings` → post one `COMMENT` review with diff-anchored inline comments
+(incremental + deduped on re-push) → cleanup (workspace, virtual key, reviewer sandbox). The
+resolved tier is never part of that published review — it surfaces only on `GET /healthz` and
+in operator logs. Remaining open work is the M6 nice-to-haves and M5-D cost logging — see
+`PLAN.md` and `chalk ready`.
 
-## Implemented so far (Milestones 1–7)
+## Implemented so far (Milestones 1–8)
 
 `packages/orchestrator/src/`:
 
 - `config.ts` — loads/validates `config.toml` plus `MAGPIE_*` env secrets (webhook secret, GitHub App private key, gateway master key). No real LLM key here as of M4 — the orchestrator only ever holds the gateway master key.
-- `server.ts` — `node:http` + `@octokit/webhooks`; verifies `X-Hub-Signature-256` before any payload parsing; also serves `/healthz`.
+- `server.ts` — `node:http` + `@octokit/webhooks`; verifies `X-Hub-Signature-256` before any payload parsing; also serves `/healthz`, whose JSON body includes the resolved isolation tier + probe evidence (M8-D2, `task_92d7`) — operator-only, by design never surfaced anywhere the PR review can carry it (see `publisher.ts`'s tier-silence guard test).
 - `filter.ts` — accepts only `opened`/`ready_for_review`/`reopened`/`synchronize`, drops drafts, gates on `config.repoAllowlist`.
 - `queue.ts` — in-process bounded-concurrency queue (`p-queue`), per-PR dedup, hard per-job wall-clock timeout backstop via `AbortController`.
 - `github.ts` — mints a fresh 1h GitHub App installation token per job (`@octokit/auth-app`); never cached across jobs.
 - `workspace.ts` — blobless clone of `refs/pull/{N}/head` from the base repo; the token reaches `git` only via an ephemeral env-backed credential helper (never argv/disk), and `origin` is rewritten tokenless before the checkout is used.
 - `diff.ts` — PR diff sourced from the GitHub API (`pulls.get` diff media type), size-capped by `config.limits.maxDiffLines` before the diff body is ever fetched.
-- `reviewer.ts` — runs Pi via `docker run` of the hardened, `--network none` `magpie-reviewer` container (`--cap-drop=ALL`, `--read-only`, non-root, mem/cpu/pids limits, `.git`-stripped read-only `/work`); read-only tool allowlist (`read,grep,find,ls`; no `bash`/`write`); injects only the per-job gateway virtual key; parses NDJSON output into a summary + usage. (M1/M2 ran Pi as a host subprocess; M3 containerized it, M7 removed its network.)
-- `docker.ts` / `container-mounts.ts` / `orphan-cleanup.ts` — docker CLI wrapper, bind-mount assembly (read-only `/work`, per-job gateway socket dir), and reaping of orphaned review containers.
+- `reviewer.ts` — launches the reviewer at the isolation tier `tier-ladder.ts` resolved for this host. At the **hardened crun floor (the shipped default)**: rootless Podman `run` of the `magpie-reviewer` container — `--network none`, `--cap-drop=ALL`, `--read-only`, non-root, mem/cpu/pids limits, `.git`-stripped read-only `/work` — with the exact flag set pinned byte-for-byte by the M8-B1 golden-argv test (`reviewer-crun-floor-argv.test.ts`, `task_89c4`) so it can't silently erode. At the **opt-in micro-VM tier**: a rootless libkrun micro-VM via `rust/magpie-microvm-launcher`, reaching the gateway over a per-job hybrid-vsock channel (`microvm-vsock.ts`) instead of a bind-mounted socket, with a fail-closed network-transport preflight (`findMicrovmNetworkTransportViolations`). Both tiers: read-only tool allowlist (`read,grep,find,ls`; no `bash`/`write`); injects only the per-job gateway virtual key; parses NDJSON output into a summary + usage. (M1/M2 ran Pi as a host subprocess; M3 containerized it, M7 removed its network; M8 added the tier ladder above the crun floor.)
+- `tier-ladder.ts` — the M8 isolation-tier ladder: probes `/dev/kvm` (via `rust/magpie-tier-probe`'s `KVM_CREATE_VM` ioctl), the micro-VM launcher binary, and the crun-floor runtime CLI; resolves the strongest tier this host can actually deliver — **micro-VM > gVisor (deferred, `task_624d`) > hardened crun (the floor)** — and fails loud (`TierSelectionError`) rather than silently degrading unless the operator sets `MAGPIE_ACK_TIER` to the exact resolved (weaker) tier.
+- `docker.ts` / `container-mounts.ts` / `orphan-cleanup.ts` — container-runtime CLI wrapper (rootless Podman by default as of M8-B2; any docker-compatible CLI), bind-mount assembly (read-only `/work`, per-job gateway socket dir), and reaping of orphaned review containers/launcher processes.
 - `gateway.ts` — mints a budget-capped, short-lived per-job virtual key on the gateway's management plane before each run and revokes it on cleanup (`packages/gateway`).
 - `findings.ts` / `anchor.ts` — parse/validate the reviewer's structured `report_findings` output and anchor each finding to a diff hunk; out-of-diff findings fold into the summary body rather than being dropped.
 - `rereview.ts` — incremental re-review on `synchronize` (review only `before...after`), hidden `<!-- magpie:reviewed:<sha> -->` marker to track last-reviewed commit statelessly, and `minimizeComment` of prior magpie summaries.
@@ -59,9 +77,9 @@ logging — see `PLAN.md` and `chalk ready`.
 
 `docker/reviewer/` — the `magpie-reviewer` image (published multi-arch + cosign-signed to GHCR, digest-pinned in `config.example.toml`), its entrypoint (fail-closed confinement assertions), and the in-container TCP→unix `forwarder.mjs`.
 
-Also implemented: `reviewer-prompt.md` (reviewer system prompt with untrusted-input handling); production systemd units (`systemd/magpie.service`, `systemd/magpie-gateway.service`, `systemd/cloudflared.service`) + `scripts/install.sh`; a versioned host-service release tarball (`scripts/pack-host.sh` + release CI); pluggable webhook ingress (`docs/ingress.md`: reverse proxy, Cloudflare Tunnel, other tunnels); and onboarding docs (`QUICKSTART.md`, `INSTALL.md`).
+Also implemented: `reviewer-prompt.md` (reviewer system prompt with untrusted-input handling); production systemd units (`systemd/magpie.service` — converted to the rootless-Podman + isolation-tier substrate in M8-D3, `task_67aa`, with its own header comment documenting exactly which seccomp-based hardening directives were removed to keep `newuidmap`/`newgidmap` working and what compensates; `systemd/magpie-gateway.service`, `systemd/cloudflared.service`) + `scripts/install.sh` (also provisions the rootless-Podman substrate and runs the KVM tier preflight as of M8-D3); a versioned host-service release tarball (`scripts/pack-host.sh` + release CI, now per-arch to bundle the native `magpie-tier-probe` binary); pluggable webhook ingress (`docs/ingress.md`: reverse proxy, Cloudflare Tunnel, other tunnels); and onboarding docs (`QUICKSTART.md`, `INSTALL.md` — both cover the isolation-tier ladder and the micro-VM opt-in).
 
-**Remaining open work:** M5-D cost logging (`task_8a10`); the M6 nice-to-haves — `@magpie review` on-demand command (`task_ad15`), per-repo `.magpie.toml` (`task_220f`), gVisor runtime (`task_624d`), multi-provider support (`task_9c9d`); and M6-E rootless docker path (`task_edbd`). Run `chalk ready` for the current queue.
+**Remaining open work:** M5-D cost logging (`task_8a10`); the M6 nice-to-haves — `@magpie review` on-demand command (`task_ad15`), per-repo `.magpie.toml` (`task_220f`), multi-provider support (`task_9c9d`); and gVisor (`task_624d`, now formally the M8 isolation ladder's deferred middle tier — see `PLAN.md`, still pending). M8's own rootless-micro-VM-sandbox epic (`epic_59b1`) retired the earlier M6-E rootless-docker-path direction as superseded. Run `chalk ready` for the current queue.
 
 ## Task Tracking
 
