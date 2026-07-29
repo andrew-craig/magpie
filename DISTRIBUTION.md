@@ -202,6 +202,16 @@ at startup and per job rather than running an unbounded reviewer; see `INSTALL.m
   a versioned release artifact (tarball or npm package with a committed lockfile and pinned deps),
   the existing systemd units, and an install script that no longer assumes a single hardcoded
   prefix or node path. Keep the graceful-drain `TimeoutStopSec` the units already have.
+  - **Per-arch host tarballs (M8-D3).** The host tarball was pure-JS and therefore
+    architecture-independent through M7. As of the isolation-tier work it also bundles the native
+    `magpie-tier-probe` binary (the `/dev/kvm` `KVM_CREATE_VM` preflight, `rust/magpie-tier-probe`)
+    at `bin/magpie-tier-probe`, which is per-arch (static-musl amd64 / arm64). `scripts/pack-host.sh`
+    therefore now emits **one tarball per arch** — `magpie-<version>-<arch>.tar.gz` — and
+    `.github/workflows/release-host.yml` builds the matrix natively (amd64 on `ubuntu-24.04`, arm64
+    on `ubuntu-24.04-arm`) and attaches both to a single Release. `install.sh` installs the bundled
+    probe to `/usr/local/bin`. The `magpie-microvm-launcher` binary is **not** bundled (it
+    dynamically links host-installed `libkrun.so`); micro-VM-tier operators build it from
+    `rust/magpie-microvm-launcher` themselves (see `INSTALL.md`).
 
 ### 3.2 Config portability
 
