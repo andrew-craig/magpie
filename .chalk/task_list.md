@@ -4,7 +4,6 @@
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
-- **task_0716** · P2 · in_progress · M8-D4: tier-qualified security docs + honest TCB wording  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
 - **task_624d** · P3 · open · gVisor (runsc) middle tier — deferred per CTO decision 4  (parent: epic_59b1)
