@@ -81,16 +81,19 @@ const rawConfigSchema = z
         // task_4ed4 (M3-C)'s `docker run` invocation uses this value directly
         // as the image to run. The default is PINNED BY DIGEST (the `@sha256:`
         // below is the multi-arch image-index digest published by the
-        // `reviewer-v0.2.0` tag) so a re-tagged upstream image can't silently
+        // `reviewer-v0.3.0` tag) so a re-tagged upstream image can't silently
         // swap the untrusted-content runtime under you — the tag portion is
         // human-readable provenance only; the digest is what docker resolves.
+        // `0.3.0` (M8-E1) is the first image with micro-VM-tier support baked in
+        // (the `vsock-client` binary + the `MAGPIE_IS_MICROVM` vsock-egress
+        // entrypoint path); `0.2.0` was M7-era (crun floor only).
         // `scripts/build-reviewer-image.sh` still builds a local
         // `magpie-reviewer:*` image for development (override this to use it).
         image: z
           .string()
           .min(1)
           .default(
-            "ghcr.io/andrew-craig/magpie/reviewer:0.2.0@sha256:e6a6e118ce46392dffaf172afa35af2ff6c8ff375d37dd403e9d6ac77c1f3aed",
+            "ghcr.io/andrew-craig/magpie/reviewer:0.3.0@sha256:ed1985aaebc6eecbe0d3b6bfcbed7539448cb92be5c7d726dd4089538db76ae3",
           ),
         memory: z.string().min(1).default("4g"),
         // Whether Magpie refuses to start (and refuses to launch review
