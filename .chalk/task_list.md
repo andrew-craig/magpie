@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_1709** · P1 · in_progress · M8-E1: publish an M8-ready reviewer image (current 0.2.0 pin lacks vsock support)  (parent: epic_59b1)
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **task_76b8** · P1 · open · M8-E2: micro-VM privilege-drop fails EPERM chown on rootless-virtiofs rootfs  (parent: epic_59b1)
 - **task_2541** · P2 · open · M8-E3: micro-VM tier needs its own memory-ceiling verification (cgroup check doesn't apply to VMM-enforced RAM)  (parent: epic_59b1)
