@@ -381,6 +381,31 @@ fi
 # passes read_only=true to krun_add_virtiofs3) -- the same "the PR checkout
 # is never guest-writable" invariant the crun tier gets from its `:ro` bind
 # mount.
+#
+# M8-E2 (task_76b8): this block ALSO mounts a guest-LOCAL tmpfs at /tmp,
+# mirroring the crun tier's own `--tmpfs /tmp` (see reviewer.ts's
+# buildReviewDockerArgs). Without this, `/tmp` here resolves to whatever the
+# guest's ROOT filesystem is -- served over rootless virtiofs the same way
+# `/work`/`/out` are attached as devices above -- and rootless virtiofs maps
+# guest-root's uid back to the unprivileged HOST user that launched the
+# micro-VM, so guest-root does not actually have chown authority over paths
+# living on it. That surfaced as the privilege-drop step below (`chown -R
+# 10001:10001 "$HOME/.pi"`) failing with EPERM on `/tmp/.pi` -- not a Magpie
+# logic bug, a known category of rootless-VMM limitation. Mounting a plain
+# guest-local tmpfs here makes `/tmp` a normal in-guest filesystem again,
+# where chown-by-guest-root works exactly like it does under the crun
+# tier's own `--tmpfs /tmp`.
+#
+# ORDERING: this MUST happen before anything writes under `/tmp` -- in
+# particular before `$HOME/.pi/agent/models.json` is written and before the
+# chown/privilege-drop below, both much further down this script -- so the
+# tmpfs is empty and freshly mounted the first time either happens. It does
+# NOT need to happen before /work or /out are mounted (no ordering
+# dependency between the three), so it's placed last in this block purely
+# for readability. Fail-closed like the two mounts above: if `/tmp` can't be
+# made a normal writable filesystem here, the privilege drop (and anything
+# else that writes under HOME=/tmp) would fail later anyway, so abort now
+# with a clear cause rather than a confusing chown error mid-script.
 # ---------------------------------------------------------------------------
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices" >&2
@@ -391,6 +416,12 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   fi
   if ! mount -t virtiofs out /out; then
     echo "magpie-reviewer: refusing to run: failed to mount the writable /out virtiofs device (tag 'out') -- the reviewer would have nowhere to write findings.json. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)" >&2
+  mkdir -p /tmp
+  if ! mount -t tmpfs tmpfs /tmp; then
+    echo "magpie-reviewer: refusing to run: failed to mount a guest-local tmpfs at /tmp -- HOME=/tmp below would remain on the virtiofs-backed root, where guest-root's remapped uid cannot chown the state Pi writes there before the privilege drop. Aborting before Pi starts." >&2
     exit 1
   fi
 fi
@@ -737,6 +768,13 @@ set -- \
 # it is a fixed, deployment-wide URL, never a per-job credential (the gateway
 # key reaches Pi only via the OPENROUTER_API_KEY env var, which survives the
 # setpriv exec since setpriv does not scrub the environment).
+#
+# M8-E2 (task_76b8): this chown only works at all under the micro-VM tier
+# because HOME=/tmp is, by this point, the guest-local tmpfs mounted earlier
+# in this script (see the virtiofs-mount block above) rather than the
+# virtiofs-backed guest root -- guest-root cannot chown paths living on
+# rootless virtiofs (its uid is remapped back to the unprivileged HOST user
+# by the rootless krun setup), which is exactly the EPERM this task fixes.
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi" >&2
   chown -R 10001:10001 "$HOME/.pi"
