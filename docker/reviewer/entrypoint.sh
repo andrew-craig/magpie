@@ -78,6 +78,32 @@ set -euo pipefail
 : "${MAGPIE_REQUIRE_MEMORY_LIMIT:=true}"
 
 # ---------------------------------------------------------------------------
+# M8-E3 (task_2541): early, cheap tier detection.
+#
+# MUST run before the memory-ceiling assertion just below, because that
+# check's correct MEANING differs by tier (see that section's comment for
+# the full story): the crun tier enforces RAM via a cgroup v2 `memory.max`
+# ceiling, which is readable from inside the container; the micro-VM tier
+# enforces RAM via libkrun's `--ram-mib` at the VMM level, so the guest never
+# has a `/sys/fs/cgroup/memory.max` to read AT ALL -- not a misconfiguration,
+# a structurally different (and equally valid) enforcement mechanism. Without
+# knowing the tier first, the memory check can't tell "cgroup absent because
+# this is a micro-VM guest" from "cgroup absent because a crun-tier host
+# misconfigured cgroups" (the real bug_df2d scenario it exists to catch).
+#
+# This is the SAME `/dev/vsock` probe the relay-selection block further down
+# this script uses (a plain char-device present iff the launcher attached a
+# vsock device, which only happens under the micro-VM tier -- see that
+# block's own doc comment for the full rationale). Factored out here, ahead
+# of everything that depends on it, and REUSED (not re-probed) down there --
+# a single source of truth for which tier this run is, set once, this early.
+if [ -c /dev/vsock ]; then
+  MAGPIE_IS_MICROVM=1
+else
+  MAGPIE_IS_MICROVM=0
+fi
+
+# ---------------------------------------------------------------------------
 # bug_df2d: fail-closed in-container memory-ceiling assertion. reviewer.ts
 # passes `--memory=<config.container.memory>` on every `docker/podman run` of
 # this image -- the hard cap bounding how much host RAM a single, possibly
@@ -112,18 +138,92 @@ set -euo pipefail
 # uses (it never passes --cgroupns=host). Under --cgroupns=host this would read
 # the host ROOT cgroup's memory.max ("max") and false-positive; don't add that
 # flag without revisiting this check.
-magpie_memory_max_raw=""
-if [ -r /sys/fs/cgroup/memory.max ]; then
-  magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
-fi
-
-if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
-  magpie_memory_unenforced_detail="could not verify an enforced memory ceiling: /sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} (expected a finite byte count). The --memory limit this container was launched with is either unenforced (the host silently discarded it) or unverifiable here (e.g. a legacy cgroup v1 host -- Magpie requires the cgroup v2 unified hierarchy)"
-  if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
-    echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
-  else
-    echo "magpie-reviewer: refusing to run: ${magpie_memory_unenforced_detail}. Set [container] require_memory_limit = false in the orchestrator's config.toml if you understand the risk and want to run anyway (see INSTALL.md/QUICKSTART.md for how to enable the memory controller on your host instead). Aborting before Pi starts." >&2
+#
+# M8-E3 (task_2541): this whole cgroup-based check is CRUN-TIER ONLY --
+# MAGPIE_IS_MICROVM was decided above, before this block, precisely so this
+# branch can be taken. The micro-VM tier's equivalent verification (a
+# positive check that libkrun's --ram-mib ceiling actually applied, since
+# there is no cgroup to read at all in that guest) lives in the `else`
+# branch below -- see its own comment for the full rationale and the chosen
+# tolerance.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  # ---------------------------------------------------------------------------
+  # M8-E3 (task_2541): micro-VM tier memory-ceiling verification.
+  #
+  # RAM here is enforced by libkrun's `--ram-mib` at the VMM level
+  # (rust/magpie-microvm-launcher's krun_set_vm_config) -- the guest kernel
+  # boots knowing only about that much memory in the first place, so there is
+  # no cgroup memory.max to read inside the guest at all (a structural fact
+  # about this tier, not a misconfiguration -- see task_2541's background:
+  # this is exactly what made the crun-tier check above false-fail here,
+  # forcing operators to globally set require_memory_limit=false and thereby
+  # ALSO weaken the crun tier's real protection, which is the bug this task
+  # fixes).
+  #
+  # So instead of skipping verification, this proves SOME ceiling was really
+  # applied: reviewer.ts injects the exact ram-mib value the launcher was
+  # told to boot this guest with as a non-secret inline env var,
+  # MAGPIE_MICROVM_RAM_MIB (see buildMicrovmLaunchArgs's `env` map / the
+  # runReview call site) -- this script cross-checks the guest's OWN view of
+  # its memory (/proc/meminfo's MemTotal) against that expected value.
+  #
+  # TOLERANCE: a guest's MemTotal is always somewhat LESS than the configured
+  # ram-mib (firmware/kernel-reserved regions -- a few MiB, never more). The
+  # failure mode this check defends against is the OPPOSITE direction:
+  # MemTotal being far LARGER than configured, which would mean the ram-mib
+  # ceiling silently didn't apply (e.g. a launcher regression that dropped
+  # --ram-mib) and the guest actually sees ~all host RAM. So a 5% headroom
+  # above the configured ram-mib (rounding/reporting slop only -- MemTotal is
+  # never expected to exceed ram-mib by more than that) is accepted; anything
+  # above that is treated as an unenforced ceiling and aborts. Fail closed if
+  # MAGPIE_MICROVM_RAM_MIB is unset/non-numeric/non-positive, or if
+  # /proc/meminfo's MemTotal can't be read/parsed -- exactly the same
+  # "unverifiable is not enforced" posture as the crun-tier check above.
+  case "${MAGPIE_MICROVM_RAM_MIB:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_RAM_MIB is unset or non-numeric (${MAGPIE_MICROVM_RAM_MIB:-unset}) -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  if [ "${MAGPIE_MICROVM_RAM_MIB}" -le 0 ]; then
+    echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_RAM_MIB (${MAGPIE_MICROVM_RAM_MIB}) is not a positive value -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
     exit 1
+  fi
+
+  magpie_mem_total_kib=""
+  if [ -r /proc/meminfo ]; then
+    magpie_mem_total_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+  fi
+  case "${magpie_mem_total_kib:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: /proc/meminfo's MemTotal is missing or unparsable (${magpie_mem_total_kib:-absent}) -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+
+  # Compare in KiB throughout (MemTotal's own unit) to avoid fractional-MiB
+  # arithmetic in POSIX integer shell math: ram_mib MiB * 1.05 headroom,
+  # expressed directly in KiB as ram_mib * 1024 * 105 / 100.
+  magpie_mem_ceiling_kib=$(( MAGPIE_MICROVM_RAM_MIB * 1024 * 105 / 100 ))
+  if [ "${magpie_mem_total_kib}" -gt "${magpie_mem_ceiling_kib}" ]; then
+    echo "magpie-reviewer: refusing to run: guest MemTotal (${magpie_mem_total_kib} KiB) exceeds what MAGPIE_MICROVM_RAM_MIB=${MAGPIE_MICROVM_RAM_MIB} should allow (expected at most ~${magpie_mem_ceiling_kib} KiB) -- the VMM-level memory ceiling does not appear to have been enforced. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM memory ceiling verified -- guest MemTotal ${magpie_mem_total_kib} KiB is within the expected bound for MAGPIE_MICROVM_RAM_MIB=${MAGPIE_MICROVM_RAM_MIB}" >&2
+else
+  magpie_memory_max_raw=""
+  if [ -r /sys/fs/cgroup/memory.max ]; then
+    magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+  fi
+
+  if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
+    magpie_memory_unenforced_detail="could not verify an enforced memory ceiling: /sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} (expected a finite byte count). The --memory limit this container was launched with is either unenforced (the host silently discarded it) or unverifiable here (e.g. a legacy cgroup v1 host -- Magpie requires the cgroup v2 unified hierarchy)"
+    if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
+      echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
+    else
+      echo "magpie-reviewer: refusing to run: ${magpie_memory_unenforced_detail}. Set [container] require_memory_limit = false in the orchestrator's config.toml if you understand the risk and want to run anyway (see INSTALL.md/QUICKSTART.md for how to enable the memory controller on your host instead). Aborting before Pi starts." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -233,12 +333,13 @@ esac
 # implicit fact about a binary it doesn't control the source of.
 readonly MAGPIE_EXPECTED_VSOCK_PORT=1234
 
-# MAGPIE_IS_MICROVM captures the same /dev/vsock tier signal used to pick a
-# relay above, in a variable, for reuse further down this script (the
-# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff -- need the
-# same tier decision and shouldn't re-derive it via a second `[ -c
-# /dev/vsock ]` probe scattered elsewhere).
-if [ -c /dev/vsock ]; then
+# MAGPIE_IS_MICROVM was already decided (M8-E3, task_2541) via a cheap `[ -c
+# /dev/vsock ]` probe near the top of this script, ahead of the memory-
+# ceiling check above (which needs the tier to pick its verification
+# strategy) -- REUSED here, not re-derived, and further reused below (the
+# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff) so there is
+# exactly one `[ -c /dev/vsock ]` probe in the whole script.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port ${MAGPIE_EXPECTED_VSOCK_PORT})" >&2
   # `export` (not a one-shot `VAR=value cmd` prefix) so MAGPIE_VSOCK_PORT is
   # BOTH inherited by the backgrounded vsock-client below AND still readable
@@ -249,12 +350,10 @@ if [ -c /dev/vsock ]; then
   export MAGPIE_VSOCK_PORT="${MAGPIE_EXPECTED_VSOCK_PORT}"
   /opt/magpie/vsock-client &
   MAGPIE_FORWARDER_PID=$!
-  MAGPIE_IS_MICROVM=1
 else
   echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
   node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
   MAGPIE_FORWARDER_PID=$!
-  MAGPIE_IS_MICROVM=0
 fi
 
 # ---------------------------------------------------------------------------

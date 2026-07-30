@@ -559,7 +559,7 @@ export interface BuildMicrovmLaunchArgsParams {
    * in production.
    */
   envFromHost: string[];
-  /** Non-secret guest env vars, passed inline (`--env KEY=VALUE`) — mirrors docker's inline `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT` (values here are deployment config, never a per-job credential). */
+  /** Non-secret guest env vars, passed inline (`--env KEY=VALUE`) — mirrors docker's inline `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT`/`MAGPIE_MICROVM_RAM_MIB` (values here are deployment config, never a per-job credential). */
   env: Record<string, string>;
   /** Fixed vsock port the guest dials (`microvmVsockChannel`'s `MICROVM_VSOCK_PORT`, `--vsock-port`). */
   vsockPort: number;
@@ -919,6 +919,15 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       env: {
         OPENAI_BASE_URL: config.gateway.containerBaseUrl,
         MAGPIE_REQUIRE_MEMORY_LIMIT: String(config.container.requireMemoryLimit),
+        // M8-E3 (task_2541): the configured guest RAM ceiling, non-secret,
+        // inline (same convention as the two entries above) — entrypoint.sh
+        // cross-checks this against the guest's own /proc/meminfo MemTotal
+        // as its positive proof that libkrun's --ram-mib ceiling (set from
+        // this SAME config.microvm.ramMib value just above) actually
+        // applied, since the micro-VM tier has no cgroup memory.max to read
+        // at all (see that script's memory-ceiling section for the full
+        // rationale).
+        MAGPIE_MICROVM_RAM_MIB: String(config.microvm.ramMib),
       },
       vsockPort: vsockChannel.port,
       vsockUdsPath: vsockChannel.udsPath,
