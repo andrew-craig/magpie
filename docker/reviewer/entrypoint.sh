@@ -104,6 +104,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# M8-E4 (task_4c37): give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
+#
+# The crun tier inherits PATH for free from the image's OCI config: the
+# node:22.23.1-slim base sets it, `docker/reviewer/Dockerfile` symlinks
+# `/opt/magpie/review-extension/node_modules/.bin/pi` onto `/usr/local/bin/pi`,
+# and `podman run` exports the resulting PATH into the container. A micro-VM
+# guest gets NONE of that: the launcher boots a BARE EXPORTED ROOTFS, which
+# carries no OCI config at all, and rust/magpie-microvm-launcher's `cli.rs`
+# builds the guest environment from an initially-EMPTY vec populated only by
+# explicit `--env` flags (the `PATH=` strings visible in that crate's cli.rs/
+# config.rs are TEST FIXTURES, not runtime defaults). So the guest has
+# historically booted with PATH genuinely unset.
+#
+# WHY THAT STAYED HIDDEN until the M8-E2/E3 fixes cleared the earlier
+# blockers, and WHY `export` (not a value default) is the operative fix --
+# this is subtle, and getting it wrong yields a no-op:
+#
+#   When PATH is absent from its environment, `bash` does NOT run without one.
+#   It assigns its own compiled-in default to the PATH SHELL VARIABLE at
+#   startup (empirically, on this image's bash:
+#   `/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.`). That is
+#   why every bare command this script runs (mount, chown, setpriv, timeout,
+#   seq, awk ...) resolved fine all along. But that variable is NOT MARKED FOR
+#   EXPORT, so it is still absent from the environment handed to child
+#   processes. `setpriv`, at the very bottom of this script, `execvp`s `pi`
+#   ITSELF -- and glibc's execvp with no PATH in the environment falls back to
+#   confstr(_CS_PATH) == "/bin:/usr/bin", which does NOT include
+#   /usr/local/bin, so `pi` was not found:
+#
+#     setpriv: failed to execute pi: No such file or directory
+#
+#   Consequently a `PATH="${PATH:-...}"` style default would be DEAD CODE
+#   here (bash already made PATH non-empty); it is the `export` that actually
+#   fixes anything. `docker/reviewer/entrypoint-tier-memory.test.sh`'s
+#   task_4c37 cases pin exactly this, running the script with PATH genuinely
+#   absent from the environment.
+#
+# Set UNCONDITIONALLY (within the micro-VM branch) to an explicit literal
+# rather than re-exporting whatever bash happened to invent: bash's built-in
+# default is an implementation detail that varies by build and is not
+# something a fail-closed security script should depend on for finding the
+# binary it is about to hand control to. /usr/local/bin is listed first --
+# that is where the Dockerfile symlinks `pi`. Placed right after tier
+# detection, ahead of everything that could need it, so any later addition to
+# this script inherits a sane PATH too. Guarded on MAGPIE_IS_MICROVM so the
+# crun tier's environment -- which already gets a correct, exported PATH from
+# the image's OCI config -- is untouched, byte for byte.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+
+# ---------------------------------------------------------------------------
 # bug_df2d: fail-closed in-container memory-ceiling assertion. reviewer.ts
 # passes `--memory=<config.container.memory>` on every `docker/podman run` of
 # this image -- the hard cap bounding how much host RAM a single, possibly

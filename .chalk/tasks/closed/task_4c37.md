@@ -2,14 +2,14 @@
 id: task_4c37
 title: M8-E4: micro-VM guest boots with no PATH env var — setpriv can't exec pi
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-31T01:23:36Z
-updated_at: 2026-07-31T01:23:36Z
+updated_at: 2026-07-31T04:35:36Z
 ---
 
 ## Background
@@ -138,3 +138,60 @@ Host was fully restored afterward (crun floor, 0.2.0 digest,
 `resolvedTier=crun`/`degraded=false`) — see the "Live validation (M8-E2/E3)"
 sections appended to `.chalk/tasks/closed/task_2541.md` and
 `.chalk/tasks/closed/task_76b8.md` for the full restore/cleanup record.
+
+## Plan
+
+- [x] Fix in `docker/reviewer/entrypoint.sh`'s micro-VM branch (keeps the
+      rootfs self-sufficient — a PATH entry in the orchestrator's env map
+      would leave a hand-launched/manually-exported rootfs still broken).
+- [x] Guard on `MAGPIE_IS_MICROVM` so the crun tier is untouched.
+- [x] Regression coverage in `entrypoint-tier-memory.test.sh`.
+- [x] Full suite + crun-floor golden-argv must stay green.
+
+## Review
+
+**Done.** One-line fix in `entrypoint.sh`, placed immediately after the M8-E3
+tier detection (so anything added later inherits a sane PATH too):
+
+```sh
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+```
+
+**Correction to this task's original diagnosis — the mechanism is subtler than
+"the guest has no PATH", and getting it wrong produces a no-op fix.** Writing
+the regression test surfaced it: when PATH is absent from its environment,
+bash does *not* run without one — it assigns its own COMPILED-IN default to
+the PATH **shell variable** at startup (observed on this image's bash:
+`/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.`, which
+already contains `/usr/local/bin`). That is why every bare command this script
+runs resolved fine all along. But that variable is **not marked for export**,
+so it is still absent from the environment handed to children. `setpriv`
+`execvp`s `pi` itself, and glibc's execvp with no PATH in the environment
+falls back to `confstr(_CS_PATH)` == `/bin:/usr/bin` — which excludes
+`/usr/local/bin`, where the Dockerfile symlinks `pi`.
+
+So the operative fix is the **`export`**, not a value default: a
+`PATH="${PATH:-...}"` style default would be dead code here, since bash has
+already made PATH non-empty. The first draft of this fix used exactly that
+form and the new test caught it as a no-op.
+
+Set unconditionally to an explicit literal rather than re-exporting bash's
+invented value: that default is an implementation detail varying by bash
+build, and a fail-closed security script should not depend on it to locate
+the binary it hands control to.
+
+**Tests:** `entrypoint-tier-memory.test.sh` 11/11 (2 new, run with PATH
+genuinely absent from the environment via `env -i` + absolute-path bash — the
+one condition the existing `run_case` cannot reproduce, since it injects PATH
+itself). The pair is a positive (micro-VM manufactures the PATH) plus a
+`refute` (crun does NOT get it, proving tier-scoping). The crun assertion
+deliberately checks ABSENCE rather than pinning bash's compiled-in default,
+which would make the test a hostage to the base image's bash build.
+Orchestrator suite 409 passed / 4 skipped, 29 files — crun-floor golden-argv
+unchanged. `bash -n` + shellcheck clean (the one SC2016 hit is an intentional
+single-quoted literal appended to the generated excerpt).
+
+**NOT yet live-validated** — needs the micro-VM run that reaches `exec pi` and
+completes a review end-to-end. That run is the remaining acceptance step.

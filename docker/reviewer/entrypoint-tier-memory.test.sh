@@ -97,6 +97,10 @@ for marker in MAGPIE_TEST_FORCE_MICROVM MAGPIE_TEST_MEMINFO MAGPIE_TEST_CGROUP_M
 done
 
 {
+  # Surfaced so the task_4c37 PATH cases below can assert on the value the
+  # excerpt actually ended up with. Bracketed so an EMPTY PATH is
+  # distinguishable from an absent line.
+  echo 'echo "MAGPIE_TEST_PATH=[${PATH:-}]"'
   echo 'echo "MAGPIE_TEST_REACHED_END"'
   echo 'exit 0'
 } >> "${EXCERPT}"
@@ -122,6 +126,65 @@ run_case() {
     pass_count=$((pass_count + 1))
   else
     echo "FAIL: ${name} -- expected exit ${expected_exit}, got ${rc}. Output:"
+    printf '%s\n' "${out}" | awk '{ print "    " $0 }'
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+# run_case_no_path NAME EXPECTED_SUBSTRING ENV_ASSIGNMENTS
+#
+# Like run_case, but runs the excerpt with PATH genuinely ABSENT from the
+# environment -- `env -i` with no PATH= assignment, invoking bash by absolute
+# path. That is the exact condition a micro-VM guest boots in (task_4c37: a
+# bare exported rootfs carries no OCI config, and the launcher's env vec
+# starts empty), and it is the one thing run_case CANNOT reproduce, since it
+# deliberately injects PATH so the fixtures can find coreutils.
+#
+# NOTE: the excerpt still runs fine without PATH because `bash` resolves bare
+# command names via its own compiled-in fallback -- which is precisely the
+# phenomenon that kept this bug hidden until the M8-E2/E3 fixes cleared the
+# earlier blockers (that fallback is internal to bash and is NOT exported to
+# the processes it starts, e.g. setpriv's execvp of `pi`).
+#
+# Asserts on stdout rather than just the exit code.
+run_case_no_path() {
+  local name="$1" expected_substring="$2" env_assignments="$3"
+  local out rc
+  set +e
+  out="$(env -i /bin/bash -c "${env_assignments} /bin/bash \"\$1\"" -- "${EXCERPT}" 2>&1)"
+  rc=$?
+  set -e
+  if [ "${rc}" = "0" ] && printf '%s' "${out}" | grep -qF -- "${expected_substring}"; then
+    echo "PASS: ${name}"
+    pass_count=$((pass_count + 1))
+  else
+    echo "FAIL: ${name} -- expected exit 0 and output containing '${expected_substring}', got exit ${rc}. Output:"
+    printf '%s\n' "${out}" | awk '{ print "    " $0 }'
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+# run_case_no_path_refute NAME FORBIDDEN_SUBSTRING ENV_ASSIGNMENTS
+#
+# The negative counterpart of run_case_no_path. Deliberately asserts ABSENCE
+# rather than an exact expected PATH: with PATH absent from the environment,
+# bash assigns its own COMPILED-IN default to the shell variable (see
+# entrypoint.sh's task_4c37 comment), and that value varies by bash build --
+# so pinning it would make this test a hostage to the base image's bash.
+# The property that actually matters is that the crun tier did NOT get the
+# micro-VM branch's manufactured PATH.
+run_case_no_path_refute() {
+  local name="$1" forbidden_substring="$2" env_assignments="$3"
+  local out rc
+  set +e
+  out="$(env -i /bin/bash -c "${env_assignments} /bin/bash \"\$1\"" -- "${EXCERPT}" 2>&1)"
+  rc=$?
+  set -e
+  if [ "${rc}" = "0" ] && ! printf '%s' "${out}" | grep -qF -- "${forbidden_substring}"; then
+    echo "PASS: ${name}"
+    pass_count=$((pass_count + 1))
+  else
+    echo "FAIL: ${name} -- expected exit 0 and output NOT containing '${forbidden_substring}', got exit ${rc}. Output:"
     printf '%s\n' "${out}" | awk '{ print "    " $0 }'
     fail_count=$((fail_count + 1))
   fi
@@ -176,6 +239,25 @@ run_case "microvm tier, MAGPIE_MICROVM_RAM_MIB=0 -> fails closed" 1 \
 # passing), i.e. that the reordering fix actually took effect.
 run_case "microvm tier ignores an unenforced cgroup fixture entirely (proves the crun branch is skipped)" 0 \
   "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_UNENFORCED} MAGPIE_REQUIRE_MEMORY_LIMIT=true"
+
+# --- task_4c37 (M8-E4): PATH in a guest that boots without one -------------
+#
+# The regression pair for the `setpriv: failed to execute pi: No such file or
+# directory` blocker found during the 2026-07-31 live micro-VM run. The
+# micro-VM tier must MANUFACTURE a PATH containing /usr/local/bin (where the
+# Dockerfile symlinks `pi`); the crun tier must be left exactly as it was,
+# inheriting whatever the image's OCI config gave it -- including nothing.
+
+run_case_no_path "microvm tier, PATH absent -> manufactures one containing /usr/local/bin (task_4c37)" \
+  "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
+  "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND}"
+
+# The crun-tier guard: same PATH-absent environment, but WITHOUT the micro-VM
+# signal the script must NOT apply the micro-VM branch's PATH -- proving the
+# fix is genuinely tier-scoped and the crun path is untouched byte for byte.
+run_case_no_path_refute "crun tier, PATH absent -> does NOT get the micro-VM PATH (proves the fix is micro-VM-only)" \
+  "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
+  "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
 
 echo
 echo "${pass_count} passed, ${fail_count} failed"
