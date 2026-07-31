@@ -138,3 +138,116 @@ and the ordering argument above.
 - End-to-end: a micro-VM-tier review completes and posts a review, matching
   the crun tier's already-validated behavior (this task's stated
   acceptance criterion).
+
+## Live validation (M8-E2/E3)
+
+**Date:** 2026-07-31, Pi host (arm64, 16 KB pages), branch
+`m8-e2-e3-microvm-gaps` @ `c4ec071`. Reviewer image built locally FROM THE
+BRANCH (rootless podman, `magpie` user), exported to
+`/var/lib/magpie/reviewer-rootfs-e2e3`, `[microvm] rootfs_path` pointed at it,
+and a branch-built orchestrator `dist` temporarily deployed to `/opt/magpie`
+(both sides needed, since E3's `MAGPIE_MICROVM_RAM_MIB` is orchestrator-side).
+Ladder auto-resolved `microvm` (`container.tier` stayed `"crun"` — it is a
+FLOOR, not a ceiling), confirmed on `/healthz` before the run. Scratch PR #64,
+closed + branch deleted afterward.
+
+### The two open questions this task recorded — both ANSWERED, both PASS
+
+**1. Does `mount -t tmpfs tmpfs /tmp` succeed as guest-root on the
+rootless-virtiofs rootfs?** — **YES, observed directly.** This was the
+genuinely uncertain assumption (same class as the one that caused the original
+bug). The guest logged:
+
+```
+magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)
+```
+
+and did **not** take the fail-closed branch — execution continued past it, so
+the `mount` returned 0. Guest-root retains `CAP_SYS_ADMIN` for mounting a
+fresh tmpfs even though its uid is remapped for virtiofs *file ownership*
+purposes; the two are independent, which is exactly what the fix bet on.
+
+**2. Do the subsequent `chown -R 10001:10001 "$HOME/.pi"` and the `setpriv`
+drop succeed — is the original EPERM gone?** — **The EPERM is GONE.** The
+privilege-drop block ran and logged:
+
+```
+magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi
+```
+
+with **zero `chown: … Operation not permitted` lines** — compare the original
+failure recorded in this task's Problem section, which emitted three of them
+(`/tmp/.pi/agent/models.json`, `/tmp/.pi/agent`, `/tmp/.pi`). The script runs
+under `set -euo pipefail`, so a failing `chown -R` would have aborted the
+script before the `setpriv` line; it did not. The tmpfs fix works.
+
+`setpriv` itself then ran and performed the privilege drop; what failed was
+the *program it tried to exec afterward* (see below) — a different problem,
+not a permissions one.
+
+### Ordered entrypoint log sequence (verbatim, scratch PR #64)
+
+```
+magpie-krun-launch: booting rootfs="/var/lib/magpie/reviewer-rootfs-e2e3" exec="/opt/magpie/entrypoint.sh" vcpus=2 ram_mib=1024 uid=993 gid=988 vsock=1234 work_mount=work out_mount=out (libkrun ABI: v1.19.4 (ABI 1))
+magpie-reviewer: micro-VM memory ceiling verified -- guest MemTotal 1005696 KiB is within the expected bound for MAGPIE_MICROVM_RAM_MIB=1024
+magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port 1234)
+magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices
+[vsock-client] preflight vsock connect to host port 1234 OK
+[vsock-client] listening on 127.0.0.1:4000 -> vsock cid=host port=1234
+magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)
+magpie-reviewer: relay is up
+[vsock-client] relaying connection -> vsock cid=host port=1234
+[vsock-client] relaying connection -> vsock cid=host port=1234
+magpie-reviewer: micro-VM egress channel confirmed -- /dev/vsock present, port 1234
+magpie-reviewer: network confinement verified -- no non-lo interface, empty route table, canaries unreachable, gateway reachable only via the permitted forwarder/vsock channel
+magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi
+setpriv: failed to execute pi: No such file or directory
+```
+
+(Also note E3/task_2541 landed correctly: the memory-ceiling line is now first,
+and passed with `require_memory_limit = true` — guest MemTotal `1005696` KiB
+against the `1101004` KiB bound, ~93 MiB of margin.)
+
+### Acceptance, item by item — PARTIAL
+
+- **"No regression to the crun tier's privilege-drop or to the byte-for-byte
+  crun-floor golden-argv test"** — **PASS** (static): branch vitest suite green
+  including `reviewer-crun-floor-argv.test.ts`; the whole fix lives inside
+  `if [ "${MAGPIE_IS_MICROVM}" = "1" ]` blocks. Host's crun floor resolves and
+  serves normally after restore.
+- **"A micro-VM-tier live review completes and posts a review, matching the
+  crun tier's end-to-end behavior"** — **NOT MET, but NOT because of this
+  fix.** This task's own defect is provably fixed (no EPERM). The job died one
+  step later at a **new, previously-unreachable 4th blocker**, filed as
+  **`task_4c37` (M8-E4)**.
+
+### The new blocker (task_4c37), for the record
+
+`setpriv: failed to execute pi: No such file or directory`. Root-caused by
+driving `magpie-krun-launch` directly against the same rootfs: the guest's
+environment has **no `PATH` variable at all** (`printenv PATH`, `export -p |
+grep PATH`, `env | grep -i path` all empty). `bash` still resolves bare
+commands via its compiled-in fallback path, which is why every earlier step
+worked — but that fallback is internal to bash and is not exported, so
+`setpriv`'s own `execvp("pi", …)` gets `NULL` from `getenv("PATH")` and falls
+back to `/bin:/usr/bin`, which excludes `/usr/local/bin` where the `pi`
+symlink lives. Confirmed inside the guest: `/usr/bin/env node --version` fails
+`'node': No such file or directory`, while `/usr/local/bin/node --version` and
+`env -i PATH=/usr/local/bin:/usr/bin:/bin node --version` both succeed.
+Structural to the micro-VM launcher path (a bare exported rootfs has no OCI
+image config to supply a baked `ENV PATH`, unlike `podman run`), pre-existing
+in `buildMicrovmLaunchArgs`'s env map, and cheaply fixable — see task_4c37.
+
+Because of it, `findings.json` was never written across the `/out` virtiofs by
+the micro-VM path. A review WAS posted (the failure-note form) and a telemetry
+record WAS written (`"outcome":"error"`, container exit code 127), and
+workspace/virtual-key/sandbox cleanup all ran normally.
+
+### Host restored
+
+Scratch PR #64 closed + branch deleted. Config reverted from backup
+(`/etc/magpie/config.toml.bak-e2e3-1785459746`): no `rootfs_path`, 0.2.0
+digest, `require_memory_limit = true`, `tier = "crun"`. Original `/opt/magpie`
+orchestrator `dist` restored. Services active; `/healthz`
+`resolvedTier: "crun"`, `degraded: false`. Local image + exported rootfs
+deleted; disk back to its pre-run 67% / 19G free.
