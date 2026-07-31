@@ -2,14 +2,14 @@
 id: task_80a4
 title: M8-E7: MAGPIE_FINDINGS_PATH is an image ENV, absent in the bare-rootfs micro-VM guest
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-31T09:36:39Z
-updated_at: 2026-07-31T09:36:39Z
+updated_at: 2026-07-31T09:48:01Z
 ---
 
 ## Background
@@ -60,7 +60,7 @@ True under crun, false under a bare rootfs.
 - [x] Regression test pinning the exported value AND that it matches the
       Dockerfile's `ENV` literal.
 - [x] Crun tier untouched (still takes the value from the image config).
-- [ ] Live re-validation.
+- [x] Live re-validation — **PASSED**, see below.
 
 ## Review
 
@@ -85,3 +85,15 @@ MAGPIE_FINDINGS_PATH (this task) — and any future `ENV`/`WORKDIR` the image
 grows will fail the same way. Worth a follow-up that audits the Dockerfile's
 full image-config surface against what the launcher actually injects, rather
 than continuing to discover these one live run at a time.
+
+## Live validation — PASSED (2026-07-31)
+
+Rebuilt the reviewer image from this branch, re-exported to
+`/var/lib/magpie/reviewer-rootfs-e7`, re-ran scratch PR #66 at
+`resolvedTier: microvm`, `require_memory_limit = true`.
+
+**`outcome: "success"`** — the first micro-VM-tier review in the project's
+history to complete end-to-end and post real findings. See task_a749's live
+section for the full evidence (posted review body, inline comment, telemetry).
+The `MAGPIE_FINDINGS_PATH is not set` warning is gone from the guest log, and
+`findings.json` landed on `/out` where the orchestrator read it back.

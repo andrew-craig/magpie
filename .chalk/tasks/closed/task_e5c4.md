@@ -2,14 +2,14 @@
 id: task_e5c4
 title: M8-E6: zero-exit reviewer failures discard all guest stderr (no diagnostics when pi produces no findings)
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-31T06:16:06Z
-updated_at: 2026-07-31T06:16:06Z
+updated_at: 2026-07-31T09:48:01Z
 ---
 
 ## Background
@@ -83,6 +83,36 @@ Orchestrator suite **415 passed / 4 skipped, 29 files** (was 409/4);
 gateway 75; review-extension 11. `reviewer-crun-floor-argv.test.ts` byte-for-byte
 unchanged (`git diff --exit-code` clean).
 
-**Live confirmation:** this is what made the M8-E5 live validation legible —
-the full ordered entrypoint sequence now arrives on the host through the
-ordinary failure path. See task_a749's live-validation section.
+**Live confirmation — this fix immediately paid for itself.** On the first live
+micro-VM run of the M8-E5 fix (scratch PR #66), the whole ordered entrypoint
+sequence arrived on the host through the ordinary failure path for the first
+time ever, and carried the cause of the next blocker in its last line:
+
+```
+magpie-krun-launch: booting rootfs="/var/lib/magpie/reviewer-rootfs-e5" exec="/opt/magpie/entrypoint.sh" vcpus=2 ram_mib=1024 uid=993 gid=988 vsock=1234 work_mount=work out_mount=out (libkrun ABI: v1.19.4 (ABI 1))
+magpie-reviewer: micro-VM memory ceiling verified -- guest MemTotal 1005696 KiB is within the expected bound for MAGPIE_MICROVM_RAM_MIB=1024
+magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port 1234)
+magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices
+[vsock-client] preflight vsock connect to host port 1234 OK
+[vsock-client] listening on 127.0.0.1:4000 -> vsock cid=host port=1234
+magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)
+[vsock-client] relaying connection -> vsock cid=host port=1234
+magpie-reviewer: relay is up
+[vsock-client] relaying connection -> vsock cid=host port=1234
+magpie-reviewer: micro-VM egress channel confirmed -- /dev/vsock present, port 1234
+magpie-reviewer: network confinement verified -- no non-lo interface, empty route table, canaries unreachable, gateway reachable only via the permitted forwarder/vsock channel
+magpie-reviewer: micro-VM tier -- dropping to uid/gid 993:988 (the orchestrator's own unprivileged uid, matching the crun tier's --user and the /out virtiofs owner) before exec pi
+[vsock-client] relaying connection -> vsock cid=host port=1234
+[magpie/review-extension] MAGPIE_FINDINGS_PATH is not set; falling back to ./magpie-findings.json in the current working directory.
+```
+
+That last line is the entire diagnosis of **task_80a4 (M8-E7)**, delivered on
+the first attempt. Under the old behaviour the run would have reported nothing
+but `"pi did not call report_findings"` — the same opaque string that cost the
+M8-E4 session an entire extra live cycle to root-cause by hand.
+
+**Scope note:** this surfaces stderr on FAILURE paths only. A SUCCESSFUL review
+still discards the tail (there is no failure reason to attach it to), which is
+deliberate — the reason string is the carrier, and a successful `ReviewResult`
+has none. So the ordered sequence above is from the failing run; the subsequent
+successful run's sequence was not captured. See task_a749's live section.

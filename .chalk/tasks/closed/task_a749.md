@@ -2,14 +2,14 @@
 id: task_a749
 title: M8-E5: micro-VM /out virtiofs is unwritable by the post-setpriv reviewer uid (10001) — findings.json never lands
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-31T05:39:43Z
-updated_at: 2026-07-31T05:39:43Z
+updated_at: 2026-07-31T09:48:01Z
 ---
 
 ## Background
@@ -211,3 +211,74 @@ unchanged** (`git diff --exit-code` clean) — crun is untouched by this change.
 `bash -n` clean; shellcheck clean apart from the one pre-existing, already
 documented SC2016 (an intentional single-quoted literal), with the three new
 literals explicitly annotated.
+
+## Live validation — PASSED (2026-07-31)
+
+Pi host, branch `m8-e2-e3-microvm-gaps`. Reviewer image built locally from the
+branch, rootfs exported, branch-built orchestrator deployed, `[microvm]
+rootfs_path` set, `require_memory_limit = true` untouched, `container.tier`
+left at `"crun"` (the ladder auto-resolved `microvm` — `/healthz`
+`resolvedTier: "microvm"`, `degraded: false`). Scratch PR #66, closed + branch
+deleted afterward.
+
+### THIS TASK'S FIX — proven directly before any review was run
+
+A guest probe against the exported rootfs, with `/out` created exactly the way
+`createOutputDir` creates it:
+
+```
+GUEST /out:  drwx------ 2 993 988 4096 /out
+old baked uid 10001 write:  /bin/bash: /out/old.txt: Permission denied
+new host uid 993 write:     993 WROTE findings.json
+```
+
+and read back on the HOST side of the same virtiofs:
+
+```
+-rw-r--r-- 1 993 988    9 findings.json
+{"ok":1}
+```
+
+The exact write that was impossible before now round-trips. The live run then
+logged the drop itself:
+
+```
+magpie-reviewer: micro-VM tier -- dropping to uid/gid 993:988 (the orchestrator's own unprivileged uid, matching the crun tier's --user and the /out virtiofs owner) before exec pi
+```
+
+### END TO END — the acceptance criterion, MET
+
+`outcome: "success"`, 23.0s, $0.0037 gateway-metered. The published review is a
+real `COMMENT` review with a real, correct, diff-anchored inline finding — not a
+failure note:
+
+> **Important** (correctness)
+>
+> `max()` initializes `best = 0`, so for a list of all-negative values it
+> returns 0 (which is not an element of the list) instead of the true maximum.
+> For an empty list it also returns 0 despite the JSDoc claiming to return the
+> largest value in a list.
+
+(`scripts/scratch-e5-stats.mjs:36`, review `4827358907`, state `COMMENTED`.)
+`findings.json` was therefore written across the `/out` virtiofs and read back
+by the orchestrator — that is the only way those findings could reach the
+publisher. `workspace-cleaned` and `gateway-key-revoked` both observed.
+
+### One more blocker was found and fixed on the way
+
+The first run at this tier got Pi to actually CALL `report_findings` and still
+failed, because `MAGPIE_FINDINGS_PATH` — a Dockerfile `ENV` — is absent in a
+bare-rootfs guest, so the extension wrote to the read-only `/work` instead.
+Filed and fixed as **task_80a4 (M8-E7)**, in a separate commit. It was only
+diagnosable because task_e5c4 (M8-E6) had just started surfacing guest stderr.
+
+### Host restored (verified against backups)
+
+Config restored from `config.toml.bak-e5-1785489924`, `diff` byte-identical (no
+`rootfs_path`, 0.2.0 digest, `require_memory_limit = true`, `tier = "crun"`).
+Orchestrator `dist` restored from `dist.bak-e5-1785489924` (69 files, all three
+branch markers absent), `.bak` removed. Services active; `/healthz`
+`resolvedTier: "crun"`, `degraded: false`. Local images removed with targeted
+`podman rmi` (never `prune -af`, per the M8-E4 lesson); image store verified
+identical to as-found with both pinned production digests (`e6a6e118`,
+`ed1985aa`) intact. Disk 67%/19G before and after.
