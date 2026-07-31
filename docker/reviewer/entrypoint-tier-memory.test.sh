@@ -101,6 +101,9 @@ done
   # excerpt actually ended up with. Bracketed so an EMPTY PATH is
   # distinguishable from an absent line.
   echo 'echo "MAGPIE_TEST_PATH=[${PATH:-}]"'
+  # Same idea for the M8-E7 (task_80a4) findings-path cases below.
+  # shellcheck disable=SC2016  # literal: expands when the GENERATED excerpt runs, not here
+  echo 'echo "MAGPIE_TEST_FINDINGS_PATH=[${MAGPIE_FINDINGS_PATH:-}]"'
   echo 'echo "MAGPIE_TEST_REACHED_END"'
   echo 'exit 0'
 } >> "${EXCERPT}"
@@ -257,6 +260,36 @@ run_case_no_path "microvm tier, PATH absent -> manufactures one containing /usr/
 # fix is genuinely tier-scoped and the crun path is untouched byte for byte.
 run_case_no_path_refute "crun tier, PATH absent -> does NOT get the micro-VM PATH (proves the fix is micro-VM-only)" \
   "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
+  "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
+
+# --- task_80a4 (M8-E7): MAGPIE_FINDINGS_PATH in a bare-rootfs guest --------
+#
+# Same defect class as the PATH pair above: the Dockerfile's
+# `ENV MAGPIE_FINDINGS_PATH=/out/findings.json` reaches the process only
+# because `podman run` applies the image's OCI config, and a micro-VM guest has
+# none. Left unset, the report_findings extension silently wrote
+# ./magpie-findings.json under the READ-ONLY /work mount and every micro-VM
+# review failed as "pi did not call report_findings" despite Pi calling it.
+#
+# The expected value is read out of the DOCKERFILE rather than hardcoded here,
+# so this test also pins that the script's re-declaration and the image's ENV
+# cannot drift apart (there is no single source of truth available to a bare
+# rootfs at runtime, so the duplication is deliberate and needs pinning).
+dockerfile_findings_path="$(grep -E '^ENV MAGPIE_FINDINGS_PATH=' "${SCRIPT_DIR}/Dockerfile" | head -n1 | cut -d= -f2-)"
+if [ -z "${dockerfile_findings_path}" ]; then
+  echo "FAIL: could not read ENV MAGPIE_FINDINGS_PATH from Dockerfile -- has it moved?" >&2
+  exit 1
+fi
+
+run_case_no_path "microvm tier -> re-declares MAGPIE_FINDINGS_PATH matching the Dockerfile ENV (task_80a4)" \
+  "MAGPIE_TEST_FINDINGS_PATH=[${dockerfile_findings_path}]" \
+  "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND}"
+
+# Crun tier: must NOT manufacture it -- there it legitimately comes from the
+# image config, and this harness runs with no image config at all, so the
+# correct observed value is EMPTY. Proves the fix is tier-scoped.
+run_case_no_path "crun tier -> does NOT manufacture MAGPIE_FINDINGS_PATH (image config supplies it there)" \
+  "MAGPIE_TEST_FINDINGS_PATH=[]" \
   "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
 
 # --- task_a749 (M8-E5): the guest privilege-drop uid/gid -------------------

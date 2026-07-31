@@ -4,6 +4,7 @@
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
+- **task_80a4** · P2 · open · M8-E7: MAGPIE_FINDINGS_PATH is an image ENV, absent in the bare-rootfs micro-VM guest  (parent: epic_59b1)
 - **task_a749** · P2 · open · M8-E5: micro-VM /out virtiofs is unwritable by the post-setpriv reviewer uid (10001) — findings.json never lands  (parent: epic_59b1)
 - **task_e5c4** · P2 · open · M8-E6: zero-exit reviewer failures discard all guest stderr (no diagnostics when pi produces no findings)  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)

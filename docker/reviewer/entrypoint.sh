@@ -65,8 +65,16 @@ set -euo pipefail
 # NOT a runtime input: MAGPIE_FINDINGS_PATH. The output path is part of the
 # image contract (always /out/findings.json, the mounted output dir) and is
 # baked into the Dockerfile via `ENV MAGPIE_FINDINGS_PATH=/out/findings.json`,
-# so the baked-in report_findings extension already sees it -- this script
-# neither reads nor requires it.
+# so the baked-in report_findings extension already sees it -- the caller
+# never passes it.
+#
+# ...UNDER THE CRUN TIER. M8-E7 (task_80a4): that ENV only reaches the process
+# because `podman run` applies the image's OCI config. A micro-VM guest boots a
+# bare exported rootfs with NO image config, so this script RE-DECLARES the
+# same constant for that tier further down (next to M8-E4's PATH export). Left
+# unset there, the extension silently fell back to ./magpie-findings.json under
+# the READ-ONLY /work mount and every micro-VM review failed as "pi did not
+# call report_findings" despite Pi having called it.
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (-e OPENROUTER_API_KEY=...) -- see docker/reviewer/README.md}"
 : "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set (-e OPENAI_BASE_URL=<gateway proxy URL>) -- see docker/reviewer/README.md}"
@@ -153,6 +161,47 @@ fi
 # the image's OCI config -- is untouched, byte for byte.
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+
+# ---------------------------------------------------------------------------
+# M8-E7 (task_5e42): re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
+#
+# EXACTLY the same root cause as the PATH gap immediately above, in a second
+# variable: `docker/reviewer/Dockerfile` sets
+# `ENV MAGPIE_FINDINGS_PATH=/out/findings.json`, and the crun tier gets it for
+# free because `podman run` applies the image's OCI config. A micro-VM guest
+# boots a BARE EXPORTED ROOTFS with no OCI config at all, so it gets ONLY the
+# explicit `--env` pairs the launcher was given -- and this one was never
+# among them.
+#
+# Unlike PATH, nothing masked it: the baked report_findings extension
+# (packages/review-extension) read an unset var, took its documented fallback,
+# and wrote `./magpie-findings.json` relative to its cwd (`/work`, the
+# READ-ONLY PR mount) instead of the mounted output dir. The orchestrator then
+# found no `/out/findings.json` and reported the generic "pi did not call
+# report_findings" -- even though Pi had run and called the tool. Observed
+# live on 2026-07-31 (scratch PR #66), and only visible at all because M8-E6
+# (task_e5c4) had just started surfacing guest stderr on zero-exit failures:
+#
+#   [magpie/review-extension] MAGPIE_FINDINGS_PATH is not set; falling back to
+#   ./magpie-findings.json in the current working directory.
+#
+# Fixed HERE rather than in reviewer.ts's `--env` map, for the same reason
+# M8-E4 chose this file, and for one more specific to this variable: the
+# Dockerfile documents the output path as "part of the image contract, not
+# per-job config", explicitly so the orchestrator does NOT have to pass it.
+# Re-declaring the image's own constant inside the image keeps that contract
+# intact and keeps a hand-launched/manually-exported rootfs working too.
+# Guarded on MAGPIE_IS_MICROVM so the crun tier keeps taking the value from
+# the image config, byte for byte, exactly as before.
+#
+# The literal is deliberately duplicated from the Dockerfile's ENV rather than
+# derived: there is no way for a bare rootfs to read its own image config, so
+# a single source of truth is not available at this layer. The pairing is
+# pinned by docker/reviewer/entrypoint-tier-memory.test.sh, which asserts this
+# value matches the Dockerfile's ENV line.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  export MAGPIE_FINDINGS_PATH=/out/findings.json
 fi
 
 # ---------------------------------------------------------------------------
