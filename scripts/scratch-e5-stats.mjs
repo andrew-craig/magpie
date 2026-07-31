@@ -31,3 +31,12 @@ export function summarise(durations) {
     slowShare: percent(durations.filter((d) => d > 1000).length, durations.length),
   };
 }
+
+/** Returns the largest value in a list. */
+export function max(values) {
+  let best = 0;
+  for (const v of values) {
+    if (v > best) best = v;
+  }
+  return best;
+}
