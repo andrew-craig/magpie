@@ -119,3 +119,4 @@ outbound-only Cloudflare Tunnel (no inbound ports), see
 For receiving real GitHub webhook deliveries locally during development,
 without a public inbound port, see [docs/smee.md](docs/smee.md) and
 `npm run dev:smee`.
+// scratch PR for M8-E2/E3 live micro-VM validation (2026-07-31T01:15:54Z) -- to be closed and deleted immediately after
