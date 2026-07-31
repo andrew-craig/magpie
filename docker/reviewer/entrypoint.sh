@@ -441,8 +441,9 @@ fi
 # `/work`/`/out` are attached as devices above -- and rootless virtiofs maps
 # guest-root's uid back to the unprivileged HOST user that launched the
 # micro-VM, so guest-root does not actually have chown authority over paths
-# living on it. That surfaced as the privilege-drop step below (`chown -R
-# 10001:10001 "$HOME/.pi"`) failing with EPERM on `/tmp/.pi` -- not a Magpie
+# living on it. That surfaced as the privilege-drop step below (its
+# `chown -R … "$HOME/.pi"`, which at the time targeted the baked-in 10001
+# account) failing with EPERM on `/tmp/.pi` -- not a Magpie
 # logic bug, a known category of rootless-VMM limitation. Mounting a plain
 # guest-local tmpfs here makes `/tmp` a normal in-guest filesystem again,
 # where chown-by-guest-root works exactly like it does under the crun
@@ -800,17 +801,23 @@ set -- \
 # HOST-side VMM process, NOT the guest -- the guest boots (and, until this
 # point, runs this script) as root (fully documented, source + empirically,
 # in rust/magpie-microvm-launcher/src/krun.rs's module doc comment). So the
-# equivalent of `--user` has to happen HERE, image-side: re-exec Pi as the
-# baked-in unprivileged `reviewer` account (uid/gid 10001 -- see
-# docker/reviewer/Dockerfile's groupadd/useradd), matching the crun tier's
-# non-root posture. `setpriv` (util-linux) does a pure privilege drop with no
+# equivalent of `--user` has to happen HERE, image-side: re-exec Pi as an
+# unprivileged uid, matching the crun tier's non-root posture. As of M8-E5
+# (task_a749) that uid is the one the ORCHESTRATOR passes in
+# (MAGPIE_MICROVM_REVIEWER_UID/_GID) -- the same host uid the crun tier's
+# `--user` uses -- NOT the image's baked-in `reviewer` account (uid 10001,
+# docker/reviewer/Dockerfile's groupadd/useradd, which the crun tier still
+# carries as its own default non-root identity). See the fail-closed block
+# further down for why the baked account cannot be used at this tier.
+# `setpriv` (util-linux) does a pure privilege drop with no
 # PAM/login/shell in between and `exec`s straight into Pi, so Pi still
 # receives SIGTERM/SIGKILL directly (the timeout/abort path -- see reviewer.ts's
 # startKillSequence, which for this tier kills the launcher process == the VM).
 # Only the setpriv WRAPPER differs between the tiers; the `pi` argv ("$@",
 # built just above) is shared.
 #
-#   --reuid/--regid 10001         drop real+effective+saved id to `reviewer`
+#   --reuid/--regid <uid>:<gid>   drop real+effective+saved id to the
+#                                   orchestrator-supplied unprivileged id
 #   --clear-groups                 shed root's supplementary groups
 #   --no-new-privs                 set PR_SET_NO_NEW_PRIVS (mirrors the crun
 #                                   tier's --security-opt=no-new-privileges)
@@ -827,10 +834,67 @@ set -- \
 # virtiofs-backed guest root -- guest-root cannot chown paths living on
 # rootless virtiofs (its uid is remapped back to the unprivileged HOST user
 # by the rootless krun setup), which is exactly the EPERM this task fixes.
+#
+# M8-E5 (task_a749): the uid/gid dropped TO is now supplied by the
+# orchestrator (MAGPIE_MICROVM_REVIEWER_UID/_GID -- see reviewer.ts's
+# buildMicrovmLaunchArgs `env` map) instead of being the image's baked-in
+# `reviewer` account (uid 10001, still present in the Dockerfile and still
+# used by the crun tier's own non-root posture). It has to be, because of
+# who owns the OTHER side of the /out virtiofs:
+#
+#   `/out` is a virtiofs view of the host directory container-mounts.ts's
+#   createOutputDir makes with `mkdtemp`, i.e. mode 0700 owned by the
+#   ORCHESTRATOR's uid. The crun tier never noticed, because `docker run
+#   --user <uid>:<gid>` runs the whole container as that same host uid, so Pi
+#   owns what it writes. Here, the guest boots as root and drops on its own --
+#   and dropping to 10001, a uid with no relationship whatsoever to the host
+#   uid owning those files, meant Pi saw `/out` as `drwx------ <hostuid>
+#   <hostgid>` and got EACCES on findings.json. Every micro-VM review failed
+#   as "pi did not call report_findings" regardless of what Pi actually did.
+#
+# Fixing it by widening /out's mode host-side, or by chowning /out here, were
+# both rejected: the first loosens permissions on a host directory to paper
+# over an identity mismatch, and the second is the same rootless-virtiofs
+# chown that already produced M8-E2's EPERM (guest-root's uid is remapped back
+# to the unprivileged host user for virtiofs ownership purposes -- see the
+# tmpfs block above). Aligning the IDENTITY is the fix that removes the
+# mismatch instead of masking it.
+#
+# POSTURE IS PRESERVED, AND NOW UNIFIED: this is still a drop from guest-root
+# to an unprivileged, non-root uid before Pi ever runs -- the same drop, to the
+# same uid the crun tier has always used. The two tiers' reviewer identity is
+# now IDENTICAL rather than divergent. Note the guest is a separate kernel with
+# its own uid space; "the host's uid" here is a number chosen so the shared
+# virtiofs files line up, and it is unprivileged on both sides.
+#
+# FAIL CLOSED on unset / non-numeric / zero, and NEVER fall back to 10001 --
+# that fallback is now known-broken for /out, and silently taking it would
+# resurrect exactly the silent-failure mode this fixes. Zero is rejected
+# separately and loudly: uid 0 would mean running Pi -- the thing that
+# processes untrusted PR content -- as guest-root, discarding the entire point
+# of this block. (No passwd entry exists in the guest for the host's uid, and
+# none is needed: setpriv takes numeric ids, and HOME is force-set to /tmp
+# above rather than resolved via getpwuid.)
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
-  echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi" >&2
-  chown -R 10001:10001 "$HOME/.pi"
-  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs pi "$@"
+  case "${MAGPIE_MICROVM_REVIEWER_UID:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_UID:-unset}) -- cannot determine the unprivileged uid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  case "${MAGPIE_MICROVM_REVIEWER_GID:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_GID:-unset}) -- cannot determine the unprivileged gid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  if [ "${MAGPIE_MICROVM_REVIEWER_UID}" -eq 0 ] || [ "${MAGPIE_MICROVM_REVIEWER_GID}" -eq 0 ]; then
+    echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID/_GID resolve to root (${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID}) -- Pi must never run as root in the guest, which is the entire purpose of this privilege drop. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid ${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID} (the orchestrator's own unprivileged uid, matching the crun tier's --user and the /out virtiofs owner) before exec pi" >&2
+  chown -R "${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID}" "$HOME/.pi"
+  exec setpriv --reuid="${MAGPIE_MICROVM_REVIEWER_UID}" --regid="${MAGPIE_MICROVM_REVIEWER_GID}" --clear-groups --no-new-privs pi "$@"
 fi
 
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly

@@ -259,6 +259,124 @@ run_case_no_path_refute "crun tier, PATH absent -> does NOT get the micro-VM PAT
   "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
   "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
 
+# --- task_a749 (M8-E5): the guest privilege-drop uid/gid -------------------
+#
+# WHY A SECOND EXCERPT: the excerpt above is truncated at the M4-E confinement
+# banner, which sits ~400 lines ABOVE the privilege-drop block -- so the
+# setpriv block is simply unreachable from it, and extending the truncation
+# point is not an option (everything in between needs real network/vsock/
+# virtiofs state this harness cannot provide). Rather than reimplement the
+# block (the one thing this file's header rules out), slice it out of the REAL
+# entrypoint.sh by marker and run it standalone.
+#
+# NOTHING IN THE SLICED BLOCK IS REWRITTEN -- not even the final `exec`. The
+# two external commands it invokes (`chown`, `setpriv`) are instead shadowed by
+# stubs placed FIRST on PATH, so the real `chown -R "${UID}:${GID}"` and the
+# real `exec setpriv --reuid=... --regid=... pi` lines execute character-for-
+# character and simply report what they were called with. That also means a
+# stub is what `exec` replaces the shell with, so the stub's own output is the
+# proof the block reached the drop.
+DROP_EXCERPT="${MAGPIE_TEST_WORKDIR}/entrypoint-drop-excerpt.sh"
+# shellcheck disable=SC2016  # a fixed grep needle matching entrypoint.sh's literal source text, not an expansion
+drop_start_marker='case "${MAGPIE_MICROVM_REVIEWER_UID:-}" in'
+drop_end_marker='exec setpriv --reuid='
+drop_start_line="$(grep -nF -- "${drop_start_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
+drop_end_line="$(grep -nF -- "${drop_end_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
+if [ -z "${drop_start_line}" ] || [ -z "${drop_end_line}" ]; then
+  echo "FAIL: could not locate the M8-E5 privilege-drop block in entrypoint.sh -- has it moved? Update drop_start_marker/drop_end_marker above." >&2
+  exit 1
+fi
+# One line back for the `if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then` that opens
+# the block; one line forward for its closing `fi`.
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -euo pipefail'
+  # shellcheck disable=SC2016  # deliberately literal: these are lines WRITTEN INTO the generated excerpt, to expand when IT runs
+  echo ': "${MAGPIE_IS_MICROVM:=0}"'
+  # shellcheck disable=SC2016
+  echo 'mkdir -p "$HOME/.pi"'
+  sed -n "$(( drop_start_line - 1 )),$(( drop_end_line + 1 ))p" "${ENTRYPOINT}"
+  # Only reachable when the block was SKIPPED (crun tier) -- the micro-VM path
+  # always ends in the `exec` above.
+  echo 'echo "MAGPIE_TEST_DROP_SKIPPED"'
+  echo 'exit 0'
+} > "${DROP_EXCERPT}"
+
+DROP_STUB_BIN="${MAGPIE_TEST_WORKDIR}/dropstubs"
+mkdir -p "${DROP_STUB_BIN}"
+printf '#!/usr/bin/env bash\necho "STUB_CHOWN $*"\nexit 0\n' > "${DROP_STUB_BIN}/chown"
+printf '#!/usr/bin/env bash\necho "STUB_SETPRIV $*"\nexit 0\n' > "${DROP_STUB_BIN}/setpriv"
+chmod +x "${DROP_STUB_BIN}/chown" "${DROP_STUB_BIN}/setpriv"
+
+# run_drop_case NAME EXPECTED_EXIT EXPECTED_SUBSTRING ENV_ASSIGNMENTS
+#
+# EXPECTED_SUBSTRING is asserted on combined stdout+stderr; pass "" to skip
+# the substring check and assert only the exit status.
+run_drop_case() {
+  local name="$1" expected_exit="$2" expected_substring="$3" env_assignments="$4"
+  local out rc
+  set +e
+  out="$(env -i PATH="${DROP_STUB_BIN}:${PATH}" HOME="${MAGPIE_TEST_WORKDIR}/drophome" \
+    bash -c "${env_assignments} bash \"\$1\"" -- "${DROP_EXCERPT}" 2>&1)"
+  rc=$?
+  set -e
+  if [ "${rc}" = "${expected_exit}" ] && { [ -z "${expected_substring}" ] || printf '%s' "${out}" | grep -qF -- "${expected_substring}"; }; then
+    echo "PASS: ${name}"
+    pass_count=$((pass_count + 1))
+  else
+    echo "FAIL: ${name} -- expected exit ${expected_exit}${expected_substring:+ and output containing \'${expected_substring}\'}, got exit ${rc}. Output:"
+    printf '%s\n' "${out}" | awk '{ print "    " $0 }'
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+# The positive case, and the whole point of task_a749: the uid/gid the
+# orchestrator supplies is what BOTH the chown and the setpriv drop use. The
+# live bug was that these were hardcoded to 10001 while `/out` was owned by the
+# host uid, so Pi could never write findings.json.
+run_drop_case "microvm tier, valid reviewer uid/gid -> drops to exactly those ids" 0 \
+  "STUB_SETPRIV --reuid=993 --regid=988 --clear-groups --no-new-privs pi" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=993 MAGPIE_MICROVM_REVIEWER_GID=988"
+
+run_drop_case "microvm tier, chown targets the SAME uid/gid as the drop" 0 \
+  "STUB_CHOWN -R 993:988" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=993 MAGPIE_MICROVM_REVIEWER_GID=988"
+
+# Fail-closed cases. Each must abort BEFORE Pi -- never silently fall back to
+# the baked-in 10001 account, which is known-broken for the /out virtiofs.
+run_drop_case "microvm tier, reviewer uid unset -> fails closed" 1 \
+  "MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_GID=988"
+
+run_drop_case "microvm tier, reviewer uid non-numeric -> fails closed" 1 \
+  "MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=magpie MAGPIE_MICROVM_REVIEWER_GID=988"
+
+run_drop_case "microvm tier, reviewer gid unset -> fails closed" 1 \
+  "MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=993"
+
+run_drop_case "microvm tier, reviewer gid non-numeric -> fails closed" 1 \
+  "MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=993 MAGPIE_MICROVM_REVIEWER_GID=wheel"
+
+# uid/gid 0 is rejected on its own, separately from the numeric check: running
+# Pi as guest-root would discard the entire purpose of the privilege drop.
+run_drop_case "microvm tier, reviewer uid 0 -> fails closed (never run Pi as root)" 1 \
+  "resolve to root" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=0 MAGPIE_MICROVM_REVIEWER_GID=988"
+
+run_drop_case "microvm tier, reviewer gid 0 -> fails closed (never run Pi as root)" 1 \
+  "resolve to root" \
+  "MAGPIE_IS_MICROVM=1 MAGPIE_MICROVM_REVIEWER_UID=993 MAGPIE_MICROVM_REVIEWER_GID=0"
+
+# Tier scoping: the crun tier must skip the whole block -- it has no privilege
+# drop to do (podman's `--user` already did it), so the new fail-closed checks
+# must not fire there even with both vars absent.
+run_drop_case "crun tier, reviewer uid/gid absent -> block skipped entirely (no drop, no abort)" 0 \
+  "MAGPIE_TEST_DROP_SKIPPED" \
+  "MAGPIE_IS_MICROVM=0"
+
 echo
 echo "${pass_count} passed, ${fail_count} failed"
 [ "${fail_count}" -eq 0 ]

@@ -134,3 +134,80 @@ its container process IS the dir's owner.
   `reviewer-crun-floor-argv.test.ts`.
 - No weakening of the micro-VM tier's confinement posture (in particular, Pi
   must still not run as guest-root).
+
+## Plan
+
+- [x] `reviewer.ts`: bind the host uid/gid ONCE and pass them to both tiers;
+      add `MAGPIE_MICROVM_REVIEWER_UID`/`_GID` to the micro-VM inline `env` map.
+- [x] `entrypoint.sh`: drop to those ids instead of the baked 10001, with the
+      `chown -R` of `$HOME/.pi` targeting the same ids.
+- [x] Fail closed on unset / non-numeric / zero; never fall back to 10001.
+- [x] Refresh the now-stale comments in `entrypoint.sh` + `Dockerfile`.
+- [x] Tests: micro-VM argv (builder + real `runReview` call site), entrypoint
+      fail-closed cases, crun untouched.
+
+## Review
+
+**Done — the identity is aligned rather than the permissions widened.**
+
+`reviewer.ts` now binds `hostUid`/`hostGid` once (right after the existing
+POSIX `process.getuid` guard) and feeds BOTH tiers from them: crun's
+`--user <uid>:<gid>`, and the micro-VM tier's `--uid`/`--gid` **and** the two
+new inline env vars. That makes "the guest drops to the same uid the host runs
+as" structural instead of a coincidence of two call sites happening to call the
+same function — which is precisely how the two drifted apart in the first place.
+
+`entrypoint.sh`'s micro-VM branch reads `MAGPIE_MICROVM_REVIEWER_UID`/`_GID`
+and fails closed on unset / non-numeric (`case` glob, matching the existing
+`MAGPIE_MICROVM_RAM_MIB` style) and, separately and loudly, on **zero** — uid 0
+would mean running Pi, the thing that processes untrusted PR content, as
+guest-root, discarding the whole point of the block. It never falls back to
+10001; that fallback is now known-broken for `/out`, and taking it silently
+would resurrect exactly this bug.
+
+**Both rejected alternatives, and why.** Widening `/out`'s mode loosens a host
+directory's permissions to paper over an identity mismatch. A guest-side
+`chown /out` is the same rootless-virtiofs chown that already produced M8-E2's
+EPERM (guest-root's uid is remapped back to the unprivileged host user for
+virtiofs ownership). Aligning the identity removes the mismatch instead of
+masking it.
+
+**Posture preserved and unified:** still a drop from guest-root to an
+unprivileged non-root uid before Pi runs — the same drop, now to the same uid
+the crun tier has always used. The two tiers' reviewer identity is identical
+rather than divergent. No passwd entry exists in the guest for that uid and
+none is needed: `setpriv` takes numeric ids and `HOME` is force-set to `/tmp`
+above rather than resolved via `getpwuid` (checked — nothing in the script or
+Pi's startup path does a `getpwuid` lookup).
+
+The baked `reviewer` account (uid 10001) stays in the image as its own non-root
+default for anyone running the image directly; the stale comments in
+`entrypoint.sh` and the `Dockerfile` that claimed the entrypoint drops to it
+were corrected.
+
+**Tests:**
+- `reviewer.test.ts` — a new `runReview`-level micro-VM assertion (the REAL
+  call site, since the bug was in what the call site passed) that
+  `MAGPIE_MICROVM_REVIEWER_UID`/`_GID` EQUAL the `--uid`/`--gid` flags and the
+  actual `process.getuid()`. Written as an equality against the flags rather
+  than a hardcoded number, so the invariant pinned is "guest reviewer identity
+  == host identity == virtiofs owner" on whatever uid the tests run as.
+- `reviewer-microvm-argv.test.ts` — golden array + a targeted pin.
+- `entrypoint-tier-memory.test.sh` — **9 new cases** (11 → 20 total). The
+  existing excerpt is truncated at the M4-E confinement banner, ~400 lines
+  above the privilege-drop block, so that block was genuinely unreachable from
+  it and extending the truncation is not viable (everything between needs real
+  network/vsock/virtiofs state). Rather than reimplement it, a SECOND excerpt
+  slices the real block out of `entrypoint.sh` by marker and runs it standalone
+  with `chown`/`setpriv` stubs shadowed first on PATH — so the real
+  `chown -R "${UID}:${GID}"` and the real `exec setpriv --reuid=… pi` lines run
+  character-for-character and just report their arguments. Cases: valid ids
+  drop to exactly those ids; chown targets the same ids; uid/gid
+  unset/non-numeric/zero each fail closed; crun tier skips the block entirely.
+
+Orchestrator suite **415 passed / 4 skipped, 29 files**; gateway 75;
+review-extension 11. `reviewer-crun-floor-argv.test.ts` **byte-for-byte
+unchanged** (`git diff --exit-code` clean) — crun is untouched by this change.
+`bash -n` clean; shellcheck clean apart from the one pre-existing, already
+documented SC2016 (an intentional single-quoted literal), with the three new
+literals explicitly annotated.

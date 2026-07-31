@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -418,7 +418,106 @@ describe("runReview", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      // No stderr from this fake, so the reason stays EXACTLY the bare string
+      // — the M8-E6 tail below is only appended when there is something to
+      // append (see the dedicated cases further down).
       expect(result.reason).toBe("pi did not call report_findings");
+    }
+  });
+
+  // --- M8-E6 (task_e5c4): guest stderr on ZERO-exit failures ---------------
+  //
+  // The non-zero-exit path always included stderrTail; the zero-exit failure
+  // paths did not — so a sandbox that started, narrated a detailed fail-closed
+  // reason on stderr, and exited 0 threw all of it away. That is the COMMON
+  // case for this image (entrypoint.sh logs its whole confinement/mount/
+  // privilege-drop sequence to stderr, and Pi exits 0 even when a provider
+  // call failed). It made the M8-E4/E5 micro-VM failures undiagnosable from
+  // the host: the entire ordered entrypoint log existed and was buffered in
+  // `stderrTail`, and was discarded because the container exited 0.
+  it("surfaces the buffered guest stderr when the container exits 0 with no findings (M8-E6)", async () => {
+    const piBinary = writeFakeDocker(
+      [
+        `process.stderr.write("magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices\\n");`,
+        `process.stderr.write("magpie-reviewer: refusing to run: something fail-closed tripped\\n");`,
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        `process.exit(0);`,
+      ].join("\n"),
+    );
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("pi did not call report_findings");
+      expect(result.reason).toContain("Sandbox stderr");
+      expect(result.reason).toContain("mounting /work + /out virtiofs devices");
+      expect(result.reason).toContain("refusing to run: something fail-closed tripped");
+    }
+  });
+
+  it("surfaces the buffered guest stderr when the findings file is unparsable (M8-E6)", async () => {
+    const piBinary = writeFakeDockerWithFindings([assistantMessage("text")], {
+      kind: "raw",
+      value: "{ not valid json",
+    });
+    // Append a stderr line to the same fake.
+    appendFileSync(piBinary, `\nprocess.stderr.write("magpie-reviewer: relay is up\\n");\n`);
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("pi wrote an invalid findings file");
+      expect(result.reason).toContain("magpie-reviewer: relay is up");
+    }
+  });
+
+  // The tail is echoed into a telemetry record AND, via publisher.ts, into a
+  // PUBLIC PR comment. Nothing is expected to print the gateway virtual key
+  // (entrypoint.sh's key assertions report only the expected PREFIX), but a
+  // future change that started echoing it must not be able to leak it here.
+  it("redacts the gateway virtual key from the surfaced stderr tail (M8-E6)", async () => {
+    const piBinary = writeFakeDocker(
+      [
+        `process.stderr.write("leaky: key=" + process.env.OPENROUTER_API_KEY + " oops\\n");`,
+        `process.stdout.write(JSON.stringify({type:"session",version:3,id:"t",timestamp:"",cwd:process.cwd()}) + "\\n");`,
+        `process.exit(0);`,
+      ].join("\n"),
+    );
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Sandbox stderr");
+      expect(result.reason).not.toContain(TEST_GATEWAY_API_KEY);
+      expect(result.reason).toContain("[redacted]");
+    }
+  });
+
+  // Guard on the deliberate carve-out: pipeline.ts's classifyJobOutcome
+  // decides a job's telemetry outcome by string-matching `reason === "aborted"`
+  // (and `startsWith("timeout after")`). Appending a stderr tail to those two
+  // would silently reclassify every aborted job as a generic `error`, so the
+  // helper is NOT applied there — pinned here so nobody "fixes" the
+  // inconsistency and breaks telemetry.
+  it("leaves the aborted reason exactly matchable by classifyJobOutcome (M8-E6 carve-out)", async () => {
+    const controller = new AbortController();
+    const piBinary = writeFakeDocker(
+      [
+        `process.stderr.write("magpie-reviewer: some chatty guest output\\n");`,
+        `setInterval(() => {}, 1000);`,
+      ].join("\n"),
+    );
+
+    const promise = runReview(baseParams({ piBinary, signal: controller.signal }));
+    setTimeout(() => controller.abort(), 100);
+    const result = await promise;
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("aborted");
     }
   });
 
@@ -764,6 +863,45 @@ describe("runReview (microvm tier)", () => {
     // The MERGE-BLOCKER assertion: the real key value never appears anywhere
     // in the argv this module constructs, only its NAME.
     expect(argv.join(" ")).not.toContain(TEST_GATEWAY_API_KEY);
+  });
+
+  // M8-E5 (task_a749). The guest's own privilege drop (entrypoint.sh) has to
+  // land on the SAME uid/gid the host runs as, because `/out` is a virtiofs
+  // view of a `mkdtemp` 0700 dir owned by that uid — dropping to the image's
+  // baked 10001 account made findings.json unwritable and every micro-VM
+  // review failed as "pi did not call report_findings". Asserted against the
+  // REAL runReview call site (not just the pure builder) because the bug was
+  // in what the call site passed, and asserted as an EQUALITY against the
+  // --uid/--gid flags rather than a hardcoded number, so the invariant
+  // ("guest reviewer identity == host identity == virtiofs owner") is what's
+  // pinned, on whatever uid the test happens to run as.
+  it("passes the host uid/gid as MAGPIE_MICROVM_REVIEWER_UID/_GID, matching --uid/--gid (M8-E5)", async () => {
+    const piBinary = writeFakeLauncherWithFindings([assistantMessage("text")], {
+      kind: "valid",
+      value: { findings: [], summary: "ok", verdict: "comment" },
+    });
+
+    const result = await runReview(baseParams({ piBinary, config: microvmTestConfig() }));
+    expect(result.ok).toBe(true);
+
+    const { argv } = readMicrovmInvocation();
+    const flagUid = argv[argv.indexOf("--uid") + 1];
+    const flagGid = argv[argv.indexOf("--gid") + 1];
+    expect(flagUid).toBe(String(process.getuid?.()));
+    expect(flagGid).toBe(String(process.getgid?.()));
+
+    // Both are passed as non-secret inline `--env KEY=VALUE` pairs...
+    const uidIdx = argv.indexOf(`MAGPIE_MICROVM_REVIEWER_UID=${flagUid}`);
+    const gidIdx = argv.indexOf(`MAGPIE_MICROVM_REVIEWER_GID=${flagGid}`);
+    expect(uidIdx).toBeGreaterThan(0);
+    expect(gidIdx).toBeGreaterThan(0);
+    expect(argv[uidIdx - 1]).toBe("--env");
+    expect(argv[gidIdx - 1]).toBe("--env");
+
+    // ...and must never be root: entrypoint.sh fails closed on 0, but the
+    // orchestrator should never be the thing that proposes it.
+    expect(flagUid).not.toBe("0");
+    expect(flagGid).not.toBe("0");
   });
 
   it("returns ok:false when the launcher exits non-zero (guest panic/OOM-shaped failure)", async () => {
