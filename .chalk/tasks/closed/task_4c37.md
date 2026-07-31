@@ -195,3 +195,125 @@ single-quoted literal appended to the generated excerpt).
 
 **NOT yet live-validated** — needs the micro-VM run that reaches `exec pi` and
 completes a review end-to-end. That run is the remaining acceptance step.
+
+## Live validation (M8-E4 / end-to-end)
+
+**Date:** 2026-07-31, Pi host (arm64, 16 KB pages), branch
+`m8-e2-e3-microvm-gaps` @ `f267e94`. Reviewer image rebuilt locally from this
+branch (rootless podman as `magpie`; the usual local-only
+`FROM docker.io/library/…` qualification applied in a throwaway `git archive`
+export under `/tmp`, NOT in the repo), exported to
+`/var/lib/magpie/reviewer-rootfs-e4`, `[microvm] rootfs_path` pointed at it, and
+a branch-built orchestrator `dist` temporarily deployed to `/opt/magpie` (needed
+for `MAGPIE_MICROVM_RAM_MIB`; backed up and restored afterward). Ladder
+auto-resolved `microvm` (`/healthz` `resolvedTier: "microvm"`,
+`requestedTier: "crun"`, `degraded: false`) with `container.tier` left at
+`"crun"` and `require_memory_limit = true` untouched. Scratch PR #65, closed +
+branch deleted afterward.
+
+### THIS TASK'S FIX: PASS — `exec pi` SUCCEEDED
+
+This is the question the run existed to answer, and it is answered
+affirmatively. Pi executed inside the guest for the first time ever:
+
+```
+[reviewer] pi run complete: turns=3 tokens(in/out/total)=8203/1738/14037 cost=$0.0136
+```
+
+Three real turns, real token usage, and real spend metered by the gateway
+(`gateway.spentUsd: 0.017166906` against a `0.5` budget) — none of which is
+producible unless `setpriv --reuid=10001 … pi` actually exec'd the binary. The
+previous run's `setpriv: failed to execute pi: No such file or directory` is
+**gone**. The `export PATH=…` one-liner works.
+
+### E3 re-confirmed on this build — verbatim
+
+```
+magpie-reviewer: micro-VM memory ceiling verified -- guest MemTotal 1005696 KiB is within the expected bound for MAGPIE_MICROVM_RAM_MIB=1024
+```
+
+Byte-identical to the M8-E2/E3 run's measurement (`1005696` KiB against the
+`1101004` KiB bound, ~93 MiB margin). The 1.05 tolerance was **not** touched.
+Captured from a direct `magpie-krun-launch` reproduction against the same rootfs
+with `--ram-mib 1024` and the same env, because the live job's guest stderr was
+not available (see the caveat below).
+
+### End-to-end: NOT ACHIEVED — a 5th blocker, filed as task_a749 (M8-E5)
+
+Past `exec pi`, the job still failed:
+
+```
+"outcome":"error", "reason":"pi did not call report_findings", "durationMs":46520
+```
+
+and the posted review was the failure-note form
+(https://github.com/andrew-craig/magpie/pull/65#issuecomment-5139627529):
+
+```
+<!-- magpie-review -->
+## 🐦 Magpie review
+
+Magpie could not complete a review of this PR.
+
+Reason:
+```
+pi did not call report_findings
+```
+```
+
+**Root cause proven empirically:** `/out` is host-owned `magpie:magpie` mode
+`0700` (`createOutputDir`'s `mkdtemp` default — correct for the crun tier, whose
+container process IS uid 993), but the micro-VM tier drops Pi to guest uid 10001
+before exec. A direct guest probe against the same rootfs:
+
+```
+GUEST: ls -ld /out ->  drwx------ 2 993 988 4096 /out
+GUEST root write test:      root write OK
+GUEST uid10001 write test:  /bin/bash: /out/reviewer.txt: Permission denied
+```
+
+So `report_findings` **cannot** write `findings.json` regardless of whether Pi
+called it. Full analysis + fix options in `task_a749`.
+
+### Acceptance, item by item
+
+- **"gets past the `setpriv … pi` exec and Pi actually starts"** — **PASS**,
+  observed directly.
+- **"No regression to crun-tier PATH/env handling"** — **PASS**: branch suite
+  green, and after restore the host's crun floor resolves and serves normally.
+- **"Confirm end-to-end: `findings.json` … one `COMMENT` review posted,
+  telemetry record, cleanup"** — **NOT MET**, and not because of this fix.
+  `findings.json` was never written (task_a749). A review WAS posted (failure
+  note), a telemetry record WAS written (`outcome: "error"`), and
+  workspace/gateway-key cleanup both ran (`workspace-cleaned`,
+  `gateway-key-revoked` observed).
+
+### Observed-vs-inferred caveats (honest scope)
+
+- The live job's **guest entrypoint stderr was never captured**: `reviewer.ts`
+  only surfaces `stderrTail` when the container exits NON-ZERO, and this run
+  exited 0. So the ordered `magpie-reviewer:` log sequence for the live PR #65
+  job is NOT available; the sequence and the MemTotal line above come from a
+  manual `magpie-krun-launch` reproduction against the identical rootfs. What IS
+  from the live job: the tier resolution, `pi run complete`, the telemetry
+  record, the published comment, and the cleanup events.
+- Whether Pi called `report_findings` and hit EACCES, or never called it, was
+  **not separately observed** — for the same stderr reason. What is PROVEN is
+  that the write could not have succeeded either way.
+
+### Host restored (verified, not assumed)
+
+Scratch PR #65 closed + branch deleted. `/etc/magpie/config.toml` restored from
+`config.toml.bak-e4-1785472853` and `diff`'d byte-identical (no `rootfs_path`,
+0.2.0 digest, `require_memory_limit = true`, `tier = "crun"`). `/opt/magpie`
+orchestrator `dist` restored from `dist.bak-e4-1785472824` and `diff -r`'d
+identical (69 files, `MAGPIE_MICROVM_RAM_MIB` absent), backup dir then removed.
+Services `magpie`/`magpie-gateway`/`cloudflared` all active; `/healthz`
+`resolvedTier: "crun"`, `degraded: false`. Local `magpie-reviewer:e4` image and
+`/var/lib/magpie/reviewer-rootfs-e4` deleted.
+
+**Cleanup misstep, corrected:** an over-broad `podman image prune -af` in the
+`magpie` user's store also removed the pre-existing pinned reviewer images
+(0.2.0 and the 0.3.0 leftover from M8-E1). Both were re-pulled by digest to
+restore the as-found state; `operator`'s separate podman store was untouched.
+Prefer targeted `podman rmi <id>` over `prune -af` on this host.
