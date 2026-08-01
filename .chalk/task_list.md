@@ -5,7 +5,6 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 
 - **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 - **task_0208** · P2 · open · M8-E8: audit the reviewer image-config surface the micro-VM guest silently drops  (parent: epic_59b1)
-- **task_46c1** · P2 · open · M8-F: clean reinstall of magpie on the Pi host from fresh v0.3.1 releases  (parent: epic_59b1)
 - **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, gVisor, multi-provider)
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
 - **task_624d** · P3 · open · gVisor (runsc) middle tier — deferred per CTO decision 4  (parent: epic_59b1)

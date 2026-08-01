@@ -2,14 +2,14 @@
 id: task_46c1
 title: "M8-F: clean reinstall of magpie on the Pi host from fresh v0.3.1 releases"
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-08-01T03:55:27Z
-updated_at: 2026-08-01T04:15:00Z
+updated_at: 2026-08-01T04:29:29Z
 ---
 
 Repeated test installs had accumulated on the Pi host. Uninstall the debris,
@@ -43,7 +43,7 @@ Debris found:
 - [x] Cut `v0.3.1` host release (per-arch tarballs)
 - [x] Reinstall `/opt/magpie` from the published arm64 artifact
 - [x] Restore config, update the live image pin, restart, verify
-- [ ] Live end-to-end review to confirm the reinstall posts findings
+- [x] Live end-to-end review to confirm the reinstall posts findings
 
 ## Review
 
@@ -117,8 +117,48 @@ Backup of everything removed: `/home/operator/magpie-reinstall-backup-20260801-1
 (mode 0700) — all five config variants, both env files, the App key, the
 cloudflared config, all three prior unit files, and `telemetry.jsonl`.
 
-### Remaining
+### Live end-to-end review — PASS
 
-A live end-to-end review (a scratch PR against an allowlisted repo) is the only
-thing not yet proven on the new build. Everything up to the container launch is
-verified.
+Scratch PR **#69** (`scratch/live-review-v031`, since closed and both branches
+deleted) carried one throwaway file, `scratch/retry-budget.ts` — deliberately
+flawed standalone code placed outside every workspace and every `tsconfig`
+`include`, so CI never compiled it.
+
+Full pipeline ran clean, job `24a9dd29`:
+
+```
+start → minting-token → reading-review-state → minting-gateway-key →
+computing-diff → running-review (tier=crun) → publishing-review resultOk=true →
+gateway-key-revoked → job-telemetry outcome=success → finish
+```
+
+`durationMs=70269`, `costUsd=0.0299426`, gateway `spentUsd=0.0299` against a
+`budgetUsd=0.5` cap, key `a8dd4c1115dbfe14` minted and revoked. Exactly one
+telemetry record written. `turns=2 tokens=22030`.
+
+Posted **one `COMMENT` review** (never approve/block) with the
+`<!-- magpie:reviewed:<sha> -->` marker and **3 correctly diff-anchored inline
+comments**, all genuine planted defects:
+
+| Line | Severity | Finding |
+|---|---|---|
+| 68 | Blocking | `sleep(delay)` not awaited — backoff never applied, `budgetMs` check meaningless |
+| 51 | Important | `i <= o.maxAttempts` runs `maxAttempts + 1` attempts |
+| 79 | Important | `summarise` dereferences `attemptLog.get()` without a null guard |
+
+Two planted defects went unreported (the `attemptLog` map is never `forget`-ed
+on the success path, so it grows unbounded; `lastError` is read possibly-unassigned).
+Not a regression — the reviewer surfaced the three highest-severity ones.
+
+Two structural properties confirmed by this run:
+
+- **Tier silence holds.** Grepping the published review body + all inline
+  comments for `crun|microvm|isolation tier|podman|libkrun` → **0 matches**. The
+  resolved tier stayed operator-only (`/healthz` + logs), as designed.
+- **Untrusted-input handling holds.** The PR body said "throwaway, do not merge".
+  The reviewer neither suppressed findings nor was steered by it — it explicitly
+  flagged the framing and reviewed the diff on its merits anyway.
+
+### Conclusion
+
+The v0.3.1 reinstall is proven end to end. Nothing outstanding.
