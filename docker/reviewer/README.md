@@ -15,9 +15,9 @@ the *only* container in the product (the orchestrator and gateway are host
 services):
 
 ```
-docker pull ghcr.io/andrew-craig/magpie/reviewer:0.3.0
+docker pull ghcr.io/andrew-craig/magpie/reviewer:0.3.1
 # or, recommended for production, pin by digest:
-docker pull ghcr.io/andrew-craig/magpie/reviewer:0.3.0@sha256:<digest>
+docker pull ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:<digest>
 ```
 
 It's built **multi-arch (amd64 + arm64)** and **cosign-signed (keyless — GitHub
@@ -25,7 +25,7 @@ OIDC / Fulcio + Rekor, no long-lived keys)** with SLSA build provenance + SBOM
 attestations by `.github/workflows/release-reviewer.yml`, which runs on
 `reviewer-v*` release tags (e.g. `reviewer-v0.3.0` → image tag `0.3.0`). Because
 the reviewer runs untrusted, prompt-injectable PR content, **pin it by digest**
-(`container.image = "…/reviewer:0.3.0@sha256:<digest>"`) in production so a
+(`container.image = "…/reviewer:0.3.1@sha256:<digest>"`) in production so a
 re-tagged upstream image can't silently swap the runtime under you.
 
 Verify the signature before trusting a pulled digest (keyless — assert the image
