@@ -65,8 +65,16 @@ set -euo pipefail
 # NOT a runtime input: MAGPIE_FINDINGS_PATH. The output path is part of the
 # image contract (always /out/findings.json, the mounted output dir) and is
 # baked into the Dockerfile via `ENV MAGPIE_FINDINGS_PATH=/out/findings.json`,
-# so the baked-in report_findings extension already sees it -- this script
-# neither reads nor requires it.
+# so the baked-in report_findings extension already sees it -- the caller
+# never passes it.
+#
+# ...UNDER THE CRUN TIER. M8-E7 (task_80a4): that ENV only reaches the process
+# because `podman run` applies the image's OCI config. A micro-VM guest boots a
+# bare exported rootfs with NO image config, so this script RE-DECLARES the
+# same constant for that tier further down (next to M8-E4's PATH export). Left
+# unset there, the extension silently fell back to ./magpie-findings.json under
+# the READ-ONLY /work mount and every micro-VM review failed as "pi did not
+# call report_findings" despite Pi having called it.
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (-e OPENROUTER_API_KEY=...) -- see docker/reviewer/README.md}"
 : "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set (-e OPENAI_BASE_URL=<gateway proxy URL>) -- see docker/reviewer/README.md}"
@@ -76,6 +84,125 @@ set -euo pipefail
 # value if somehow unset (e.g. an older orchestrator, or this image run by
 # hand) so an *absent* env var can never accidentally mean "run unconfined".
 : "${MAGPIE_REQUIRE_MEMORY_LIMIT:=true}"
+
+# ---------------------------------------------------------------------------
+# M8-E3 (task_2541): early, cheap tier detection.
+#
+# MUST run before the memory-ceiling assertion just below, because that
+# check's correct MEANING differs by tier (see that section's comment for
+# the full story): the crun tier enforces RAM via a cgroup v2 `memory.max`
+# ceiling, which is readable from inside the container; the micro-VM tier
+# enforces RAM via libkrun's `--ram-mib` at the VMM level, so the guest never
+# has a `/sys/fs/cgroup/memory.max` to read AT ALL -- not a misconfiguration,
+# a structurally different (and equally valid) enforcement mechanism. Without
+# knowing the tier first, the memory check can't tell "cgroup absent because
+# this is a micro-VM guest" from "cgroup absent because a crun-tier host
+# misconfigured cgroups" (the real bug_df2d scenario it exists to catch).
+#
+# This is the SAME `/dev/vsock` probe the relay-selection block further down
+# this script uses (a plain char-device present iff the launcher attached a
+# vsock device, which only happens under the micro-VM tier -- see that
+# block's own doc comment for the full rationale). Factored out here, ahead
+# of everything that depends on it, and REUSED (not re-probed) down there --
+# a single source of truth for which tier this run is, set once, this early.
+if [ -c /dev/vsock ]; then
+  MAGPIE_IS_MICROVM=1
+else
+  MAGPIE_IS_MICROVM=0
+fi
+
+# ---------------------------------------------------------------------------
+# M8-E4 (task_4c37): give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
+#
+# The crun tier inherits PATH for free from the image's OCI config: the
+# node:22.23.1-slim base sets it, `docker/reviewer/Dockerfile` symlinks
+# `/opt/magpie/review-extension/node_modules/.bin/pi` onto `/usr/local/bin/pi`,
+# and `podman run` exports the resulting PATH into the container. A micro-VM
+# guest gets NONE of that: the launcher boots a BARE EXPORTED ROOTFS, which
+# carries no OCI config at all, and rust/magpie-microvm-launcher's `cli.rs`
+# builds the guest environment from an initially-EMPTY vec populated only by
+# explicit `--env` flags (the `PATH=` strings visible in that crate's cli.rs/
+# config.rs are TEST FIXTURES, not runtime defaults). So the guest has
+# historically booted with PATH genuinely unset.
+#
+# WHY THAT STAYED HIDDEN until the M8-E2/E3 fixes cleared the earlier
+# blockers, and WHY `export` (not a value default) is the operative fix --
+# this is subtle, and getting it wrong yields a no-op:
+#
+#   When PATH is absent from its environment, `bash` does NOT run without one.
+#   It assigns its own compiled-in default to the PATH SHELL VARIABLE at
+#   startup (empirically, on this image's bash:
+#   `/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:.`). That is
+#   why every bare command this script runs (mount, chown, setpriv, timeout,
+#   seq, awk ...) resolved fine all along. But that variable is NOT MARKED FOR
+#   EXPORT, so it is still absent from the environment handed to child
+#   processes. `setpriv`, at the very bottom of this script, `execvp`s `pi`
+#   ITSELF -- and glibc's execvp with no PATH in the environment falls back to
+#   confstr(_CS_PATH) == "/bin:/usr/bin", which does NOT include
+#   /usr/local/bin, so `pi` was not found:
+#
+#     setpriv: failed to execute pi: No such file or directory
+#
+#   Consequently a `PATH="${PATH:-...}"` style default would be DEAD CODE
+#   here (bash already made PATH non-empty); it is the `export` that actually
+#   fixes anything. `docker/reviewer/entrypoint-tier-memory.test.sh`'s
+#   task_4c37 cases pin exactly this, running the script with PATH genuinely
+#   absent from the environment.
+#
+# Set UNCONDITIONALLY (within the micro-VM branch) to an explicit literal
+# rather than re-exporting whatever bash happened to invent: bash's built-in
+# default is an implementation detail that varies by build and is not
+# something a fail-closed security script should depend on for finding the
+# binary it is about to hand control to. /usr/local/bin is listed first --
+# that is where the Dockerfile symlinks `pi`. Placed right after tier
+# detection, ahead of everything that could need it, so any later addition to
+# this script inherits a sane PATH too. Guarded on MAGPIE_IS_MICROVM so the
+# crun tier's environment -- which already gets a correct, exported PATH from
+# the image's OCI config -- is untouched, byte for byte.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+
+# ---------------------------------------------------------------------------
+# M8-E7 (task_80a4): re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
+#
+# EXACTLY the same root cause as the PATH gap immediately above, in a second
+# variable: `docker/reviewer/Dockerfile` sets
+# `ENV MAGPIE_FINDINGS_PATH=/out/findings.json`, and the crun tier gets it for
+# free because `podman run` applies the image's OCI config. A micro-VM guest
+# boots a BARE EXPORTED ROOTFS with no OCI config at all, so it gets ONLY the
+# explicit `--env` pairs the launcher was given -- and this one was never
+# among them.
+#
+# Unlike PATH, nothing masked it: the baked report_findings extension
+# (packages/review-extension) read an unset var, took its documented fallback,
+# and wrote `./magpie-findings.json` relative to its cwd (`/work`, the
+# READ-ONLY PR mount) instead of the mounted output dir. The orchestrator then
+# found no `/out/findings.json` and reported the generic "pi did not call
+# report_findings" -- even though Pi had run and called the tool. Observed
+# live on 2026-07-31 (scratch PR #66), and only visible at all because M8-E6
+# (task_e5c4) had just started surfacing guest stderr on zero-exit failures:
+#
+#   [magpie/review-extension] MAGPIE_FINDINGS_PATH is not set; falling back to
+#   ./magpie-findings.json in the current working directory.
+#
+# Fixed HERE rather than in reviewer.ts's `--env` map, for the same reason
+# M8-E4 chose this file, and for one more specific to this variable: the
+# Dockerfile documents the output path as "part of the image contract, not
+# per-job config", explicitly so the orchestrator does NOT have to pass it.
+# Re-declaring the image's own constant inside the image keeps that contract
+# intact and keeps a hand-launched/manually-exported rootfs working too.
+# Guarded on MAGPIE_IS_MICROVM so the crun tier keeps taking the value from
+# the image config, byte for byte, exactly as before.
+#
+# The literal is deliberately duplicated from the Dockerfile's ENV rather than
+# derived: there is no way for a bare rootfs to read its own image config, so
+# a single source of truth is not available at this layer. The pairing is
+# pinned by docker/reviewer/entrypoint-tier-memory.test.sh, which asserts this
+# value matches the Dockerfile's ENV line.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  export MAGPIE_FINDINGS_PATH=/out/findings.json
+fi
 
 # ---------------------------------------------------------------------------
 # bug_df2d: fail-closed in-container memory-ceiling assertion. reviewer.ts
@@ -112,18 +239,92 @@ set -euo pipefail
 # uses (it never passes --cgroupns=host). Under --cgroupns=host this would read
 # the host ROOT cgroup's memory.max ("max") and false-positive; don't add that
 # flag without revisiting this check.
-magpie_memory_max_raw=""
-if [ -r /sys/fs/cgroup/memory.max ]; then
-  magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
-fi
-
-if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
-  magpie_memory_unenforced_detail="could not verify an enforced memory ceiling: /sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} (expected a finite byte count). The --memory limit this container was launched with is either unenforced (the host silently discarded it) or unverifiable here (e.g. a legacy cgroup v1 host -- Magpie requires the cgroup v2 unified hierarchy)"
-  if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
-    echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
-  else
-    echo "magpie-reviewer: refusing to run: ${magpie_memory_unenforced_detail}. Set [container] require_memory_limit = false in the orchestrator's config.toml if you understand the risk and want to run anyway (see INSTALL.md/QUICKSTART.md for how to enable the memory controller on your host instead). Aborting before Pi starts." >&2
+#
+# M8-E3 (task_2541): this whole cgroup-based check is CRUN-TIER ONLY --
+# MAGPIE_IS_MICROVM was decided above, before this block, precisely so this
+# branch can be taken. The micro-VM tier's equivalent verification (a
+# positive check that libkrun's --ram-mib ceiling actually applied, since
+# there is no cgroup to read at all in that guest) lives in the `else`
+# branch below -- see its own comment for the full rationale and the chosen
+# tolerance.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
+  # ---------------------------------------------------------------------------
+  # M8-E3 (task_2541): micro-VM tier memory-ceiling verification.
+  #
+  # RAM here is enforced by libkrun's `--ram-mib` at the VMM level
+  # (rust/magpie-microvm-launcher's krun_set_vm_config) -- the guest kernel
+  # boots knowing only about that much memory in the first place, so there is
+  # no cgroup memory.max to read inside the guest at all (a structural fact
+  # about this tier, not a misconfiguration -- see task_2541's background:
+  # this is exactly what made the crun-tier check above false-fail here,
+  # forcing operators to globally set require_memory_limit=false and thereby
+  # ALSO weaken the crun tier's real protection, which is the bug this task
+  # fixes).
+  #
+  # So instead of skipping verification, this proves SOME ceiling was really
+  # applied: reviewer.ts injects the exact ram-mib value the launcher was
+  # told to boot this guest with as a non-secret inline env var,
+  # MAGPIE_MICROVM_RAM_MIB (see buildMicrovmLaunchArgs's `env` map / the
+  # runReview call site) -- this script cross-checks the guest's OWN view of
+  # its memory (/proc/meminfo's MemTotal) against that expected value.
+  #
+  # TOLERANCE: a guest's MemTotal is always somewhat LESS than the configured
+  # ram-mib (firmware/kernel-reserved regions -- a few MiB, never more). The
+  # failure mode this check defends against is the OPPOSITE direction:
+  # MemTotal being far LARGER than configured, which would mean the ram-mib
+  # ceiling silently didn't apply (e.g. a launcher regression that dropped
+  # --ram-mib) and the guest actually sees ~all host RAM. So a 5% headroom
+  # above the configured ram-mib (rounding/reporting slop only -- MemTotal is
+  # never expected to exceed ram-mib by more than that) is accepted; anything
+  # above that is treated as an unenforced ceiling and aborts. Fail closed if
+  # MAGPIE_MICROVM_RAM_MIB is unset/non-numeric/non-positive, or if
+  # /proc/meminfo's MemTotal can't be read/parsed -- exactly the same
+  # "unverifiable is not enforced" posture as the crun-tier check above.
+  case "${MAGPIE_MICROVM_RAM_MIB:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_RAM_MIB is unset or non-numeric (${MAGPIE_MICROVM_RAM_MIB:-unset}) -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  if [ "${MAGPIE_MICROVM_RAM_MIB}" -le 0 ]; then
+    echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_RAM_MIB (${MAGPIE_MICROVM_RAM_MIB}) is not a positive value -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
     exit 1
+  fi
+
+  magpie_mem_total_kib=""
+  if [ -r /proc/meminfo ]; then
+    magpie_mem_total_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+  fi
+  case "${magpie_mem_total_kib:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: /proc/meminfo's MemTotal is missing or unparsable (${magpie_mem_total_kib:-absent}) -- cannot verify the micro-VM's memory ceiling was actually enforced. Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+
+  # Compare in KiB throughout (MemTotal's own unit) to avoid fractional-MiB
+  # arithmetic in POSIX integer shell math: ram_mib MiB * 1.05 headroom,
+  # expressed directly in KiB as ram_mib * 1024 * 105 / 100.
+  magpie_mem_ceiling_kib=$(( MAGPIE_MICROVM_RAM_MIB * 1024 * 105 / 100 ))
+  if [ "${magpie_mem_total_kib}" -gt "${magpie_mem_ceiling_kib}" ]; then
+    echo "magpie-reviewer: refusing to run: guest MemTotal (${magpie_mem_total_kib} KiB) exceeds what MAGPIE_MICROVM_RAM_MIB=${MAGPIE_MICROVM_RAM_MIB} should allow (expected at most ~${magpie_mem_ceiling_kib} KiB) -- the VMM-level memory ceiling does not appear to have been enforced. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM memory ceiling verified -- guest MemTotal ${magpie_mem_total_kib} KiB is within the expected bound for MAGPIE_MICROVM_RAM_MIB=${MAGPIE_MICROVM_RAM_MIB}" >&2
+else
+  magpie_memory_max_raw=""
+  if [ -r /sys/fs/cgroup/memory.max ]; then
+    magpie_memory_max_raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+  fi
+
+  if [ -z "${magpie_memory_max_raw}" ] || [ "${magpie_memory_max_raw}" = "max" ]; then
+    magpie_memory_unenforced_detail="could not verify an enforced memory ceiling: /sys/fs/cgroup/memory.max is ${magpie_memory_max_raw:-absent/unreadable} (expected a finite byte count). The --memory limit this container was launched with is either unenforced (the host silently discarded it) or unverifiable here (e.g. a legacy cgroup v1 host -- Magpie requires the cgroup v2 unified hierarchy)"
+    if [ "${MAGPIE_REQUIRE_MEMORY_LIMIT}" = "false" ]; then
+      echo "magpie-reviewer: WARNING: ${magpie_memory_unenforced_detail}. MAGPIE_REQUIRE_MEMORY_LIMIT=false, so continuing anyway with an UNENFORCED memory ceiling -- this review job could consume unbounded host memory." >&2
+    else
+      echo "magpie-reviewer: refusing to run: ${magpie_memory_unenforced_detail}. Set [container] require_memory_limit = false in the orchestrator's config.toml if you understand the risk and want to run anyway (see INSTALL.md/QUICKSTART.md for how to enable the memory controller on your host instead). Aborting before Pi starts." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -233,12 +434,13 @@ esac
 # implicit fact about a binary it doesn't control the source of.
 readonly MAGPIE_EXPECTED_VSOCK_PORT=1234
 
-# MAGPIE_IS_MICROVM captures the same /dev/vsock tier signal used to pick a
-# relay above, in a variable, for reuse further down this script (the
-# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff -- need the
-# same tier decision and shouldn't re-derive it via a second `[ -c
-# /dev/vsock ]` probe scattered elsewhere).
-if [ -c /dev/vsock ]; then
+# MAGPIE_IS_MICROVM was already decided (M8-E3, task_2541) via a cheap `[ -c
+# /dev/vsock ]` probe near the top of this script, ahead of the memory-
+# ceiling check above (which needs the tier to pick its verification
+# strategy) -- REUSED here, not re-derived, and further reused below (the
+# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff) so there is
+# exactly one `[ -c /dev/vsock ]` probe in the whole script.
+if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port ${MAGPIE_EXPECTED_VSOCK_PORT})" >&2
   # `export` (not a one-shot `VAR=value cmd` prefix) so MAGPIE_VSOCK_PORT is
   # BOTH inherited by the backgrounded vsock-client below AND still readable
@@ -249,12 +451,10 @@ if [ -c /dev/vsock ]; then
   export MAGPIE_VSOCK_PORT="${MAGPIE_EXPECTED_VSOCK_PORT}"
   /opt/magpie/vsock-client &
   MAGPIE_FORWARDER_PID=$!
-  MAGPIE_IS_MICROVM=1
 else
   echo "magpie-reviewer: starting forwarder.mjs (127.0.0.1:4000 -> /run/gw/gw.sock)" >&2
   node /opt/magpie/forwarder.mjs /run/gw/gw.sock &
   MAGPIE_FORWARDER_PID=$!
-  MAGPIE_IS_MICROVM=0
 fi
 
 # ---------------------------------------------------------------------------
@@ -282,6 +482,32 @@ fi
 # passes read_only=true to krun_add_virtiofs3) -- the same "the PR checkout
 # is never guest-writable" invariant the crun tier gets from its `:ro` bind
 # mount.
+#
+# M8-E2 (task_76b8): this block ALSO mounts a guest-LOCAL tmpfs at /tmp,
+# mirroring the crun tier's own `--tmpfs /tmp` (see reviewer.ts's
+# buildReviewDockerArgs). Without this, `/tmp` here resolves to whatever the
+# guest's ROOT filesystem is -- served over rootless virtiofs the same way
+# `/work`/`/out` are attached as devices above -- and rootless virtiofs maps
+# guest-root's uid back to the unprivileged HOST user that launched the
+# micro-VM, so guest-root does not actually have chown authority over paths
+# living on it. That surfaced as the privilege-drop step below (its
+# `chown -R … "$HOME/.pi"`, which at the time targeted the baked-in 10001
+# account) failing with EPERM on `/tmp/.pi` -- not a Magpie
+# logic bug, a known category of rootless-VMM limitation. Mounting a plain
+# guest-local tmpfs here makes `/tmp` a normal in-guest filesystem again,
+# where chown-by-guest-root works exactly like it does under the crun
+# tier's own `--tmpfs /tmp`.
+#
+# ORDERING: this MUST happen before anything writes under `/tmp` -- in
+# particular before `$HOME/.pi/agent/models.json` is written and before the
+# chown/privilege-drop below, both much further down this script -- so the
+# tmpfs is empty and freshly mounted the first time either happens. It does
+# NOT need to happen before /work or /out are mounted (no ordering
+# dependency between the three), so it's placed last in this block purely
+# for readability. Fail-closed like the two mounts above: if `/tmp` can't be
+# made a normal writable filesystem here, the privilege drop (and anything
+# else that writes under HOME=/tmp) would fail later anyway, so abort now
+# with a clear cause rather than a confusing chown error mid-script.
 # ---------------------------------------------------------------------------
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: micro-VM tier -- mounting /work + /out virtiofs devices" >&2
@@ -292,6 +518,12 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   fi
   if ! mount -t virtiofs out /out; then
     echo "magpie-reviewer: refusing to run: failed to mount the writable /out virtiofs device (tag 'out') -- the reviewer would have nowhere to write findings.json. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)" >&2
+  mkdir -p /tmp
+  if ! mount -t tmpfs tmpfs /tmp; then
+    echo "magpie-reviewer: refusing to run: failed to mount a guest-local tmpfs at /tmp -- HOME=/tmp below would remain on the virtiofs-backed root, where guest-root's remapped uid cannot chown the state Pi writes there before the privilege drop. Aborting before Pi starts." >&2
     exit 1
   fi
 fi
@@ -618,17 +850,23 @@ set -- \
 # HOST-side VMM process, NOT the guest -- the guest boots (and, until this
 # point, runs this script) as root (fully documented, source + empirically,
 # in rust/magpie-microvm-launcher/src/krun.rs's module doc comment). So the
-# equivalent of `--user` has to happen HERE, image-side: re-exec Pi as the
-# baked-in unprivileged `reviewer` account (uid/gid 10001 -- see
-# docker/reviewer/Dockerfile's groupadd/useradd), matching the crun tier's
-# non-root posture. `setpriv` (util-linux) does a pure privilege drop with no
+# equivalent of `--user` has to happen HERE, image-side: re-exec Pi as an
+# unprivileged uid, matching the crun tier's non-root posture. As of M8-E5
+# (task_a749) that uid is the one the ORCHESTRATOR passes in
+# (MAGPIE_MICROVM_REVIEWER_UID/_GID) -- the same host uid the crun tier's
+# `--user` uses -- NOT the image's baked-in `reviewer` account (uid 10001,
+# docker/reviewer/Dockerfile's groupadd/useradd, which the crun tier still
+# carries as its own default non-root identity). See the fail-closed block
+# further down for why the baked account cannot be used at this tier.
+# `setpriv` (util-linux) does a pure privilege drop with no
 # PAM/login/shell in between and `exec`s straight into Pi, so Pi still
 # receives SIGTERM/SIGKILL directly (the timeout/abort path -- see reviewer.ts's
 # startKillSequence, which for this tier kills the launcher process == the VM).
 # Only the setpriv WRAPPER differs between the tiers; the `pi` argv ("$@",
 # built just above) is shared.
 #
-#   --reuid/--regid 10001         drop real+effective+saved id to `reviewer`
+#   --reuid/--regid <uid>:<gid>   drop real+effective+saved id to the
+#                                   orchestrator-supplied unprivileged id
 #   --clear-groups                 shed root's supplementary groups
 #   --no-new-privs                 set PR_SET_NO_NEW_PRIVS (mirrors the crun
 #                                   tier's --security-opt=no-new-privileges)
@@ -638,10 +876,74 @@ set -- \
 # it is a fixed, deployment-wide URL, never a per-job credential (the gateway
 # key reaches Pi only via the OPENROUTER_API_KEY env var, which survives the
 # setpriv exec since setpriv does not scrub the environment).
+#
+# M8-E2 (task_76b8): this chown only works at all under the micro-VM tier
+# because HOME=/tmp is, by this point, the guest-local tmpfs mounted earlier
+# in this script (see the virtiofs-mount block above) rather than the
+# virtiofs-backed guest root -- guest-root cannot chown paths living on
+# rootless virtiofs (its uid is remapped back to the unprivileged HOST user
+# by the rootless krun setup), which is exactly the EPERM this task fixes.
+#
+# M8-E5 (task_a749): the uid/gid dropped TO is now supplied by the
+# orchestrator (MAGPIE_MICROVM_REVIEWER_UID/_GID -- see reviewer.ts's
+# buildMicrovmLaunchArgs `env` map) instead of being the image's baked-in
+# `reviewer` account (uid 10001, still present in the Dockerfile and still
+# used by the crun tier's own non-root posture). It has to be, because of
+# who owns the OTHER side of the /out virtiofs:
+#
+#   `/out` is a virtiofs view of the host directory container-mounts.ts's
+#   createOutputDir makes with `mkdtemp`, i.e. mode 0700 owned by the
+#   ORCHESTRATOR's uid. The crun tier never noticed, because `docker run
+#   --user <uid>:<gid>` runs the whole container as that same host uid, so Pi
+#   owns what it writes. Here, the guest boots as root and drops on its own --
+#   and dropping to 10001, a uid with no relationship whatsoever to the host
+#   uid owning those files, meant Pi saw `/out` as `drwx------ <hostuid>
+#   <hostgid>` and got EACCES on findings.json. Every micro-VM review failed
+#   as "pi did not call report_findings" regardless of what Pi actually did.
+#
+# Fixing it by widening /out's mode host-side, or by chowning /out here, were
+# both rejected: the first loosens permissions on a host directory to paper
+# over an identity mismatch, and the second is the same rootless-virtiofs
+# chown that already produced M8-E2's EPERM (guest-root's uid is remapped back
+# to the unprivileged host user for virtiofs ownership purposes -- see the
+# tmpfs block above). Aligning the IDENTITY is the fix that removes the
+# mismatch instead of masking it.
+#
+# POSTURE IS PRESERVED, AND NOW UNIFIED: this is still a drop from guest-root
+# to an unprivileged, non-root uid before Pi ever runs -- the same drop, to the
+# same uid the crun tier has always used. The two tiers' reviewer identity is
+# now IDENTICAL rather than divergent. Note the guest is a separate kernel with
+# its own uid space; "the host's uid" here is a number chosen so the shared
+# virtiofs files line up, and it is unprivileged on both sides.
+#
+# FAIL CLOSED on unset / non-numeric / zero, and NEVER fall back to 10001 --
+# that fallback is now known-broken for /out, and silently taking it would
+# resurrect exactly the silent-failure mode this fixes. Zero is rejected
+# separately and loudly: uid 0 would mean running Pi -- the thing that
+# processes untrusted PR content -- as guest-root, discarding the entire point
+# of this block. (No passwd entry exists in the guest for the host's uid, and
+# none is needed: setpriv takes numeric ids, and HOME is force-set to /tmp
+# above rather than resolved via getpwuid.)
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
-  echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid 10001 (reviewer) before exec pi" >&2
-  chown -R 10001:10001 "$HOME/.pi"
-  exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs pi "$@"
+  case "${MAGPIE_MICROVM_REVIEWER_UID:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_UID:-unset}) -- cannot determine the unprivileged uid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  case "${MAGPIE_MICROVM_REVIEWER_GID:-}" in
+    ''|*[!0-9]*)
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_GID:-unset}) -- cannot determine the unprivileged gid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      exit 1
+      ;;
+  esac
+  if [ "${MAGPIE_MICROVM_REVIEWER_UID}" -eq 0 ] || [ "${MAGPIE_MICROVM_REVIEWER_GID}" -eq 0 ]; then
+    echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID/_GID resolve to root (${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID}) -- Pi must never run as root in the guest, which is the entire purpose of this privilege drop. Aborting before Pi starts." >&2
+    exit 1
+  fi
+  echo "magpie-reviewer: micro-VM tier -- dropping to uid/gid ${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID} (the orchestrator's own unprivileged uid, matching the crun tier's --user and the /out virtiofs owner) before exec pi" >&2
+  chown -R "${MAGPIE_MICROVM_REVIEWER_UID}:${MAGPIE_MICROVM_REVIEWER_GID}" "$HOME/.pi"
+  exec setpriv --reuid="${MAGPIE_MICROVM_REVIEWER_UID}" --regid="${MAGPIE_MICROVM_REVIEWER_GID}" --clear-groups --no-new-privs pi "$@"
 fi
 
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly

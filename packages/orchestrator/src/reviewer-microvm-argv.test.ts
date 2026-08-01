@@ -33,6 +33,12 @@ const GOLDEN_INPUT = {
   env: {
     OPENAI_BASE_URL: "http://127.0.0.1:4000/v1",
     MAGPIE_REQUIRE_MEMORY_LIMIT: "true",
+    MAGPIE_MICROVM_RAM_MIB: "1024",
+    // M8-E5 (task_a749): the uid/gid entrypoint.sh drops to in the guest.
+    // Deliberately equal to `uid`/`gid` above — that equality IS the fix (see
+    // the dedicated test below and reviewer.ts's call site).
+    MAGPIE_MICROVM_REVIEWER_UID: "10001",
+    MAGPIE_MICROVM_REVIEWER_GID: "10001",
   },
   vsockPort: 1234,
   vsockUdsPath: "/run/magpie-gateway/jobs/job-1/gw.sock",
@@ -82,6 +88,12 @@ describe("buildMicrovmLaunchArgs", () => {
       "OPENAI_BASE_URL=http://127.0.0.1:4000/v1",
       "--env",
       "MAGPIE_REQUIRE_MEMORY_LIMIT=true",
+      "--env",
+      "MAGPIE_MICROVM_RAM_MIB=1024",
+      "--env",
+      "MAGPIE_MICROVM_REVIEWER_UID=10001",
+      "--env",
+      "MAGPIE_MICROVM_REVIEWER_GID=10001",
       "--vsock-port",
       "1234",
       "--vsock-uds",
@@ -104,6 +116,39 @@ describe("buildMicrovmLaunchArgs", () => {
     const argv = buildMicrovmLaunchArgs({ ...GOLDEN_INPUT, workMountTag: "pr", outMountTag: "findings" });
     expect(argv[argv.indexOf("--work-mount") + 1]).toBe("/var/lib/magpie/work/job-1:pr");
     expect(argv[argv.indexOf("--out-mount") + 1]).toBe("/var/lib/magpie/work/job-1-out:findings");
+  });
+
+  // M8-E3 (task_2541): entrypoint.sh cross-checks this inline env var against
+  // the guest's own /proc/meminfo MemTotal as its positive proof that
+  // libkrun's --ram-mib ceiling (the SAME ramMib value, passed a few flags
+  // earlier) actually applied — see reviewer.ts's runReview call site and
+  // that script's memory-ceiling section. Pinned separately from the golden
+  // array above so a future refactor that renamed/dropped this key gets a
+  // targeted failure, not just a golden-array diff.
+  it("passes the configured ram-mib as the non-secret MAGPIE_MICROVM_RAM_MIB inline env var", () => {
+    const argv = buildMicrovmLaunchArgs({ ...GOLDEN_INPUT });
+    const idx = argv.indexOf("MAGPIE_MICROVM_RAM_MIB=1024");
+    expect(idx).toBeGreaterThan(0);
+    expect(argv[idx - 1]).toBe("--env");
+  });
+
+  // M8-E5 (task_a749): pinned separately from the golden array so a rename or
+  // drop of either key gets a targeted failure. The value equality with
+  // --uid/--gid is what matters — see reviewer.ts's call site, which binds both
+  // from the same `hostUid`/`hostGid` locals, and reviewer.test.ts's
+  // runReview-level assertion against the real process uid.
+  it("passes the reviewer uid/gid as inline env vars matching --uid/--gid", () => {
+    const argv = buildMicrovmLaunchArgs({ ...GOLDEN_INPUT });
+    const flagUid = argv[argv.indexOf("--uid") + 1];
+    const flagGid = argv[argv.indexOf("--gid") + 1];
+
+    const uidIdx = argv.indexOf(`MAGPIE_MICROVM_REVIEWER_UID=${flagUid}`);
+    expect(uidIdx).toBeGreaterThan(0);
+    expect(argv[uidIdx - 1]).toBe("--env");
+
+    const gidIdx = argv.indexOf(`MAGPIE_MICROVM_REVIEWER_GID=${flagGid}`);
+    expect(gidIdx).toBeGreaterThan(0);
+    expect(argv[gidIdx - 1]).toBe("--env");
   });
 
   it("uses --env-from-host (name only) for OPENROUTER_API_KEY, never --env with a value", () => {

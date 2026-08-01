@@ -92,11 +92,20 @@ COPY packages/review-extension/src ./src
 COPY reviewer-prompt.md /opt/magpie/reviewer-prompt.md
 
 # Non-root user, defence-in-depth only. The image must NOT depend on running
-# as this user: M3-C (the orchestrator's docker runner) overrides with
-# `--user <hostuid>:<hostgid>` so the mounted `/out` dir (owned by the host
-# orchestrator process) stays writable -- see epic_a580 decision #4. uid/gid
-# 10001 chosen to avoid the base image's existing `node` user (uid 1000) and
-# common host uid ranges.
+# as this user, and at runtime NEITHER TIER actually does -- both run as the
+# host orchestrator's own uid, precisely so the mounted `/out` dir (owned by
+# that host process) stays writable:
+#   - crun:     M3-C's docker runner overrides with `--user <hostuid>:<hostgid>`
+#               (see epic_a580 decision #4).
+#   - micro-VM: entrypoint.sh's privilege drop targets the same host uid,
+#               supplied as MAGPIE_MICROVM_REVIEWER_UID/_GID. It deliberately
+#               does NOT drop to this baked account: uid 10001 has no relation
+#               to the host uid owning the /out virtiofs, so Pi got EACCES on
+#               findings.json and every micro-VM review silently failed
+#               (M8-E5 / task_a749 -- see that block's comment).
+# The account is kept as the image's own non-root default for anyone running
+# it directly. uid/gid 10001 chosen to avoid the base image's existing `node`
+# user (uid 1000) and common host uid ranges.
 RUN groupadd --gid 10001 reviewer \
     && useradd --uid 10001 --gid reviewer --no-create-home --shell /usr/sbin/nologin reviewer
 

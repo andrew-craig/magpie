@@ -559,7 +559,7 @@ export interface BuildMicrovmLaunchArgsParams {
    * in production.
    */
   envFromHost: string[];
-  /** Non-secret guest env vars, passed inline (`--env KEY=VALUE`) — mirrors docker's inline `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT` (values here are deployment config, never a per-job credential). */
+  /** Non-secret guest env vars, passed inline (`--env KEY=VALUE`) — mirrors docker's inline `OPENAI_BASE_URL`/`MAGPIE_REQUIRE_MEMORY_LIMIT`/`MAGPIE_MICROVM_RAM_MIB` (values here are deployment config, never a per-job credential). */
   env: Record<string, string>;
   /** Fixed vsock port the guest dials (`microvmVsockChannel`'s `MICROVM_VSOCK_PORT`, `--vsock-port`). */
   vsockPort: number;
@@ -857,6 +857,18 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     };
   }
 
+  // Bound ONCE, here, and used for BOTH tiers below (crun's `--user
+  // <uid>:<gid>`, and the micro-VM tier's `krun_setuid`/`krun_setgid` AND the
+  // reviewer uid its guest drops to). M8-E5 (task_a749): these two used to be
+  // read independently per call site, which let the micro-VM tier's in-guest
+  // identity drift away from the host uid that actually owns the `/out`
+  // virtiofs — see the MAGPIE_MICROVM_REVIEWER_UID/_GID entries in the
+  // micro-VM `env` map below for the full story. Binding them to locals makes
+  // "the guest drops to the SAME uid the host runs as" structural rather than
+  // a coincidence of two call sites happening to call the same function.
+  const hostUid = process.getuid();
+  const hostGid = process.getgid();
+
   // Start from a copy of process.env only so the docker CLIENT process still
   // has the ambient PATH/HOME/etc. it needs to run; the CONTAINER itself
   // inherits none of this — only what's explicitly passed via `-e` below
@@ -912,13 +924,51 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       execArgs: ["--provider", "openrouter", "--model", config.llm.model],
       vcpus: config.microvm.vcpus,
       ramMib: config.microvm.ramMib,
-      uid: process.getuid(),
-      gid: process.getgid(),
+      uid: hostUid,
+      gid: hostGid,
       workdir: "/work",
       envFromHost: ["OPENROUTER_API_KEY"],
       env: {
         OPENAI_BASE_URL: config.gateway.containerBaseUrl,
         MAGPIE_REQUIRE_MEMORY_LIMIT: String(config.container.requireMemoryLimit),
+        // M8-E3 (task_2541): the configured guest RAM ceiling, non-secret,
+        // inline (same convention as the two entries above) — entrypoint.sh
+        // cross-checks this against the guest's own /proc/meminfo MemTotal
+        // as its positive proof that libkrun's --ram-mib ceiling (set from
+        // this SAME config.microvm.ramMib value just above) actually
+        // applied, since the micro-VM tier has no cgroup memory.max to read
+        // at all (see that script's memory-ceiling section for the full
+        // rationale).
+        MAGPIE_MICROVM_RAM_MIB: String(config.microvm.ramMib),
+        // M8-E5 (task_a749): the uid/gid entrypoint.sh must drop to before
+        // `exec pi` in the guest — non-secret, inline, same convention as the
+        // entries above. These are the SAME `hostUid`/`hostGid` passed as
+        // `uid`/`gid` just above (bound once at the top of this function), and
+        // that identity is the whole point.
+        //
+        // WHY: `/out` is a virtiofs view of `createOutputDir`'s host directory,
+        // which `mkdtemp` creates mode 0700 owned by THIS process's uid. The
+        // crun tier is fine because `--user <uid>:<gid>` runs the container --
+        // Pi included -- as that same uid, so it owns what it writes to. The
+        // micro-VM tier is different: `krun_setuid`/`krun_setgid` confine only
+        // the HOST-side VMM process, the guest boots as root, and entrypoint.sh
+        // does its own privilege drop. That drop used to target the image's
+        // baked-in `reviewer` account (uid 10001, docker/reviewer/Dockerfile),
+        // which bears NO relationship to the host uid owning the virtiofs
+        // files -- so Pi ran as 10001, saw `/out` as `drwx------ <uid> <gid>`,
+        // and got EACCES writing findings.json. Every micro-VM review then
+        // failed as "pi did not call report_findings" no matter what Pi did.
+        //
+        // Passing the host uid/gid through fixes that by making the guest's
+        // reviewer identity IDENTICAL to the crun tier's rather than divergent.
+        // Note this does NOT weaken the guest's posture: it is still a drop
+        // from guest-root to an unprivileged, non-root uid before Pi ever runs
+        // -- the same drop, just to the uid that makes the output mount
+        // actually writable. entrypoint.sh fails closed if either var is
+        // unset, non-numeric, or zero (see its privilege-drop block); it must
+        // NEVER silently fall back to 10001, which is now known-broken here.
+        MAGPIE_MICROVM_REVIEWER_UID: String(hostUid),
+        MAGPIE_MICROVM_REVIEWER_GID: String(hostGid),
       },
       vsockPort: vsockChannel.port,
       vsockUdsPath: vsockChannel.udsPath,
@@ -975,8 +1025,8 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     // therefore the container's ONLY remaining path off itself.
     argv = buildReviewDockerArgs({
       containerName,
-      uid: process.getuid(),
-      gid: process.getgid(),
+      uid: hostUid,
+      gid: hostGid,
       mountDir,
       outDir: output.outDir,
       gatewaySocketDir: params.gatewaySocketDir,
@@ -1150,6 +1200,56 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       signal?.removeEventListener("abort", onAbort);
     };
 
+    /**
+     * Appends the retained guest/container stderr tail to a failure reason.
+     *
+     * M8-E6 (task_e5c4): the non-zero-exit path has always included
+     * `stderrTail`, but the ZERO-exit failure paths below (no findings file,
+     * unparsable findings file, a post-run processing throw) did not — so a
+     * sandbox that started, logged a detailed fail-closed reason to stderr, and
+     * then exited 0 discarded every one of those lines. That is precisely the
+     * common case for this image: `docker/reviewer/entrypoint.sh` narrates its
+     * whole confinement/mount/privilege-drop sequence on stderr, and Pi itself
+     * exits 0 even when a provider call failed. During the M8-E4 live
+     * validation this hole made a micro-VM failure undiagnosable from the host
+     * — the entire ordered entrypoint log existed, was buffered right here, and
+     * was thrown away because the container happened to exit 0.
+     *
+     * Same `STDERR_TAIL_BYTES` budget as the non-zero path (the tail is already
+     * capped as it is accumulated, so this adds no unbounded buffering), and
+     * the same redaction posture: the reviewer sandbox is never given anything
+     * that would print the gateway virtual key (entrypoint.sh's key assertions
+     * deliberately report only the expected PREFIX, never the value), and as
+     * belt-and-suspenders the key is scrubbed here anyway before the tail is
+     * surfaced — this string ends up in a telemetry record and, via
+     * publisher.ts, in a PUBLIC PR comment, so a future change that started
+     * echoing the value must not be able to leak it through this path.
+     *
+     * DELIBERATELY NOT APPLIED to the `aborted` / `timeout after …` reasons
+     * above, even though those discard stderr too: pipeline.ts's
+     * `classifyJobOutcome` derives a job's telemetry outcome by STRING-MATCHING
+     * those exact reasons (`reason === "aborted"`, and
+     * `reason.startsWith("timeout after")`). Appending a tail would silently
+     * reclassify every aborted job as a generic `error` — trading a real
+     * telemetry regression for diagnostics. If those paths ever need their
+     * stderr, carry it in a separate `ReviewResult` field instead of
+     * concatenating it into the reason string.
+     */
+    // Defensive only — nothing is expected to print the gateway key. Guarded
+    // on a non-empty key so a test/dev run without one can't turn every
+    // stderr byte into "[redacted]" via a `replaceAll("", ...)`. Shared by
+    // every path below that embeds `stderrTail` into a reason string —
+    // zero-exit (withStderr) and non-zero-exit alike — so redaction can't
+    // silently regress on one path while staying fixed on the other.
+    const redactGatewayKey = (text: string): string =>
+      params.gatewayApiKey ? text.split(params.gatewayApiKey).join("[redacted]") : text;
+
+    const withStderr = (reason: string): string => {
+      const tail = redactGatewayKey(stderrTail.trim());
+      if (!tail) return reason;
+      return `${reason}. Sandbox stderr (last ${STDERR_TAIL_BYTES} bytes): ${tail}`;
+    };
+
     /** Feeds one raw NDJSON line into the running parse state. */
     const consumeLine = (line: string): void => {
       const trimmed = line.trim();
@@ -1231,7 +1331,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
       if (code !== 0) {
         const signalNote = procSignal ? ` (signal ${procSignal})` : "";
-        const stderrNote = stderrTail.trim() || "(no stderr output)";
+        const stderrNote = redactGatewayKey(stderrTail.trim()) || "(no stderr output)";
         finish({
           ok: false,
           reason: `review container exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
@@ -1294,16 +1394,20 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             const last = messages[messages.length - 1];
             if (last && (last.stopReason === "error" || last.errorMessage)) {
               const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
-              finish({ ok: false, reason: `pi review failed: ${detail}`, usage });
+              finish({ ok: false, reason: withStderr(`pi review failed: ${detail}`), usage });
               return;
             }
-            finish({ ok: false, reason: "pi did not call report_findings", usage });
+            finish({ ok: false, reason: withStderr("pi did not call report_findings"), usage });
             return;
           }
 
           const parsed = parseFindings(findingsRaw);
           if (!parsed.ok) {
-            finish({ ok: false, reason: `pi wrote an invalid findings file: ${parsed.error}`, usage });
+            finish({
+              ok: false,
+              reason: withStderr(`pi wrote an invalid findings file: ${parsed.error}`),
+              usage,
+            });
             return;
           }
 
@@ -1324,7 +1428,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             usage,
           });
         } catch (err) {
-          finish({ ok: false, reason: `failed to process findings: ${errorMessage(err)}` });
+          finish({ ok: false, reason: withStderr(`failed to process findings: ${errorMessage(err)}`) });
         }
       })();
     });
