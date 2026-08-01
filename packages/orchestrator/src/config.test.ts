@@ -76,7 +76,7 @@ describe("loadConfig", () => {
     expect(config.repoAllowlist).toEqual(["my-org/my-repo"]);
     expect(config.workspace.workDir).toBe("/var/lib/magpie/work");
     expect(config.container.image).toBe(
-      "ghcr.io/andrew-craig/magpie/reviewer:0.3.0@sha256:ed1985aaebc6eecbe0d3b6bfcbed7539448cb92be5c7d726dd4089538db76ae3",
+      "ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:6c84639bde2879043188eaeb3c72b7bcb032c4b803d5a3e79d32fc0b4de04a29",
     );
     expect(config.container.memory).toBe("4g");
     // bug_df2d: fail-closed-by-default escape hatch for the cgroup
