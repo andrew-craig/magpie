@@ -496,6 +496,28 @@ describe("runReview", () => {
     }
   });
 
+  // Same redaction posture as the zero-exit paths above, applied to the
+  // non-zero-exit path too: a magpie-reviewer review of this PR flagged that
+  // the two had drifted (the non-zero path embedded stderrTail unredacted).
+  // Pinned here so the two paths can't diverge again.
+  it("redacts the gateway virtual key from the surfaced stderr tail on a non-zero exit", async () => {
+    const piBinary = writeFakeDocker(
+      [
+        `process.stderr.write("leaky: key=" + process.env.OPENROUTER_API_KEY + " oops\\n");`,
+        `process.exit(1);`,
+      ].join("\n"),
+    );
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/exited with code 1/);
+      expect(result.reason).not.toContain(TEST_GATEWAY_API_KEY);
+      expect(result.reason).toContain("[redacted]");
+    }
+  });
+
   // Guard on the deliberate carve-out: pipeline.ts's classifyJobOutcome
   // decides a job's telemetry outcome by string-matching `reason === "aborted"`
   // (and `startsWith("timeout after")`). Appending a stderr tail to those two

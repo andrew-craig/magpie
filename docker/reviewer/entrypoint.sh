@@ -164,7 +164,7 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# M8-E7 (task_5e42): re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
+# M8-E7 (task_80a4): re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
 #
 # EXACTLY the same root cause as the PATH gap immediately above, in a second
 # variable: `docker/reviewer/Dockerfile` sets

@@ -1235,13 +1235,18 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
      * stderr, carry it in a separate `ReviewResult` field instead of
      * concatenating it into the reason string.
      */
+    // Defensive only — nothing is expected to print the gateway key. Guarded
+    // on a non-empty key so a test/dev run without one can't turn every
+    // stderr byte into "[redacted]" via a `replaceAll("", ...)`. Shared by
+    // every path below that embeds `stderrTail` into a reason string —
+    // zero-exit (withStderr) and non-zero-exit alike — so redaction can't
+    // silently regress on one path while staying fixed on the other.
+    const redactGatewayKey = (text: string): string =>
+      params.gatewayApiKey ? text.split(params.gatewayApiKey).join("[redacted]") : text;
+
     const withStderr = (reason: string): string => {
-      let tail = stderrTail.trim();
+      const tail = redactGatewayKey(stderrTail.trim());
       if (!tail) return reason;
-      // Defensive only — nothing is expected to print this value. Guarded on a
-      // non-empty key so a test/dev run without one can't turn every stderr
-      // byte into "[redacted]" via a `replaceAll("", ...)`.
-      if (params.gatewayApiKey) tail = tail.split(params.gatewayApiKey).join("[redacted]");
       return `${reason}. Sandbox stderr (last ${STDERR_TAIL_BYTES} bytes): ${tail}`;
     };
 
@@ -1326,7 +1331,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
       if (code !== 0) {
         const signalNote = procSignal ? ` (signal ${procSignal})` : "";
-        const stderrNote = stderrTail.trim() || "(no stderr output)";
+        const stderrNote = redactGatewayKey(stderrTail.trim()) || "(no stderr output)";
         finish({
           ok: false,
           reason: `review container exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
