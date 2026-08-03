@@ -72,6 +72,13 @@ export interface JobDescriptor {
   before?: string;
   /** Post-push head SHA, present only for `synchronize` deliveries. */
   after?: string;
+  /**
+   * Set by comment-command.ts for an `@magpie review` job: bypasses
+   * pipeline.ts's M5-C dedup skip (`lastReviewedSha === job.headSha`) so an
+   * explicit human request always runs a fresh, full review even when this
+   * head SHA was already reviewed. Never set by filter.ts.
+   */
+  forceFullReview?: boolean;
 }
 
 /** Terminal state of a job once it has left the queue. */

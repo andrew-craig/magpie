@@ -1938,6 +1938,47 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     );
   });
 
+  it("forceFullReview (M6-A): a job for an already-reviewed head SHA still runs a full review instead of early-outing", async () => {
+    // Same fixture shape as the dedup-skip test above (testJob()'s headSha
+    // "deadbeef" matches the prior magpie review's reviewed-sha marker
+    // exactly), but with `forceFullReview: true` set — comment-command.ts's
+    // `@magpie review` trigger sets this. The M5-C dedup skip must NOT fire.
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      reviewState: {
+        reviews: [
+          magpieReview({
+            id: 1,
+            node_id: "PRR_1",
+            body: `${MAGPIE_REVIEW_MARKER}${buildReviewedShaMarker("deadbeef")}\nAll good.`,
+          }),
+        ],
+      },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("Looks good."));
+    const { logger, events } = capturingLogger();
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: async () => ({ token: FAKE_TOKEN }),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob({ forceFullReview: true }), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(events).not.toContainEqual(expect.objectContaining({ event: "already-reviewed" }));
+  });
+
   it("proceeds normally when the last-reviewed SHA differs from the current head SHA", async () => {
     const { octokit, createReview } = fakeOctokit({
       title: "Add feature",

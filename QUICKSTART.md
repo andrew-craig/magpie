@@ -154,10 +154,18 @@ or personal account both work):
 
 1. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
    (org: your org's Settings; personal: your user Settings).
-2. Under **Repository permissions**, grant exactly two, nothing else:
+2. Under **Repository permissions**, grant exactly three, nothing else:
    - **Contents: Read-only**
    - **Pull requests: Read and write**
-3. Under **Subscribe to events**, check **Pull request**.
+   - **Issues: Read and write** — needed for the `@magpie review` on-demand
+     comment command (M6-A): posting the acknowledgement reaction on the
+     triggering comment is an `issues`-scoped API call even on a PR (GitHub
+     models PR conversation comments as issue comments), and checking
+     whether the commenter is an authorized collaborator uses the
+     automatically-granted `Metadata: read` permission every GitHub App has,
+     so no extra permission is needed for that check itself.
+3. Under **Subscribe to events**, check **Pull request** and **Issue
+   comment** (the latter is how `@magpie review` PR comments reach Magpie).
 4. Under **Webhook**, set:
    - **Webhook URL**: `https://<your-ingress-host>/webhook` (see step 7 if
      you haven't set up ingress yet — you can come back and fill this in

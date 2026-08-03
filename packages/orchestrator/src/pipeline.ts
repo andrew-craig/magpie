@@ -22,8 +22,12 @@
 //      DB). Deliberately placed here, BEFORE minting the gateway virtual key
 //      or cloning, so a redelivered webhook for an already-reviewed head SHA
 //      is a true no-op: no wasted gateway budget, no wasted clone. If
-//      `lastReviewedSha === job.headSha`, log `event:"already-reviewed"` and
-//      return without doing anything else. Before calling `readReviewState`
+//      `lastReviewedSha === job.headSha` AND `job.forceFullReview` is not
+//      set, log `event:"already-reviewed"` and return without doing anything
+//      else. `job.forceFullReview` (comment-command.ts's `@magpie review`
+//      trigger, M6-A) bypasses this skip on purpose — a maintainer's explicit
+//      request should always run a fresh review even on an already-reviewed
+//      head SHA. Before calling `readReviewState`
 //      this step first resolves Magpie's own bot login (github.ts's
 //      `getAppBotLogin`, via the `getBotLogin` dep) and passes it through —
 //      `readReviewState` needs it to verify a comment/review's AUTHOR
@@ -398,7 +402,7 @@ export function createReviewPipeline(
         });
       }
 
-      if (reviewState.lastReviewedSha === job.headSha) {
+      if (reviewState.lastReviewedSha === job.headSha && !job.forceFullReview) {
         logger.info({
           event: "already-reviewed",
           ...jobLogFields(job),
