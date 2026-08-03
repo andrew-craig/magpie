@@ -2,14 +2,14 @@
 id: task_ad15
 title: M6-A: @magpie review — on-demand re-review via PR comment command
 type: task
-status: in_progress
+status: closed
 priority: 3
 labels: []
 blocked_by: []
 parent: epic_3c41
 remote_task_url: null
 created_at: 2026-07-10T21:52:56Z
-updated_at: 2026-08-03T08:53:19Z
+updated_at: 2026-08-03T11:51:53Z
 ---
 PLAN.md milestone 6. Let a human request a review by commenting '@magpie review' on a PR.
 
