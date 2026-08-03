@@ -146,6 +146,24 @@ RUN chmod +x /opt/magpie/vsock-client
 # MAGPIE_FINDINGS_PATH is a per-run tmp path and MAGPIE_* is stripped from the
 # child env -- that denylist logic is host-only; a container inherits nothing,
 # so here the extension only sees exactly this baked value.)
+#
+# CONTRACT (M8-E8, task_0208): this `ENV` -- and any `ENV` added below it in
+# the future -- reaches the CRUN-TIER container for free, because
+# `docker`/`podman run` applies this image's OCI config automatically. The
+# MICRO-VM tier does NOT: libkrun boots an exported BARE ROOTFS with no image
+# config at all, so a new `ENV` here reaches that tier ONLY if something else
+# re-declares it -- either entrypoint.sh's `MAGPIE_IS_MICROVM`-guarded block
+# (`export NAME=...`, see that file's M8-E4/M8-E7 sections for the pattern)
+# or packages/orchestrator/src/reviewer.ts's micro-VM launch-argv builder
+# (`buildMicrovmLaunchArgs`'s `env`/`envFromHost` fields). Forgetting this has
+# already caused two live production defects (M8-E4's `PATH`, M8-E7's
+# `MAGPIE_FINDINGS_PATH`), each only discovered on a real Pi-host micro-VM
+# run. `packages/orchestrator/src/reviewer-microvm-env-parity.test.ts` (a
+# real `npm test` case, not just the shell-script pin below) now fails CI if
+# a new `ENV` here is left uncovered by either mechanism -- see that test and
+# `packages/orchestrator/src/docker-image-config-drift.ts` for how it checks.
+# `docker/reviewer/entrypoint-tier-memory.test.sh` separately pins this
+# SPECIFIC variable's re-exported value against this line, byte for byte.
 ENV MAGPIE_FINDINGS_PATH=/out/findings.json
 
 WORKDIR /work
