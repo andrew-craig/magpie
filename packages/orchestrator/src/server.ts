@@ -61,6 +61,22 @@ export type PullRequestEvent = EmitterWebhookEvent<"pull_request">;
 export type OnPullRequest = (event: PullRequestEvent) => void;
 
 /**
+ * A verified `issue_comment` webhook delivery, exactly as surfaced by
+ * `@octokit/webhooks`. Only deliveries whose signature verified against the
+ * configured webhook secret are ever emitted with this type. Fires for
+ * comments on both issues and PRs — comment-command.ts (M6-A) is responsible
+ * for filtering down to PR comments carrying the `@magpie review` command.
+ */
+export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">;
+
+/**
+ * Callback invoked once for every authenticated `issue_comment` delivery.
+ * This is the seam comment-command.ts subscribes to (mirrors `OnPullRequest`
+ * above). It is only ever called with signature-verified payloads.
+ */
+export type OnIssueComment = (event: IssueCommentEvent) => void;
+
+/**
  * The `/healthz` projection of one runtime detail this module has no other
  * knowledge of: which isolation tier is actually launching review jobs (see
  * tier-ladder.ts's `resolveTier`/`TierSelectionResult`). This is a DELIBERATE,
@@ -166,12 +182,18 @@ export interface WebhookServer {
  *                     lifetime of one process (the ladder is resolved once
  *                     at startup, not re-probed per request — see
  *                     tier-ladder.ts's module doc comment).
+ * @param onIssueComment Seam invoked with every verified `issue_comment`
+ *                     event (M6-A, comment-command.ts's `@magpie review`
+ *                     trigger). Optional and defaults to a no-op so existing
+ *                     callers/tests that only care about `pull_request` need
+ *                     no change.
  * @returns A {@link WebhookServer} handle.
  */
 export function createWebhookServer(
   config: Config,
   onPullRequest: OnPullRequest,
   tierSnapshot: HealthzTierSnapshot,
+  onIssueComment: OnIssueComment = () => {},
 ): WebhookServer {
   const webhooks = new Webhooks({ secret: config.secrets.webhookSecret });
 
@@ -180,6 +202,13 @@ export function createWebhookServer(
   // signature has verified, anything reaching here is authenticated.
   webhooks.on("pull_request", (event) => {
     onPullRequest(event);
+  });
+
+  // Re-emit verified issue_comment deliveries onto the caller's seam (M6-A).
+  // Fires for comments on both issues and PRs; comment-command.ts is
+  // responsible for filtering down to PR comments carrying the command.
+  webhooks.on("issue_comment", (event) => {
+    onIssueComment(event);
   });
 
   // Surface verification/handler failures. Bad signatures are turned into an

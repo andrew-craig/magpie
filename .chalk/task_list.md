@@ -8,4 +8,3 @@ _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/
 - **task_220f** · P3 · open · M6-B: per-repo config — .magpie.toml read from the base branch only  (parent: epic_3c41)
 - **task_624d** · P3 · open · gVisor (runsc) middle tier — deferred per CTO decision 4  (parent: epic_59b1)
 - **task_9c9d** · P3 · open · M6-D: multi-provider support beyond OpenRouter  (parent: epic_3c41)
-- **task_ad15** · P3 · open · M6-A: @magpie review — on-demand re-review via PR comment command  (parent: epic_3c41)

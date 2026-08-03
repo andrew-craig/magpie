@@ -154,10 +154,26 @@ or personal account both work):
 
 1. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
    (org: your org's Settings; personal: your user Settings).
-2. Under **Repository permissions**, grant exactly two, nothing else:
+2. Under **Repository permissions**, grant exactly three, nothing else:
    - **Contents: Read-only**
    - **Pull requests: Read and write**
-3. Under **Subscribe to events**, check **Pull request**.
+   - **Issues: Read and write** — needed for the `@magpie review` on-demand
+     comment command (M6-A): posting the acknowledgement reaction on the
+     triggering comment is an `issues`-scoped API call even on a PR (GitHub
+     models PR conversation comments as issue comments). The authorization
+     check (is the commenter a write/admin collaborator?) does *not* need
+     this permission — per GitHub's [permissions-required-for-github-apps
+     reference](https://docs.github.com/en/rest/overview/permissions-required-for-github-apps),
+     `GET .../collaborators/{username}/permission` requires only `Metadata:
+     read`, which every GitHub App is granted automatically.
+3. Under **Subscribe to events**, check **Pull request** and **Issue
+   comment** (the latter is how `@magpie review` PR comments reach Magpie).
+   Note: subscribing to Issue comment delivers a webhook for *every* comment
+   on *every* issue and PR across every repo the App is installed on, not
+   just allowlisted ones — each delivery is still signature-verified before
+   `comment-command.ts` filters it down by repo allowlist and command match.
+   On an org-wide install this meaningfully increases webhook volume even
+   though only matching comments ever mint a token or do real work.
 4. Under **Webhook**, set:
    - **Webhook URL**: `https://<your-ingress-host>/webhook` (see step 7 if
      you haven't set up ingress yet — you can come back and fill this in

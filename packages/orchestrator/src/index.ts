@@ -13,6 +13,7 @@
 
 import { pathToFileURL } from "node:url";
 import { assertMemoryControllerAvailable, MemoryControllerUnavailableError } from "./cgroup-preflight.js";
+import { createIssueCommentHandler } from "./comment-command.js";
 import { loadConfig, ConfigError } from "./config.js";
 import { assertDockerAvailable, DockerUnavailableError } from "./docker.js";
 import { createPullRequestFilter } from "./filter.js";
@@ -196,7 +197,15 @@ async function main(): Promise<void> {
       logJobOutcome(outcome);
     });
   });
-  const server = createWebhookServer(config, filter, healthzTierSnapshot);
+  // M6-A: `@magpie review` on-demand trigger. Same `queue.enqueue` seam as
+  // the pull_request filter above, so a comment-triggered job gets the same
+  // dedup-by-PR-key and outcome logging.
+  const onIssueComment = createIssueCommentHandler(config, (job) => {
+    void queue.enqueue(job, runJob, cleanupJob).then((outcome) => {
+      logJobOutcome(outcome);
+    });
+  });
+  const server = createWebhookServer(config, filter, healthzTierSnapshot, onIssueComment);
 
   await server.listen();
   console.log(

@@ -8,6 +8,7 @@ import {
   HEALTHZ_PATH,
   WEBHOOK_PATH,
   type HealthzTierSnapshot,
+  type OnIssueComment,
   type OnPullRequest,
   type WebhookServer,
 } from "./server.js";
@@ -71,6 +72,28 @@ function pullRequestPayload(): string {
   });
 }
 
+/** A minimal-but-valid `issue_comment` webhook payload body, on a PR. */
+function issueCommentPayload(): string {
+  return JSON.stringify({
+    action: "created",
+    issue: {
+      number: 1,
+      pull_request: { url: "https://api.github.com/repos/my-org/repo/pulls/1" },
+    },
+    comment: {
+      id: 555,
+      body: "@magpie review",
+      user: { login: "octocat" },
+    },
+    repository: {
+      id: 100,
+      name: "repo",
+      full_name: "my-org/repo",
+    },
+    sender: { id: 5, login: "octocat" },
+  });
+}
+
 /** GitHub's `X-Hub-Signature-256` header value for a body + secret. */
 function sign(body: string, secret: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -95,11 +118,12 @@ let running: WebhookServer | undefined;
 async function start(
   onPullRequest: OnPullRequest,
   tierSnapshot: HealthzTierSnapshot = testTierSnapshot(),
+  onIssueComment?: OnIssueComment,
 ): Promise<{
   server: WebhookServer;
   baseUrl: string;
 }> {
-  const server = createWebhookServer(testConfig(), onPullRequest, tierSnapshot);
+  const server = createWebhookServer(testConfig(), onPullRequest, tierSnapshot, onIssueComment);
   await server.listen();
   running = server;
   const { port } = server.server.address() as AddressInfo;
@@ -223,6 +247,74 @@ describe("createWebhookServer", () => {
     const { baseUrl } = await start(vi.fn());
     const res = await fetch(`${baseUrl}/nope`);
     expect(res.status).toBe(404);
+  });
+
+  it("accepts a correctly-signed issue_comment delivery and fires the onIssueComment seam (M6-A)", async () => {
+    const onIssueComment = vi.fn();
+    const { baseUrl } = await start(vi.fn(), testTierSnapshot(), onIssueComment);
+    const body = issueCommentPayload();
+
+    const res = await fetch(`${baseUrl}${WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "issue_comment",
+        "x-github-delivery": "00000000-0000-0000-0000-000000000001",
+        "x-hub-signature-256": sign(body, WEBHOOK_SECRET),
+      },
+      body,
+    });
+
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(300);
+    expect(onIssueComment).toHaveBeenCalledTimes(1);
+
+    const event = onIssueComment.mock.calls[0][0];
+    expect(event.name).toBe("issue_comment");
+    expect(event.payload.action).toBe("created");
+    expect(event.payload.comment.body).toBe("@magpie review");
+    expect(event.payload.repository.full_name).toBe("my-org/repo");
+  });
+
+  it("rejects a tampered/wrong-signature issue_comment delivery and does NOT fire the seam", async () => {
+    const onIssueComment = vi.fn();
+    const { baseUrl } = await start(vi.fn(), testTierSnapshot(), onIssueComment);
+    const body = issueCommentPayload();
+
+    const res = await fetch(`${baseUrl}${WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "issue_comment",
+        "x-github-delivery": "00000000-0000-0000-0000-000000000002",
+        "x-hub-signature-256": sign(body, "attacker-secret"),
+      },
+      body,
+    });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(onIssueComment).not.toHaveBeenCalled();
+  });
+
+  it("does not require an onIssueComment handler to be supplied (defaults to a no-op)", async () => {
+    const onPullRequest = vi.fn();
+    const { baseUrl } = await start(onPullRequest);
+    const body = issueCommentPayload();
+
+    const res = await fetch(`${baseUrl}${WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "issue_comment",
+        "x-github-delivery": "00000000-0000-0000-0000-000000000003",
+        "x-hub-signature-256": sign(body, WEBHOOK_SECRET),
+      },
+      body,
+    });
+
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(300);
   });
 });
 
