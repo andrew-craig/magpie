@@ -61,12 +61,16 @@ export function parseDockerfileEnvVars(dockerfileText: string): string[] {
  * if/then/fi inside the block (e.g. the privilege-drop block's own
  * fail-closed checks).
  *
- * UNDERSTOOD: line-oriented bash where every `if`/`elif` opener ends its
- * line with a literal `then` and every `fi`/`else` sits alone on its own
+ * UNDERSTOOD: line-oriented bash where every `if` opener ends its line with
+ * a literal `then` and every `fi`/`else` sits alone on its own
  * (whitespace-trimmed) line — true of every guard in entrypoint.sh today
  * (verified: no single-line `if ...; then ...; fi` compaction anywhere in
  * the file, and no here-doc/comment containing a bare standalone `fi`/
- * `else`/`if ...; then` line).
+ * `else`/`if ...; then` line). `elif ...; then` lines are also understood
+ * correctly: unlike a nested `if`, an `elif` shares its parent `if`'s single
+ * `fi` rather than opening a new nesting level requiring its own — so depth
+ * is only incremented on `if`, never on `elif`, and an `elif` line is simply
+ * captured as part of its enclosing block.
  *
  * NOT UNDERSTOOD: single-line if-compaction; `case`/`esac` nesting is not
  * tracked at all (harmless today only because no `case` in this file
@@ -88,7 +92,7 @@ export function extractMicrovmGuardedBlocks(entrypointText: string): string[] {
     for (let j = i + 1; j < lines.length; j++) {
       const trimmed = lines[j].trim();
       if (depth === 1 && trimmed === "else") break;
-      if (/^(if|elif)\b.*\bthen$/.test(trimmed)) {
+      if (/^if\b.*\bthen$/.test(trimmed)) {
         depth++;
       } else if (trimmed === "fi") {
         depth--;

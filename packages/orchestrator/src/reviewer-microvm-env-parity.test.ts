@@ -119,6 +119,35 @@ describe("extractMicrovmGuardedBlocks / isReexportedForMicrovm", () => {
   it("returns false for a var not exported anywhere", () => {
     expect(isReexportedForMicrovm("NEVER_SET", FIXTURE_ENTRYPOINT)).toBe(false);
   });
+
+  // Regression test: an `elif` shares its parent `if`'s single `fi` rather
+  // than opening its own nesting level. A depth-tracker that (wrongly)
+  // treats `elif` as a new opener never sees the nested if/elif/fi's `fi`
+  // bring depth back down correctly, so it also never recognizes the OUTER
+  // guard's closing `fi` — and over-captures everything after it, including
+  // `export` lines that live outside the MAGPIE_IS_MICROVM guard entirely.
+  // That's the unsafe direction: a var never re-exported for the micro-VM
+  // tier gets falsely reported as covered.
+  const FIXTURE_ENTRYPOINT_WITH_ELIF = [
+    "#!/usr/bin/env bash",
+    'if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then',
+    "  if [ -z \"${SOME_VAR:-}\" ]; then",
+    "    echo a",
+    "  elif [ -n \"${OTHER_VAR:-}\" ]; then",
+    "    echo b",
+    "  fi",
+    "  export MAGPIE_AFTER_ELIF=covered",
+    "fi",
+    "export MAGPIE_OUTSIDE_BLOCK=not-covered",
+  ].join("\n");
+
+  it("correctly closes a guarded block containing a nested if/elif/fi (does not over-capture past the elif's shared fi)", () => {
+    expect(isReexportedForMicrovm("MAGPIE_AFTER_ELIF", FIXTURE_ENTRYPOINT_WITH_ELIF)).toBe(true);
+  });
+
+  it("does NOT count an export that lives after the guard's closing fi, even when the block contains a nested elif", () => {
+    expect(isReexportedForMicrovm("MAGPIE_OUTSIDE_BLOCK", FIXTURE_ENTRYPOINT_WITH_ELIF)).toBe(false);
+  });
 });
 
 describe("isInjectedByReviewerTs", () => {
