@@ -24,7 +24,7 @@ const INPUT = {
 
 const CONFIG: Config = {
   github: { appId: "1", privateKeyPath: null },
-  llm: { baseUrl: "https://example.com/v1", model: "m/m" },
+  llm: { baseUrl: "https://example.com/v1", model: "m/m", allowedModels: [] },
   server: { host: "127.0.0.1", port: 0 },
   limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
   repoAllowlist: [],

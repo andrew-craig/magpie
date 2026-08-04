@@ -42,8 +42,21 @@
 // unavailable so the caller falls back to the full PR diff. This keeps the
 // incremental path from ever silently reviewing a WRONG or partial slice: when
 // in any doubt, review everything.
+//
+// Ignore-path filtering (M6-B, task_220f): a repo's `.magpie.toml` may name
+// `review.ignore_paths` glob patterns (see repo-config.ts). Every function
+// below that lists files/sums changed lines accepts an optional
+// `ignorePaths` and drops matching files BEFORE the `maxDiffLines` sum — so
+// ignoring a large vendored/generated directory actually lets an otherwise-
+// oversized PR through the cap, not just hides those files from the
+// reviewer after the fact. `computePrDiff`/`computeIncrementalDiff`
+// additionally strip the corresponding per-file hunks from the fetched
+// unified diff BODY via {@link filterUnifiedDiff}, so an ignored file's
+// content is never even sent to the reviewer, not merely excluded from the
+// size count.
 
 import type { Octokit } from "@octokit/rest";
+import { matchesAnyGlob } from "./glob-match.js";
 
 /** Result of computing a PR's diff. */
 export interface PrDiffResult {
@@ -66,6 +79,12 @@ export interface ComputePrDiffParams {
   prNumber: number;
   /** Cap on total changed lines; caller passes `config.limits.maxDiffLines`. */
   maxDiffLines: number;
+  /**
+   * Glob patterns (M6-B, repo-config.ts's `review.ignore_paths`) for files to
+   * exclude from BOTH the size count and the diff body. Defaults to `[]`
+   * (no filtering — every existing caller/test is unaffected).
+   */
+  ignorePaths?: string[];
 }
 
 /**
@@ -87,13 +106,14 @@ export interface ComputePrDiffParams {
 export async function computePrDiff(
   params: ComputePrDiffParams,
 ): Promise<PrDiffResult> {
-  const { octokit, owner, repo, prNumber, maxDiffLines } = params;
+  const { octokit, owner, repo, prNumber, maxDiffLines, ignorePaths = [] } = params;
 
   const { changedFiles, changedLineCount } = await listPrChangedFiles({
     octokit,
     owner,
     repo,
     prNumber,
+    ignorePaths,
   });
   const tooLarge = changedLineCount > maxDiffLines;
 
@@ -109,7 +129,13 @@ export async function computePrDiff(
   });
   // See module doc comment: with format:"diff" the response body is the raw
   // diff string, not the statically-typed PullRequest object.
-  const diff = response.data as unknown as string;
+  let diff = response.data as unknown as string;
+  // The diff body still contains EVERY file's hunks regardless of the
+  // (already-filtered) size count above — strip ignored files' hunks too so
+  // the reviewer never sees their content (M6-B).
+  if (ignorePaths.length > 0) {
+    diff = filterUnifiedDiff(diff, ignorePaths);
+  }
 
   return { diff, changedFiles, changedLineCount, tooLarge };
 }
@@ -120,6 +146,8 @@ export interface ListPrChangedFilesParams {
   owner: string;
   repo: string;
   prNumber: number;
+  /** Glob patterns to exclude (M6-B). Defaults to `[]` (no filtering). */
+  ignorePaths?: string[];
 }
 
 /**
@@ -128,11 +156,16 @@ export interface ListPrChangedFilesParams {
  * diff body) and by pipeline.ts's incremental path, which needs the WHOLE-PR
  * file list as reviewer context even when only the incremental range is sent
  * to Pi (see {@link computeIncrementalDiff}).
+ *
+ * `ignorePaths` (M6-B) filters files out BEFORE the line-count sum, so an
+ * ignored file never contributes to `changedLineCount` or `changedFiles` —
+ * this is what lets `review.ignore_paths` actually shrink an over-cap PR
+ * down to something reviewable, not just hide already-counted files later.
  */
 export async function listPrChangedFiles(
   params: ListPrChangedFilesParams,
 ): Promise<{ changedFiles: string[]; changedLineCount: number }> {
-  const { octokit, owner, repo, prNumber } = params;
+  const { octokit, owner, repo, prNumber, ignorePaths = [] } = params;
 
   const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
     owner,
@@ -141,13 +174,18 @@ export async function listPrChangedFiles(
     per_page: 100,
   });
 
-  const changedFiles = files.map((file) => file.filename);
+  const kept =
+    ignorePaths.length > 0
+      ? files.filter((file) => !matchesAnyGlob(file.filename, ignorePaths))
+      : files;
+
+  const changedFiles = kept.map((file) => file.filename);
   // `additions`/`deletions` are typed as required `number` in GitHub's
   // diff-entry schema, but this sum feeds the `maxDiffLines` security cap
   // downstream: a missing field at runtime would make the sum `NaN`, and
   // `NaN > maxDiffLines` is `false` — the cap would fail open on a huge PR.
   // `?? 0` keeps a malformed/missing field from silently defeating the cap.
-  const changedLineCount = files.reduce(
+  const changedLineCount = kept.reduce(
     (total, file) => total + (file.additions ?? 0) + (file.deletions ?? 0),
     0,
   );
@@ -167,6 +205,8 @@ export interface ComputeIncrementalDiffParams {
   head: string;
   /** Cap on total changed lines; caller passes `config.limits.maxDiffLines`. */
   maxDiffLines: number;
+  /** Glob patterns to exclude (M6-B). Defaults to `[]` (no filtering). */
+  ignorePaths?: string[];
 }
 
 /**
@@ -216,7 +256,7 @@ const COMPARE_FILES_LIMIT = 300;
 export async function computeIncrementalDiff(
   params: ComputeIncrementalDiffParams,
 ): Promise<IncrementalDiffResult> {
-  const { octokit, owner, repo, base, head, maxDiffLines } = params;
+  const { octokit, owner, repo, base, head, maxDiffLines, ignorePaths = [] } = params;
 
   if (!base || !head || base === ZERO_SHA || head === ZERO_SHA) {
     return { available: false, reason: "missing or zero before/after sha" };
@@ -284,9 +324,16 @@ export async function computeIncrementalDiff(
     };
   }
 
-  const changedFiles = files.map((file) => file.filename);
+  // Ignore-path filtering (M6-B) applies AFTER the truncation check above
+  // (which is about whether the compare RESPONSE ITSELF is trustworthy, not
+  // about which of its files we care about) but BEFORE the size sum, same
+  // ordering rationale as listPrChangedFiles.
+  const kept =
+    ignorePaths.length > 0 ? files.filter((file) => !matchesAnyGlob(file.filename, ignorePaths)) : files;
+
+  const changedFiles = kept.map((file) => file.filename);
   // Same `?? 0` cap-hardening rationale as listPrChangedFiles above.
-  const changedLineCount = files.reduce(
+  const changedLineCount = kept.reduce(
     (total, file) => total + (file.additions ?? 0) + (file.deletions ?? 0),
     0,
   );
@@ -310,6 +357,9 @@ export async function computeIncrementalDiff(
     // See module doc comment: with format:"diff" the response body is the raw
     // diff string, not the statically-typed comparison object.
     diff = response.data as unknown as string;
+    if (ignorePaths.length > 0) {
+      diff = filterUnifiedDiff(diff, ignorePaths);
+    }
   } catch (err) {
     return {
       available: false,
@@ -318,6 +368,73 @@ export async function computeIncrementalDiff(
   }
 
   return { available: true, result: { diff, changedFiles, changedLineCount, tooLarge } };
+}
+
+// --- Ignore-path diff-body filtering (M6-B) --------------------------------
+//
+// A unified diff from GitHub's `format: "diff"` media type is a concatenation
+// of one block per file, each starting with a `diff --git a/<path> b/<path>`
+// header line. {@link filterUnifiedDiff} drops whole blocks whose path
+// matches `ignorePaths`, so an ignored file's content never reaches the
+// reviewer (the size-cap filtering above only ever affected which files were
+// COUNTED, not what's inside the diff TEXT itself, which is a separate fetch).
+//
+// KNOWN LIMITATION: a path containing a literal space is quoted by git in the
+// `diff --git` header (e.g. `"a/my file.ts"`), which the simple regex below
+// does not unquote. Such a file's block is matched against its still-quoted
+// form and therefore effectively can't be *ignored* by a plain `ignore_paths`
+// glob (it simply won't match and the block is kept) — a fail-safe direction
+// for this edge case (the file stays IN the diff, at worst wasting some of the
+// size cap, rather than a quoting bug accidentally matching and hiding an
+// unrelated file).
+
+const DIFF_HEADER_RE = /^diff --git a\/.* b\/(.+)$/;
+
+/** Splits a unified diff into per-file blocks, each starting at its own `diff --git` header line (the first block may lack one if the text doesn't start with a header, but every real GitHub diff does). */
+function splitDiffIntoFileBlocks(diffText: string): string[] {
+  if (diffText.length === 0) return [];
+  // Split into lines, keeping each line's trailing newline attached so
+  // rejoining blocks reproduces the original text exactly (byte for byte,
+  // aside from the dropped blocks).
+  const lines = diffText.split(/(?<=\n)/);
+  const blocks: string[] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("diff --git ") && current.length > 0) {
+      blocks.push(current.join(""));
+      current = [];
+    }
+    current.push(line);
+  }
+  if (current.length > 0) blocks.push(current.join(""));
+  return blocks;
+}
+
+/** Extracts the (new-side, `b/`-stripped) path from a diff block's header line, or `null` if the block doesn't start with a recognizable `diff --git` header. */
+function extractDiffBlockPath(block: string): string | null {
+  const firstLine = block.slice(0, block.indexOf("\n") + 1 || block.length).replace(/\n$/, "");
+  const match = DIFF_HEADER_RE.exec(firstLine);
+  return match ? match[1] : null;
+}
+
+/**
+ * Drops per-file blocks from a unified diff whose path matches any of
+ * `ignorePaths` (see module doc comment above). A block whose path can't be
+ * determined (doesn't start with a `diff --git` header — shouldn't happen for
+ * a real GitHub-produced diff, but this function is defensive) is always kept
+ * — "can't tell if it's ignored" fails toward showing more of the diff, never
+ * less, matching this module's general when-in-doubt-review-everything
+ * posture. A no-op (returns `diffText` unchanged) when `ignorePaths` is
+ * empty.
+ */
+export function filterUnifiedDiff(diffText: string, ignorePaths: string[]): string {
+  if (ignorePaths.length === 0) return diffText;
+  const blocks = splitDiffIntoFileBlocks(diffText);
+  const kept = blocks.filter((block) => {
+    const path = extractDiffBlockPath(block);
+    return path === null || !matchesAnyGlob(path, ignorePaths);
+  });
+  return kept.join("");
 }
 
 function errorMessage(err: unknown): string {

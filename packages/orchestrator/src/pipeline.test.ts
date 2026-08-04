@@ -244,7 +244,7 @@ function fakePiScriptFailing(): string {
 function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
-    llm: { baseUrl: "https://example.com/v1", model: "some/model" },
+    llm: { baseUrl: "https://example.com/v1", model: "some/model", allowedModels: [] },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 100, ...overrides },
     repoAllowlist: [],
@@ -367,6 +367,24 @@ function fakeOctokit(opts: {
    * failure). Defaults to resolving every call.
    */
   graphqlImpl?: (query: string, vars?: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * M6-B (task_220f): the base repo's default branch, as `rest.repos.get`
+   * resolves it. Defaults to `"main"` — pipeline.ts is supposed to fetch
+   * `.magpie.toml` from EXACTLY this ref, never `job.headSha`/`head.sha`
+   * above, which is what the "same file on the PR head has no effect" test
+   * below exercises.
+   */
+  defaultBranch?: string;
+  /**
+   * M6-B: raw `.magpie.toml` content served by `rest.repos.getContent`,
+   * keyed by the `ref` it was requested at (so a test can serve DIFFERENT
+   * content for the default branch vs. some other ref, e.g. the PR head, to
+   * prove pipeline.ts never reads the latter). `undefined` for a given ref
+   * (the default when this whole option is omitted) simulates "no
+   * `.magpie.toml` on this repo" — a 404, exactly like every existing test
+   * in this file that doesn't care about M6-B at all.
+   */
+  magpieTomlByRef?: Record<string, string>;
 }) {
   const listFiles = vi.fn();
   const listComments = vi.fn();
@@ -385,6 +403,23 @@ function fakeOctokit(opts: {
       return { data: opts.diffText };
     }
     return { data: { title: opts.title, body: opts.body, head } };
+  });
+  const defaultBranch = opts.defaultBranch ?? "main";
+  const reposGet = vi.fn(async () => ({ data: { default_branch: defaultBranch } }));
+  const getContent = vi.fn(async (args: { ref: string }) => {
+    const content = opts.magpieTomlByRef?.[args.ref];
+    if (content === undefined) {
+      const notFound = new Error("Not Found") as Error & { status: number };
+      notFound.status = 404;
+      throw notFound;
+    }
+    return {
+      data: {
+        type: "file",
+        size: Buffer.byteLength(content, "utf-8"),
+        content: Buffer.from(content, "utf-8").toString("base64"),
+      },
+    };
   });
   const compareCommitsWithBasehead = vi.fn(
     async (args: { basehead: string; mediaType?: { format: string } }) => {
@@ -408,7 +443,7 @@ function fakeOctokit(opts: {
     paginate,
     rest: {
       pulls: { get, listFiles, listReviews, listReviewComments },
-      repos: { compareCommitsWithBasehead },
+      repos: { compareCommitsWithBasehead, get: reposGet, getContent },
       issues: { listComments },
     },
     issues: { createComment },
@@ -428,6 +463,8 @@ function fakeOctokit(opts: {
     listReviews,
     listReviewComments,
     graphql,
+    reposGet,
+    getContent,
   };
 }
 
@@ -2478,5 +2515,275 @@ describe("createReviewPipeline / runJob — micro-VM tier (M8-C3)", () => {
     // under this tier.
     expect(argv![udsIdx + 1]).toBe(`${FAKE_GATEWAY_KEY.socketDir}/gw.sock`);
     expect(argv!.some((tok) => tok.includes("/run/gw"))).toBe(false);
+  });
+});
+
+// M6-B (task_220f): per-repo config overrides via `.magpie.toml`, read ONLY
+// from the base repo's default branch (see repo-config.ts's module doc
+// comment). `fakeOctokit`'s `defaultBranch`/`magpieTomlByRef` options (added
+// for this milestone) let these tests control exactly what `rest.repos.get`
+// and `rest.repos.getContent` return without touching any other existing
+// test in this file (every prior call site simply never sets these options,
+// so `getContent` 404s and every job behaves exactly as before M6-B).
+describe("createReviewPipeline / runJob — per-repo config (.magpie.toml, M6-B)", () => {
+  /** Spy mint deps that record the `Config` passed to `mintGatewayKey` (in particular `llm.model`). */
+  function gatewayModelSpy() {
+    const mintGatewayKey = vi.fn(async (_config: Config, _jobId: string) => FAKE_GATEWAY_KEY);
+    return { mintGatewayKey };
+  }
+
+  it("applies a valid .magpie.toml from the default branch: guidance reaches the prompt, ignore_paths drops a vendored file from BOTH the diff and the changed-file list, and an allowed llm.model override is used to mint the gateway key", async () => {
+    const files: FakeFile[] = [
+      { filename: "src/a.ts", additions: 5, deletions: 1 },
+      { filename: "vendor/big.js", additions: 5000, deletions: 0 },
+    ];
+    const diffText = [
+      "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      "diff --git a/vendor/big.js b/vendor/big.js\n+junk\n",
+    ].join("");
+    const magpieToml = [
+      "[llm]",
+      'model = "repo/allowed-model"',
+      "",
+      "[limits]",
+      "max_diff_lines = 50",
+      "",
+      "[review]",
+      'guidance = "Please focus on SQL injection risks."',
+      'ignore_paths = ["vendor/**"]',
+    ].join("\n");
+    const { octokit, createReview, reposGet, getContent } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: magpieToml },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("All good."));
+    const { mintGatewayKey } = gatewayModelSpy();
+
+    const config = testConfig();
+    config.llm.allowedModels = ["repo/allowed-model"];
+
+    const { runJob } = createReviewPipeline(config, {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    // Resolved the default branch, then fetched .magpie.toml from EXACTLY
+    // that ref.
+    expect(reposGet).toHaveBeenCalledWith(expect.objectContaining({ owner: "acme", repo: "widgets" }));
+    expect(getContent).toHaveBeenCalledWith(expect.objectContaining({ ref: "main" }));
+
+    // The review actually ran (not skipped as diff-too-large): without
+    // ignore_paths this PR is 5006 lines against a 100-line server cap, but
+    // vendor/** is excluded, leaving only 6 — well under both the repo's
+    // (tighter) 50-line cap and the server's 100-line cap.
+    expect(createReview).toHaveBeenCalledTimes(1);
+
+    const stdin = readRecordedStdin();
+    expect(stdin).toBeDefined();
+    // Guidance reached the prompt in its own advisory block.
+    expect(stdin).toContain("REPO_REVIEW_GUIDANCE");
+    expect(stdin).toContain("Please focus on SQL injection risks.");
+    // The ignored file's content never reached the container.
+    expect(stdin).not.toContain("vendor/big.js");
+    expect(stdin).not.toContain("junk");
+
+    // The gateway key was minted scoped to the REPO-overridden (allowed) model.
+    expect(mintGatewayKey).toHaveBeenCalledTimes(1);
+    expect(mintGatewayKey.mock.calls[0][0].llm.model).toBe("repo/allowed-model");
+  });
+
+  it("the same .magpie.toml content on the PR head has no effect — fetched from the default branch only", async () => {
+    const files: FakeFile[] = [{ filename: "src/a.ts", additions: 5, deletions: 1 }];
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const defaultBranchToml = '[review]\nguidance = "from the default branch"\n';
+    const prHeadToml = '[review]\nguidance = "from the PR head — should never be used"\n';
+    // testJob()'s headSha (and fakeOctokit's default `head.sha`) is "deadbeef".
+    const { octokit, createReview, getContent } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: defaultBranchToml, deadbeef: prHeadToml },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("All good."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(getContent).toHaveBeenCalledWith(expect.objectContaining({ ref: "main" }));
+    expect(getContent).not.toHaveBeenCalledWith(expect.objectContaining({ ref: "deadbeef" }));
+
+    const stdin = readRecordedStdin();
+    expect(stdin).toContain("from the default branch");
+    expect(stdin).not.toContain("from the PR head");
+  });
+
+  it("a malformed .magpie.toml falls back to the server config silently — the review still runs", async () => {
+    const files: FakeFile[] = [{ filename: "src/a.ts", additions: 5, deletions: 1 }];
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: "this is not [ valid toml at all" },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptCapturingStdin("All good."));
+
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    const stdin = readRecordedStdin();
+    expect(stdin).not.toContain("REPO_REVIEW_GUIDANCE");
+  });
+
+  it("SECURITY: a hostile .magpie.toml naming every server-only knob it can think of changes NOTHING — same docker argv, same gateway-key model, as with no .magpie.toml at all", async () => {
+    const files: FakeFile[] = [{ filename: "src/a.ts", additions: 5, deletions: 1 }];
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const hostileToml = [
+      "[container]",
+      'image = "evil/reviewer:latest"',
+      'tier = "crun"',
+      "",
+      "[gateway]",
+      'base_url = "http://attacker.example/mgmt"',
+      "per_job_budget_usd = 999999",
+      "",
+      "[limits]",
+      "concurrency = 999",
+      "job_timeout_seconds = 999999",
+    ].join("\n");
+    const { octokit: hostileOctokit, createReview: hostileCreateReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: hostileToml },
+    });
+    const { octokit: cleanOctokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      // No magpieTomlByRef at all — getContent 404s, exactly the "no
+      // .magpie.toml" baseline.
+    });
+
+    const { factory: hostileFactory } = fakeWorkspaceFactory();
+    const hostilePiBinary = writeFakePi(fakePiScriptEmitting("ok"));
+    const { mintGatewayKey: hostileMint } = gatewayModelSpy();
+    const { runJob: hostileRunJob } = createReviewPipeline(testConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: hostileMint,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => hostileOctokit as unknown as Octokit,
+      createWorkspace: hostileFactory,
+      piBinary: hostilePiBinary,
+    });
+    await hostileRunJob(testJob(), new AbortController().signal);
+    const hostileArgv = readRecordedArgv();
+
+    rmSync(join(root, INVOCATION_FILE), { force: true });
+
+    const { factory: cleanFactory } = fakeWorkspaceFactory();
+    const cleanPiBinary = writeFakePi(fakePiScriptEmitting("ok"));
+    const { mintGatewayKey: cleanMint } = gatewayModelSpy();
+    const { runJob: cleanRunJob } = createReviewPipeline(testConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: cleanMint,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => cleanOctokit as unknown as Octokit,
+      createWorkspace: cleanFactory,
+      piBinary: cleanPiBinary,
+    });
+    await cleanRunJob(testJob(), new AbortController().signal);
+    const cleanArgv = readRecordedArgv();
+
+    expect(hostileCreateReview).toHaveBeenCalledTimes(1);
+    // The hostile file named `container.image`/`tier`/`gateway.*`/
+    // `limits.concurrency`/`limits.job_timeout_seconds` — none of which are
+    // in the overridable subset, so the WHOLE file is schema-rejected (see
+    // repo-config.ts's `.strict()` posture) and the resulting docker argv is
+    // identical to a job with no `.magpie.toml` at all, aside from the two
+    // `-v` mount SOURCE paths, which are always fresh per-job mkdtemp dirs
+    // (irrelevant to this SECURITY assertion — normalize them away).
+    const normalize = (argv: string[] | undefined) =>
+      (argv ?? []).map((tok) => tok.replace(/^\/tmp\/[^:]+(?=:)/, "<HOST_PATH>"));
+    expect(normalize(hostileArgv)).toEqual(normalize(cleanArgv));
+    expect(hostileMint.mock.calls[0][0].llm.model).toBe(cleanMint.mock.calls[0][0].llm.model);
+  });
+
+  it("refuses an llm.model override when the server's llm.allowed_models is empty — mints the gateway key with the server's own model", async () => {
+    const files: FakeFile[] = [{ filename: "src/a.ts", additions: 5, deletions: 1 }];
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const { octokit } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files,
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: '[llm]\nmodel = "whatever-the-repo-wants"\n' },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmitting("ok"));
+    const { mintGatewayKey } = gatewayModelSpy();
+
+    const config = testConfig();
+    expect(config.llm.allowedModels).toEqual([]); // precondition: empty allowlist
+
+    const { runJob } = createReviewPipeline(config, {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(mintGatewayKey).toHaveBeenCalledTimes(1);
+    expect(mintGatewayKey.mock.calls[0][0].llm.model).toBe(config.llm.model);
   });
 });
