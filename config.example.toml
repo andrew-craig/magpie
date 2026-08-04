@@ -80,6 +80,18 @@ base_url = "https://openrouter.ai/api/v1"
 # Example: "anthropic/claude-sonnet-4.5"
 model = "anthropic/claude-sonnet-4.5"
 
+# M6-B (task_220f): the ONLY models an allowlisted repo's own `.magpie.toml`
+# is permitted to switch the review to (see docs/repo-config.md). Default: []
+# (empty) — an empty/absent list means NO repo can override the model at all,
+# so this is opt-in per operator, not on by default. This model above (the
+# server's own default) does NOT need to be listed here for the server's own
+# default to keep working — allowed_models only gates a REPO's override, not
+# the server's baseline. A repo-requested model that isn't in this list is
+# silently refused (logged) and the job runs with the model above instead —
+# it is never treated as a config error or a reason to skip the review.
+# Example: allowed_models = ["anthropic/claude-sonnet-4.5", "openai/gpt-5"]
+allowed_models = []
+
 [server]
 # Host/interface the webhook HTTP server listens on.
 # Default: "127.0.0.1" (localhost only; expose via Cloudflare Tunnel, not by

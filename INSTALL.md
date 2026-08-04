@@ -109,7 +109,11 @@ sudoedit /etc/magpie/magpie.env            # MAGPIE_WEBHOOK_SECRET, MAGPIE_GATEW
 ```
 
 Edit `/etc/magpie/config.toml` (GitHub App id, `private_key_path`,
-`repo_allowlist`, LLM model) — it was seeded from `config.example.toml`.
+`repo_allowlist`, LLM model) — it was seeded from `config.example.toml`. If
+you want allowlisted repos to be able to switch models for themselves via
+their own `.magpie.toml` (see [`docs/repo-config.md`](docs/repo-config.md)),
+set `llm.allowed_models` here too — it's empty (no repo-level model override
+possible) by default.
 
 Place the GitHub App private key where `config.toml`'s `private_key_path`
 points (default `/etc/magpie/github-app.private-key.pem`), readable by

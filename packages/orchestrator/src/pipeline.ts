@@ -40,8 +40,29 @@
 //      reviewed" (best-effort, never fails the job, never wrongly skips a
 //      review) — see the try/catch below. The returned `minimizableNodeIds`
 //      snapshot is threaded through to step 7's post-publish minimize call.
+//   2y. PER-REPO CONFIG (M6-B, task_220f, repo-config.ts): resolve the base
+//      repo's default branch (`octokit.rest.repos.get`) and fetch/validate
+//      `.magpie.toml` from THAT ref only — never `job.headSha`, never a
+//      PR-supplied base ref (see repo-config.ts's module doc comment for the
+//      full SECURITY rationale). `applyRepoConfig` builds the per-job
+//      EFFECTIVE `Config` field-by-field from the server `config`, changing
+//      at most `llm.model` (gated by the server's `llm.allowed_models`) and
+//      `limits.maxDiffLines` (clamped down, never up); `guidance` and
+//      `ignorePaths` are sidecar values, not `Config` fields. Every step from
+//      here on uses `effectiveConfig`, never the original `config` — that
+//      original binding is left untouched so it's always available as the
+//      "pure server truth" (used by, e.g., the outer `cleanupJob` below,
+//      which has no per-job effective config to draw from). Placed AFTER the
+//      M5-C dedup check (an already-reviewed job shouldn't pay for the extra
+//      API round-trip) but BEFORE minting the gateway virtual key in step 2a,
+//      because that key is scoped to `config.llm.model` and must be scoped to
+//      whatever model this job actually ends up using. Fails soft: any error
+//      resolving the default branch or fetching/validating the file leaves
+//      `effectiveConfig === config` (see the try/catch below) — a per-repo
+//      config problem must never fail or skip a review.
 //   2a. Mint ONE fresh gateway virtual key (gateway.ts's
-//      `mintGatewayKeyFromConfig`, M4-B) scoped to `config.llm.model`, with a
+//      `mintGatewayKeyFromConfig`, M4-B) scoped to `effectiveConfig.llm.model`
+//      (step 2y's possibly repo-overridden model), with a
 //      budget/TTL from `config.gateway`. From here on the rest of the job
 //      body runs inside a `try/finally` that revokes this key on every exit
 //      path (success, a thrown error, or a "review failed" result) — mirrors
@@ -65,7 +86,9 @@
 //      exit path (success, a thrown error, or a "review failed" result — the
 //      last of those is not an error at all, see step 6).
 //   4. Compute the PR diff via the GitHub API (diff.ts), capped by
-//      `config.limits.maxDiffLines`.
+//      `effectiveConfig.limits.maxDiffLines` (step 2y) and, per M6-B, with any
+//      `ignorePaths` glob matches dropped from both the changed-file list and
+//      the diff body before that cap is even applied.
 //   5. Fetch PR title/body/head sha (needed by the reviewer prompt; the
 //      queue's `JobDescriptor` deliberately doesn't carry title/body — see
 //      queue.ts). This call is deliberately made AFTER the diff fetch and
@@ -137,6 +160,7 @@ import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
 import type { ReviewState } from "./rereview.js";
 import { minimizeOutdated, readReviewState } from "./rereview.js";
+import { applyRepoConfig, fetchRepoConfig } from "./repo-config.js";
 import type { ReviewResult } from "./reviewer.js";
 import { runReview } from "./reviewer.js";
 import type { Tier } from "./tier-ladder.js";
@@ -417,6 +441,61 @@ export function createReviewPipeline(
         return;
       }
 
+      // Step 2y (M6-B, task_220f): resolve per-repo config overrides from
+      // `.magpie.toml`, read ONLY from the base repo's DEFAULT branch — see
+      // repo-config.ts's module doc comment for the full SECURITY rationale
+      // (never `job.headSha`, never any PR-supplied ref). Placed AFTER the
+      // M5-C dedup check above (an already-reviewed job shouldn't pay for the
+      // extra API round-trip this involves) but BEFORE minting the gateway
+      // virtual key just below: that key is scoped to `config.llm.model`
+      // (gateway.ts's `mintGatewayKeyFromConfig`), so the EFFECTIVE model —
+      // which a repo override may have changed — must be known before that
+      // mint call, not after. `effectiveConfig` is what the REST of this job
+      // uses from here on; the original `config` param is never touched
+      // again, so every non-overridable field is guaranteed to still be the
+      // server's own value (see repo-config.ts's `applyRepoConfig`).
+      logger.info({ event: "resolving-repo-config", ...jobLogFields(job) });
+      let effectiveConfig = config;
+      let guidance = "";
+      let ignorePaths: string[] = [];
+      try {
+        // The base repo's default branch — NOT `job.headSha`, NOT any PR
+        // base ref — is the one surface `.magpie.toml` is trusted from (see
+        // repo-config.ts). A PR can target a non-default base branch, so
+        // even `pr.base.ref` would be a weaker, still PR-author-influenced
+        // signal; only the repo's actual default branch means "whoever the
+        // repo owner trusts to push here".
+        const { data: repoMeta } = await octokit.rest.repos.get({ owner: job.owner, repo: job.repo });
+        const repoConfig = await fetchRepoConfig({
+          octokit,
+          owner: job.owner,
+          repo: job.repo,
+          ref: repoMeta.default_branch,
+          logger,
+        });
+        const applied = applyRepoConfig(config, repoConfig, logger);
+        effectiveConfig = applied.config;
+        guidance = applied.guidance;
+        ignorePaths = applied.ignorePaths;
+      } catch (err) {
+        // `fetchRepoConfig`/`applyRepoConfig` never throw on their own (see
+        // repo-config.ts's FAIL-SOFT contract) — this only catches the
+        // `repos.get` default-branch lookup itself failing (e.g. a
+        // transient API error). Same fail-soft posture either way: fall
+        // back to the pure server `config` rather than fail or skip the
+        // review over a repo-config problem.
+        logger.error({
+          event: "repo-config-resolve-failed",
+          ...jobLogFields(job),
+          error: serializeError(err),
+        });
+      }
+
+      if (signal.aborted) {
+        earlyOutcome = "aborted";
+        return;
+      }
+
       // Step 2a: mint the per-job gateway virtual key (see module doc comment).
       // A mint failure throws (gateway.ts) and propagates like any other
       // pre-workspace failure — no key was allocated, so there is nothing to
@@ -424,7 +503,7 @@ export function createReviewPipeline(
       // subsequent exit path (success, thrown error, review-failed result,
       // abort), one level out from the workspace cleanup.
       logger.info({ event: "minting-gateway-key", ...jobLogFields(job) });
-      const gatewayKey = await mintGatewayKey(config, job.id);
+      const gatewayKey = await mintGatewayKey(effectiveConfig, job.id);
 
       try {
         if (signal.aborted) {
@@ -438,7 +517,7 @@ export function createReviewPipeline(
           prNumber: job.prNumber,
           headSha: job.headSha,
           token,
-          workDir: config.workspace.workDir,
+          workDir: effectiveConfig.workspace.workDir,
         });
 
         try {
@@ -486,7 +565,8 @@ export function createReviewPipeline(
               repo: job.repo,
               base: reviewState.lastReviewedSha ?? job.before,
               head: job.after,
-              maxDiffLines: config.limits.maxDiffLines,
+              maxDiffLines: effectiveConfig.limits.maxDiffLines,
+              ignorePaths,
             });
             if (inc.available) {
               prDiff = inc.result;
@@ -502,6 +582,7 @@ export function createReviewPipeline(
                     owner: job.owner,
                     repo: job.repo,
                     prNumber: job.prNumber,
+                    ignorePaths,
                   })
                 ).changedFiles;
               }
@@ -526,7 +607,8 @@ export function createReviewPipeline(
                 owner: job.owner,
                 repo: job.repo,
                 prNumber: job.prNumber,
-                maxDiffLines: config.limits.maxDiffLines,
+                maxDiffLines: effectiveConfig.limits.maxDiffLines,
+                ignorePaths,
               });
               reviewChangedFiles = prDiff.changedFiles;
             }
@@ -536,7 +618,8 @@ export function createReviewPipeline(
               owner: job.owner,
               repo: job.repo,
               prNumber: job.prNumber,
-              maxDiffLines: config.limits.maxDiffLines,
+              maxDiffLines: effectiveConfig.limits.maxDiffLines,
+              ignorePaths,
             });
             reviewChangedFiles = prDiff.changedFiles;
           }
@@ -588,16 +671,16 @@ export function createReviewPipeline(
               event: "diff-too-large",
               ...jobLogFields(job),
               changedLineCount: prDiff.changedLineCount,
-              maxDiffLines: config.limits.maxDiffLines,
+              maxDiffLines: effectiveConfig.limits.maxDiffLines,
             });
             result = {
               ok: true,
               summary: incremental
                 ? `The changes pushed since the last review total ${prDiff.changedLineCount} lines, ` +
-                  `which exceeds the configured review cap of ${config.limits.maxDiffLines}. ` +
+                  `which exceeds the configured review cap of ${effectiveConfig.limits.maxDiffLines}. ` +
                   `Skipping automated review of this update.`
                 : `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
-                  `configured review cap of ${config.limits.maxDiffLines}. Skipping automated review.`,
+                  `configured review cap of ${effectiveConfig.limits.maxDiffLines}. Skipping automated review.`,
               // No findings possible for a skipped review (task_0d97/wave 3 owns
               // the real anchor+inline wiring); this is a minimal type-fix so this
               // synthetic result still satisfies reviewer.ts's now-required
@@ -621,7 +704,7 @@ export function createReviewPipeline(
             logger.info({
               event: "running-review",
               ...jobLogFields(job),
-              tier: resolvedTier ?? config.container.tier,
+              tier: resolvedTier ?? effectiveConfig.container.tier,
             });
             result = await runReview({
               workspaceDir: workspace.dir,
@@ -637,7 +720,22 @@ export function createReviewPipeline(
               incremental,
               prTitle: pr.title,
               prBody: pr.body ?? "",
-              config,
+              // The per-job EFFECTIVE config (M6-B, step 2y above) — server
+              // config with at most `llm.model`/`limits.maxDiffLines`
+              // overridden by a validated `.magpie.toml` on the base repo's
+              // default branch. Every other field (container/tier/image,
+              // gateway, budgets, timeouts, ...) is guaranteed identical to
+              // the server's own `config` (see repo-config.ts's
+              // `applyRepoConfig`).
+              config: effectiveConfig,
+              // Repo-supplied advisory guidance + ignore-globs (M6-B), also
+              // from step 2y — `guidance` is folded into the prompt as its
+              // own nonce-tagged advisory block, `ignorePaths` is a
+              // belt-and-braces re-filter of Pi's reported findings (diff.ts
+              // already kept ignored files out of `diff`/`reviewChangedFiles`
+              // above).
+              guidance,
+              ignorePaths,
               // The per-job virtual key minted in step 2a above (see this
               // module's doc comment) — reviewer.ts sets this as the review
               // container's OPENROUTER_API_KEY (M4-C).
