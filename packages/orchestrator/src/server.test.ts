@@ -331,9 +331,8 @@ describe("buildHealthzTierSnapshot", () => {
         microvmLauncher: { present: true, binary: "magpie-krun-launch", version: "0.1.0" },
         microvmRootfsConfigured: false,
         crunRuntime: { present: true, binary: "podman", version: "podman version 4.9.3" },
-        gvisor: { present: false },
       },
-      availability: { microvm: false, gvisor: false, crun: true },
+      availability: { microvm: false, crun: true },
       reasons: ["kvm: available", "resolution: \"crun\""],
       ...overrides,
     };
@@ -365,9 +364,8 @@ describe("buildHealthzTierSnapshot", () => {
         microvmLauncher: { present: false, binary: "magpie-krun-launch", reason: "not found" },
         microvmRootfsConfigured: false,
         crunRuntime: { present: true, binary: "docker" },
-        gvisor: { present: false },
       },
-      availability: { microvm: false, gvisor: false, crun: true },
+      availability: { microvm: false, crun: true },
     });
     const snapshot = buildHealthzTierSnapshot(result);
     expect(snapshot.degraded).toBe(true);

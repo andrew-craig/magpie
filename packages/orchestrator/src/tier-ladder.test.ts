@@ -102,7 +102,6 @@ describe("parseAckTier", () => {
 
   it("accepts each known tier exactly", () => {
     expect(parseAckTier("microvm")).toBe("microvm");
-    expect(parseAckTier("gvisor")).toBe("gvisor");
     expect(parseAckTier("crun")).toBe("crun");
   });
 
@@ -121,7 +120,6 @@ describe("computeAvailability", () => {
       microvmLauncher: { present: true, binary: "magpie-krun-launch" },
       microvmRootfsConfigured: true,
       crunRuntime: { present: true, binary: "podman", version: "podman version 4.3.1" },
-      gvisor: { present: false },
       ...overrides,
     };
   }
@@ -135,10 +133,6 @@ describe("computeAvailability", () => {
     expect(computeAvailability(probeWith({ microvmRootfsConfigured: false })).microvm).toBe(false);
   });
 
-  it("gvisor is always unavailable today (task_624d deferred slot)", () => {
-    expect(computeAvailability(probeWith()).gvisor).toBe(false);
-  });
-
   it("crun tracks the runtime probe directly", () => {
     expect(computeAvailability(probeWith()).crun).toBe(true);
     expect(
@@ -149,14 +143,13 @@ describe("computeAvailability", () => {
 });
 
 describe("pickStrongestAvailable", () => {
-  it("prefers microvm > gvisor > crun, in that order", () => {
-    expect(pickStrongestAvailable({ microvm: true, gvisor: true, crun: true })).toBe("microvm");
-    expect(pickStrongestAvailable({ microvm: false, gvisor: true, crun: true })).toBe("gvisor");
-    expect(pickStrongestAvailable({ microvm: false, gvisor: false, crun: true })).toBe("crun");
+  it("prefers microvm > crun, in that order", () => {
+    expect(pickStrongestAvailable({ microvm: true, crun: true })).toBe("microvm");
+    expect(pickStrongestAvailable({ microvm: false, crun: true })).toBe("crun");
   });
 
   it("returns null when nothing is available", () => {
-    expect(pickStrongestAvailable({ microvm: false, gvisor: false, crun: false })).toBeNull();
+    expect(pickStrongestAvailable({ microvm: false, crun: false })).toBeNull();
   });
 });
 
@@ -171,7 +164,6 @@ describe("probeTier", () => {
     expect(probe.kvm).toEqual({ available: true, reason: null });
     expect(probe.microvmLauncher.present).toBe(true);
     expect(probe.crunRuntime).toEqual({ present: true, binary: "podman", version: "podman version 4.3.1" });
-    expect(probe.gvisor).toEqual({ present: false });
   });
 
   it("parses a magpie-tier-probe exit-1 (kvm:false) result as an ordinary negative answer, not an error", async () => {
@@ -239,7 +231,7 @@ describe("resolveTier", () => {
     expect(result.requestedTier).toBe("microvm");
     expect(result.degraded).toBe(false);
     expect(result.acknowledgedTier).toBeNull();
-    expect(result.availability).toEqual({ microvm: true, gvisor: false, crun: true });
+    expect(result.availability).toEqual({ microvm: true, crun: true });
   });
 
   it("(b) fails loud when the configured tier (microvm) is unavailable and no acknowledgement is set", async () => {
@@ -271,15 +263,15 @@ describe("resolveTier", () => {
   });
 
   it("does not accept an acknowledgement for a DIFFERENT tier than the one actually resolved", async () => {
-    // Ack says "gvisor" (never actually available), but the real degradation
-    // lands on "crun" -- the ack must match the RESOLVED tier exactly, not
-    // just be "any ack is present".
+    // Ack says "microvm" (the requested tier, not what's actually available),
+    // but the real degradation lands on "crun" -- the ack must match the
+    // RESOLVED tier exactly, not just be "any valid ack is present".
     const config = testConfig({ container: { tier: "microvm", dockerBin: "podman" } });
     const exec = fakeExecFileFn({
       podman: { kind: "resolve", stdout: "podman version 4.3.1\n" },
     });
 
-    await expect(resolveTier(config, { execFileFn: exec, env: { MAGPIE_ACK_TIER: "gvisor" } })).rejects.toThrow(
+    await expect(resolveTier(config, { execFileFn: exec, env: { MAGPIE_ACK_TIER: "microvm" } })).rejects.toThrow(
       TierSelectionError,
     );
   });
@@ -336,8 +328,8 @@ describe("resolveTier", () => {
 
 // Exercise TierAvailability's shape is exactly what pickStrongestAvailable/computeAvailability agree on.
 describe("TierAvailability shape sanity", () => {
-  it("has exactly the three ladder tiers as keys", () => {
-    const availability: TierAvailability = { microvm: false, gvisor: false, crun: false };
-    expect(Object.keys(availability).sort()).toEqual(["crun", "gvisor", "microvm"]);
+  it("has exactly the two ladder tiers as keys", () => {
+    const availability: TierAvailability = { microvm: false, crun: false };
+    expect(Object.keys(availability).sort()).toEqual(["crun", "microvm"]);
   });
 });

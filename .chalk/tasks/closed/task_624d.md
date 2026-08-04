@@ -2,14 +2,14 @@
 id: task_624d
 title: gVisor (runsc) middle tier — deferred per CTO decision 4
 type: task
-status: open
+status: closed
 priority: 3
 labels: []
 blocked_by: []
 parent: epic_59b1
 remote_task_url: null
 created_at: 2026-07-10T21:53:21Z
-updated_at: 2026-07-28T22:51:32Z
+updated_at: 2026-08-04T22:54:07Z
 ---
 Rescoped 2026-07-19 by the CTO decision on docs/design/cto-decision-brief.md (was: M6-C, run
 the reviewer under gVisor via docker --runtime=runsc). gVisor is now the **middle tier of the
@@ -33,3 +33,13 @@ slot):
 
 Done when: an end-to-end review passes on the gVisor tier on an eligible host, the ladder
 selects it automatically between micro-VM and crun, and all M8 invariant tests stay green.
+
+## Resolution
+
+Permanently descoped per user decision on 2026-08-05. gVisor will not be implemented; this
+task is closed rather than left open/deferred. The M8 isolation ladder is being collapsed
+from three tiers to two: micro-VM (KVM) > hardened crun (the floor). The wired-but-empty
+gVisor slot in `tier-ladder.ts` (the `Tier` union member, `TIER_RANK` entry, probe stub, and
+related doc comments/error strings) is being removed alongside this closure, along with the
+corresponding references in `AGENTS.md`, `INSTALL.md`, `DISTRIBUTION.md`, `PLAN.md`, and
+`docs/review-flow.md`.

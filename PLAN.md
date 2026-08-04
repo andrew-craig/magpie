@@ -49,15 +49,14 @@ PR content execute in a context holding secrets.
 
 The threat model above assumes the reviewer runs inside *some* sandbox. M8 makes the strength
 of that sandbox explicit and **tier-qualified** rather than a single unqualified claim: at
-startup Magpie probes the host and selects the strongest of three isolation tiers it can
-actually deliver, ranked **micro-VM (KVM) > gVisor (deferred, `task_624d`) > hardened crun**
+startup Magpie probes the host and selects the strongest of two isolation tiers it can
+actually deliver, ranked **micro-VM (KVM) > hardened crun**
 (see `docs/design/cto-decision-brief.md` §5 for the full design and rationale, and
 `packages/orchestrator/src/tier-ladder.ts` for the implementation):
 
 | Tier | Mechanism | Status |
 |---|---|---|
 | micro-VM (KVM) | rootless libkrun micro-VM under Podman — a real, separate guest kernel, vsock-only gateway channel | opt-in (needs `/dev/kvm` + `[microvm]` config — see `INSTALL.md`) |
-| gVisor | userspace kernel (`runsc`) | not yet implemented — deliberately deferred, `task_624d` |
 | hardened crun (the floor) | rootless Podman + crun — `--cap-drop=ALL`, `--read-only`, `--network none`, pids/mem caps, `.git`-stripped read-only `/work` | **the shipped default** |
 
 **No unqualified isolation claims.** A statement like "Magpie sandboxes the reviewer in a
@@ -374,7 +373,7 @@ magpie/
    caps, incremental re-review + comment minimization, cost logging, `synchronize` dedup.
 6. **Nice-to-haves (later):** `@magpie review` comment command for on-demand re-review,
    per-repo config file (`.magpie.toml` — read from the *base* branch only, never the PR
-   head, to keep config out of attacker control), gVisor runtime, multi-provider support.
+   head, to keep config out of attacker control), multi-provider support.
 7. **Distribution / self-hosting (M7):** make Magpie self-hostable by other organisations, not
    just this deployment. Core isolation change: "Design D" — the reviewer container runs
    `--network none` and reaches the host gateway over a bind-mounted per-job unix socket
@@ -389,8 +388,8 @@ magpie/
    [DISTRIBUTION.md](DISTRIBUTION.md) for the full design, threat-model preservation argument,
    and rejected alternatives.
 8. **Isolation-tier ladder (M8):** replace the single hardened-container assumption with a
-   ranked, auditable ladder — micro-VM (KVM, rootless libkrun under Podman) > gVisor (deferred,
-   `task_624d`) > hardened crun (the floor, byte-for-byte today's shipped posture) — resolved at
+   ranked, auditable ladder — micro-VM (KVM, rootless libkrun under Podman) > hardened crun
+   (the floor, byte-for-byte today's shipped posture) — resolved at
    startup by probing the host, never silently degraded (a downgrade requires an explicit
    `MAGPIE_ACK_TIER` operator acknowledgement), and surfaced only to the operator (`/healthz` +
    logs), never the PR. Moves the reviewer-launching substrate to rootless Podman (no root
