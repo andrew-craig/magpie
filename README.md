@@ -66,6 +66,11 @@ The `dev` and `start` scripts load `.env` automatically via Node's built-in
 optional — in production, supply these vars via a systemd `EnvironmentFile=`
 instead.
 
+An individual allowlisted repo can additionally tune a small, pre-approved
+slice of review behaviour (model, diff-size cap, reviewer guidance, ignored
+paths) by committing a `.magpie.toml` file to its own default branch — see
+[`docs/repo-config.md`](docs/repo-config.md).
+
 ## Running
 
 ```bash

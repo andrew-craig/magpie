@@ -35,6 +35,21 @@ const rawConfigSchema = z
       .object({
         base_url: z.string().min(1).default("https://openrouter.ai/api/v1"),
         model: z.string().min(1),
+        // M6-B (task_220f): the server-side allowlist gating a repo's
+        // `.magpie.toml`'s `[llm] model` override (see repo-config.ts's
+        // `applyRepoConfig`). A repo can ONLY switch models to a value the
+        // OPERATOR has explicitly opted into here — never an arbitrary
+        // string a PR author/repo owner picks, since the model choice feeds
+        // straight into which (potentially far pricier) provider model the
+        // per-job gateway virtual key gets scoped to (gateway.ts's
+        // `mintGatewayKeyFromConfig`). Default `[]`: an empty/absent list
+        // means NO repo-level model override is possible at all — the
+        // per-repo feature is opt-in per knob, not just per-repo. The
+        // server's own configured `model` above does NOT need to appear in
+        // this list for the server's own default to keep working (that
+        // path never consults `allowed_models` — only an explicit repo
+        // override does).
+        allowed_models: z.array(z.string().min(1)).default([]),
       })
       .strict(),
     server: z
@@ -262,6 +277,8 @@ export interface Config {
   llm: {
     baseUrl: string;
     model: string;
+    /** Server-side allowlist for a repo's `.magpie.toml` `[llm] model` override (M6-B). Empty means no repo-level model override is possible. See schema comment above. */
+    allowedModels: string[];
   };
   server: {
     host: string;
@@ -594,6 +611,7 @@ export function loadConfig(configPath?: string): Config {
     llm: {
       baseUrl: data.llm.base_url,
       model: data.llm.model,
+      allowedModels: data.llm.allowed_models,
     },
     server: {
       host: data.server.host,

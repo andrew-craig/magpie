@@ -19,7 +19,7 @@ import {
 function testConfig(overrides: Partial<Config["container"]> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
-    llm: { baseUrl: "https://example.com/v1", model: "some/model" },
+    llm: { baseUrl: "https://example.com/v1", model: "some/model", allowedModels: [] },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
     repoAllowlist: [],

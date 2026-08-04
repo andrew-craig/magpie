@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Octokit } from "@octokit/rest";
-import { computeIncrementalDiff, computePrDiff, listPrChangedFiles } from "./diff.js";
+import { computeIncrementalDiff, computePrDiff, filterUnifiedDiff, listPrChangedFiles } from "./diff.js";
 
 // NOTE: everything here runs fully offline. We hand-roll a fake Octokit
 // exposing only the surface computePrDiff actually calls
@@ -115,6 +115,92 @@ describe("computePrDiff", () => {
     expect(result.tooLarge).toBe(false);
     expect(result.diff).toBeDefined();
     expect(result.diff).toBe("");
+  });
+
+  it("M6-B: ignorePaths excludes a vendored file from the size count AND the diff body, letting an otherwise-oversized PR through", async () => {
+    const files: FakeFile[] = [
+      { filename: "src/a.ts", additions: 10, deletions: 2 },
+      { filename: "vendor/huge.js", additions: 10000, deletions: 0 },
+    ];
+    const diffText = [
+      "diff --git a/src/a.ts b/src/a.ts\n",
+      "+hello\n",
+      "diff --git a/vendor/huge.js b/vendor/huge.js\n",
+      "+".repeat(50) + "\n",
+    ].join("");
+    const { octokit, get } = fakeOctokit(files, diffText);
+
+    const result = await computePrDiff({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 7,
+      maxDiffLines: 100,
+      ignorePaths: ["vendor/**"],
+    });
+
+    // Without ignorePaths this PR (10012 changed lines) would be tooLarge
+    // against a 100-line cap; with vendor/** excluded it's only 12.
+    expect(result.tooLarge).toBe(false);
+    expect(result.changedFiles).toEqual(["src/a.ts"]);
+    expect(result.changedLineCount).toBe(12);
+    expect(get).toHaveBeenCalled();
+    expect(result.diff).toBe("diff --git a/src/a.ts b/src/a.ts\n+hello\n");
+    expect(result.diff).not.toContain("vendor/huge.js");
+  });
+});
+
+describe("filterUnifiedDiff", () => {
+  const diffText = [
+    "diff --git a/src/a.ts b/src/a.ts\n",
+    "index 111..222 100644\n",
+    "--- a/src/a.ts\n",
+    "+++ b/src/a.ts\n",
+    "@@ -1 +1 @@\n",
+    "+hello\n",
+    "diff --git a/vendor/lib.js b/vendor/lib.js\n",
+    "index 333..444 100644\n",
+    "--- a/vendor/lib.js\n",
+    "+++ b/vendor/lib.js\n",
+    "@@ -1 +1 @@\n",
+    "+junk\n",
+    "diff --git a/README.md b/README.md\n",
+    "index 555..666 100644\n",
+    "--- a/README.md\n",
+    "+++ b/README.md\n",
+    "@@ -1 +1 @@\n",
+    "+docs\n",
+  ].join("");
+
+  it("returns the text unchanged when ignorePaths is empty", () => {
+    expect(filterUnifiedDiff(diffText, [])).toBe(diffText);
+  });
+
+  it("drops only the blocks matching an ignore glob", () => {
+    const filtered = filterUnifiedDiff(diffText, ["vendor/**"]);
+    expect(filtered).toContain("src/a.ts");
+    expect(filtered).toContain("README.md");
+    expect(filtered).not.toContain("vendor/lib.js");
+  });
+
+  it("drops multiple matching blocks with multiple patterns", () => {
+    const filtered = filterUnifiedDiff(diffText, ["vendor/**", "*.md"]);
+    expect(filtered).toContain("src/a.ts");
+    expect(filtered).not.toContain("vendor/lib.js");
+    expect(filtered).not.toContain("README.md");
+  });
+
+  it("returns an empty string when every block is ignored", () => {
+    expect(filterUnifiedDiff(diffText, ["**"])).toBe("");
+  });
+
+  it("returns an empty string unchanged", () => {
+    expect(filterUnifiedDiff("", ["**"])).toBe("");
+  });
+
+  it("keeps a block whose path can't be determined (no diff --git header) rather than guessing", () => {
+    const weird = "not a real diff header\n+something\n";
+    expect(filterUnifiedDiff(weird, ["**"])).toBe(weird);
   });
 });
 
@@ -355,6 +441,35 @@ describe("computeIncrementalDiff", () => {
     if (result.available) throw new Error("unreachable");
     expect(result.reason).toMatch(/may be truncated/);
   });
+
+  it("M6-B: ignorePaths excludes matching files from the range's size count and diff body", async () => {
+    const files: FakeFile[] = [
+      { filename: "src/new.ts", additions: 8, deletions: 2 },
+      { filename: "vendor/generated.js", additions: 5000, deletions: 0 },
+    ];
+    const diffText = [
+      "diff --git a/src/new.ts b/src/new.ts\n+added\n",
+      "diff --git a/vendor/generated.js b/vendor/generated.js\n+junk\n",
+    ].join("");
+    const { octokit } = fakeCompareOctokit({ status: "ahead", files, diffText });
+
+    const result = await computeIncrementalDiff({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      base: BEFORE,
+      head: AFTER,
+      maxDiffLines: 100,
+      ignorePaths: ["vendor/**"],
+    });
+
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error("unreachable");
+    expect(result.result.tooLarge).toBe(false);
+    expect(result.result.changedFiles).toEqual(["src/new.ts"]);
+    expect(result.result.changedLineCount).toBe(10);
+    expect(result.result.diff).not.toContain("vendor/generated.js");
+  });
 });
 
 describe("listPrChangedFiles", () => {
@@ -375,5 +490,40 @@ describe("listPrChangedFiles", () => {
     expect(result.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
     expect(result.changedLineCount).toBe(10);
     expect(paginate).toHaveBeenCalledTimes(1);
+  });
+
+  it("M6-B: excludes files matching ignorePaths from both the file list and the line count", async () => {
+    const files: FakeFile[] = [
+      { filename: "src/a.ts", additions: 4, deletions: 1 },
+      { filename: "vendor/lib.js", additions: 1000, deletions: 1000 },
+    ];
+    const { octokit } = fakeOctokit(files);
+
+    const result = await listPrChangedFiles({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 7,
+      ignorePaths: ["vendor/**"],
+    });
+
+    expect(result.changedFiles).toEqual(["src/a.ts"]);
+    expect(result.changedLineCount).toBe(5);
+  });
+
+  it("M6-B: an empty ignorePaths list changes nothing (no-op)", async () => {
+    const files: FakeFile[] = [{ filename: "src/a.ts", additions: 4, deletions: 1 }];
+    const { octokit } = fakeOctokit(files);
+
+    const result = await listPrChangedFiles({
+      octokit: octokit as unknown as Octokit,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 7,
+      ignorePaths: [],
+    });
+
+    expect(result.changedFiles).toEqual(["src/a.ts"]);
+    expect(result.changedLineCount).toBe(5);
   });
 });
