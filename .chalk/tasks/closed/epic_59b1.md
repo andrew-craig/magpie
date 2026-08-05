@@ -2,14 +2,14 @@
 id: epic_59b1
 title: Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
 type: epic
-status: open
+status: closed
 priority: 1
 labels: [security,milestone-8,microvm]
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-07-19T22:52:53Z
-updated_at: 2026-07-19T22:52:53Z
+updated_at: 2026-08-05T07:35:35Z
 ---
 CTO approved (2026-07-19) the §5 synthesis in docs/design/cto-decision-brief.md: rootless KVM
 micro-VM reviewer sandbox — libkrun/krun under rootless Podman — on Proposal B's rootless
