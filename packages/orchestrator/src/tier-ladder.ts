@@ -7,10 +7,9 @@
 // acknowledgement, and the selected tier is what actually launches jobs"
 // (task_2f46's own "Done when" line).
 //
-// THE LADDER (strongest first): micro-VM (KVM) > gVisor (deferred, empty
-// slot -- task_624d) > hardened crun (the floor). Ranked, not just listed:
-// {@link TIER_RANK} is the one place that encodes "stronger than" for the
-// whole module.
+// THE LADDER (strongest first): micro-VM (KVM) > hardened crun (the floor).
+// Ranked, not just listed: {@link TIER_RANK} is the one place that encodes
+// "stronger than" for the whole module.
 //
 // THE SIN THIS EXISTS TO PREVENT: silent degradation. A host that can no
 // longer do what its config asks for (KVM revoked, rootfs misconfigured, the
@@ -65,13 +64,10 @@ import type { ExecFileFn } from "./docker.js";
 const execFileAsync = promisify(execFileCb);
 
 /**
- * The three tiers the ladder knows about, ranked strongest-first by
- * {@link TIER_RANK}. `"gvisor"` has no config surface yet (task_624d) --
- * {@link computeAvailability} always reports it unavailable -- but it's a
- * first-class member of this union so the deferred slot is visibly WIRED,
- * not just a comment promising it'll be added later.
+ * The two tiers the ladder knows about, ranked strongest-first by
+ * {@link TIER_RANK}.
  */
-export type Tier = "microvm" | "gvisor" | "crun";
+export type Tier = "microvm" | "crun";
 
 /**
  * Higher = stronger isolation. The one place "stronger than" is defined for
@@ -79,8 +75,7 @@ export type Tier = "microvm" | "gvisor" | "crun";
  * through this table rather than re-deriving tier order ad hoc.
  */
 const TIER_RANK: Readonly<Record<Tier, number>> = {
-  microvm: 3,
-  gvisor: 2,
+  microvm: 2,
   crun: 1,
 };
 
@@ -130,20 +125,6 @@ export interface RuntimeProbeResult {
   reason?: string;
 }
 
-/**
- * The wired-but-EMPTY gVisor slot (task_624d stays deferred per CTO decision
- * 4 -- see docs/design/cto-decision-brief.md §5's ladder table). `present`
- * is typed as the literal `false`: there is no probe implementation to run
- * yet, so this branch can never report availability by construction, not
- * merely by an `if` that happens to always take the same path today. When
- * task_624d lands, this becomes a real `RuntimeProbeResult`-shaped probe and
- * the literal-`false` type constraint is the compiler-enforced reminder to
- * update every caller that currently assumes it.
- */
-export interface GvisorProbeResult {
-  present: false;
-}
-
 /** Raw probe evidence gathered by {@link probeTier} -- the full audit trail {@link resolveTier} reasons over. */
 export interface TierProbe {
   kvm: KvmProbeResult;
@@ -153,14 +134,11 @@ export interface TierProbe {
   microvmRootfsConfigured: boolean;
   /** Presence of the crun-floor's runtime CLI (`config.container.dockerBin`, e.g. podman or docker). */
   crunRuntime: RuntimeProbeResult;
-  /** See {@link GvisorProbeResult}'s doc comment. */
-  gvisor: GvisorProbeResult;
 }
 
 /** Per-tier availability, derived from {@link TierProbe} by {@link computeAvailability}. */
 export interface TierAvailability {
   microvm: boolean;
-  gvisor: boolean;
   crun: boolean;
 }
 
@@ -351,8 +329,6 @@ export async function probeTier(config: Config, execFileFn: ExecFileFn = execFil
     microvmLauncher,
     microvmRootfsConfigured: config.microvm.rootfsPath.length > 0,
     crunRuntime,
-    // task_624d: no probe implementation exists yet -- see GvisorProbeResult's doc comment.
-    gvisor: { present: false },
   };
 }
 
@@ -367,7 +343,6 @@ export async function probeTier(config: Config, execFileFn: ExecFileFn = execFil
 export function computeAvailability(probe: TierProbe): TierAvailability {
   return {
     microvm: probe.kvm.available && probe.microvmLauncher.present && probe.microvmRootfsConfigured,
-    gvisor: probe.gvisor.present,
     crun: probe.crunRuntime.present,
   };
 }
@@ -396,15 +371,13 @@ function explainTierUnavailable(tier: Tier, probe: TierProbe): string {
       }
       return problems.length > 0 ? problems.join("; ") : "unknown reason";
     }
-    case "gvisor":
-      return "gVisor support is not yet implemented -- deliberately deferred (task_624d), always unavailable today";
     case "crun":
       return probe.crunRuntime.reason ?? "container runtime unavailable";
   }
 }
 
 /** Every tier string this module recognizes -- the only valid values for `MAGPIE_ACK_TIER`. */
-const KNOWN_TIERS: readonly Tier[] = ["microvm", "gvisor", "crun"];
+const KNOWN_TIERS: readonly Tier[] = ["microvm", "crun"];
 
 /**
  * Parses the `MAGPIE_ACK_TIER` environment variable -- the operator's
@@ -473,7 +446,6 @@ export async function resolveTier(config: Config, deps: ResolveTierDeps = {}): P
     `crun runtime (${probe.crunRuntime.binary}): ${
       probe.crunRuntime.present ? `present (${probe.crunRuntime.version ?? "version unknown"})` : `absent (${probe.crunRuntime.reason})`
     }`,
-    "gvisor: not implemented -- deliberately deferred, task_624d",
   ];
 
   if (strongest === null) {
@@ -481,7 +453,6 @@ export async function resolveTier(config: Config, deps: ResolveTierDeps = {}): P
     throw new TierSelectionError(
       "no isolation tier is usable on this host at all: " +
         `micro-VM unavailable (${explainTierUnavailable("microvm", probe)}); ` +
-        `gVisor is not yet implemented (task_624d); ` +
         `crun-floor unavailable (${explainTierUnavailable("crun", probe)}). ` +
         "Magpie refuses to start with no working review sandbox at all -- at minimum, install/" +
         "configure a working container runtime (config.container.docker_bin) to run the crun floor.",

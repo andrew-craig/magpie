@@ -179,7 +179,7 @@ Tunnel path is documented separately in `docs/cloudflared.md`.
 ### Checking the active isolation tier
 
 Magpie runs review jobs at the strongest isolation tier this host can
-actually deliver (micro-VM > gVisor > the hardened crun floor — see
+actually deliver (micro-VM > the hardened crun floor — see
 `PLAN.md`'s isolation-ladder milestone). You can see which tier is active,
 and why, in two operator-only places:
 

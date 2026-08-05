@@ -131,9 +131,7 @@ flowchart TD
 ## Deliberately not shown
 
 Config loading details, the systemd unit layout, `scripts/install.sh`
-provisioning, the exact telemetry record schema, and the gVisor tier (ranked
-in `tier-ladder.ts` but not yet implemented — see `tier-ladder.ts`'s module
-doc comment and `chalk show task_624d`). See `PLAN.md` and
+provisioning, and the exact telemetry record schema. See `PLAN.md` and
 `docs/design/cto-decision-brief.md` for those.
 
 _Diagram reflects `packages/orchestrator/src` as of 2026-07-29 — regenerate

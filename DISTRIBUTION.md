@@ -49,8 +49,8 @@ packaging work.
 
 > **Tier note (M8).** Design D as described in §2.1–§2.6 below is the **hardened crun floor** —
 > the tier every Magpie install ships with by default, unchanged in substance since M7. M8
-> layers a ranked isolation ladder on top of this floor — micro-VM (KVM) > gVisor (deferred) >
-> this crun floor — selected per host at startup; see §2.7 for the ladder itself. Every claim
+> layers a ranked isolation ladder on top of this floor — micro-VM (KVM) > this crun floor —
+> selected per host at startup; see §2.7 for the ladder itself. Every claim
 > in §2.1–§2.6 holds **at the crun-floor tier**. The opt-in micro-VM tier delivers the same
 > no-network / no-secret-in-reviewer properties by different mechanics (a vsock channel instead
 > of a bind-mounted unix socket, a real guest kernel instead of `--network none`) — it does not
@@ -206,14 +206,12 @@ answers a broader question — "what is the reviewer↔host-kernel boundary itse
 ranked, auditable ladder rather than one fixed answer (see
 `docs/design/cto-decision-brief.md` §5 and `packages/orchestrator/src/tier-ladder.ts`):
 
-**micro-VM (KVM) > gVisor (deferred, `task_624d`) > hardened crun (the floor).** The floor is
-exactly the Design D mechanics of §2.1–§2.6, and is what every install runs by default. The
-micro-VM tier is an opt-in a host must explicitly provision (`/dev/kvm` + `[microvm]` config):
-a rootless libkrun micro-VM gives a real, separate guest kernel instead of a shared host kernel,
-with the gateway reached over a per-job hybrid-vsock channel instead of the bind-mounted unix
-socket §2.2 describes (a VM guest can't share a host unix socket by bind mount). gVisor is
-wired as a wholly empty, always-unavailable slot in `tier-ladder.ts` — deliberately deferred,
-not "coming soon" scope creep.
+**micro-VM (KVM) > hardened crun (the floor).** The floor is exactly the Design D mechanics of
+§2.1–§2.6, and is what every install runs by default. The micro-VM tier is an opt-in a host must
+explicitly provision (`/dev/kvm` + `[microvm]` config): a rootless libkrun micro-VM gives a real,
+separate guest kernel instead of a shared host kernel, with the gateway reached over a per-job
+hybrid-vsock channel instead of the bind-mounted unix socket §2.2 describes (a VM guest can't
+share a host unix socket by bind mount).
 
 **No unqualified isolation claims.** Nothing in this document should be read as "the reviewer
 always runs in a micro-VM" — say which tier, every time. The crun floor is the shipped default.
@@ -334,8 +332,7 @@ security deliverable.
    PLAN.md and cross-link this doc.
 
 Out of scope this round (existing tasks): GitHub App Manifest one-click flow; multi-provider
-gateway (M6-D); gVisor (M6-C, orthogonal — still an available `--runtime=runsc` add-on on the
-reviewer `docker run`).
+gateway (M6-D).
 
 ---
 
