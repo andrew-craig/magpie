@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Install-time and runtime KVM preflight for the isolation-tier ladder (M8-D1 / task_2f46). Opens /dev/kvm and issues a real KVM_CREATE_VM ioctl -- never reads CPUID -- so the ladder never trusts a host that merely CLAIMS virtualization support. Standalone: runnable with no Node (the M8-D3 installer's contract), and shelled out to by packages/orchestrator/src/tier-ladder.ts at orchestrator startup. See src/main.rs's module doc comment."
+description = "Install-time and runtime KVM preflight for the isolation-tier ladder. Opens /dev/kvm and issues a real KVM_CREATE_VM ioctl -- never reads CPUID -- so the ladder never trusts a host that merely CLAIMS virtualization support. Standalone: runnable with no Node (the installer's contract), and shelled out to by packages/orchestrator/src/tier-ladder.ts at orchestrator startup. See src/main.rs's module doc comment."
 
 [[bin]]
 name = "magpie-tier-probe"

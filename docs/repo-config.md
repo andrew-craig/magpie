@@ -1,6 +1,6 @@
 # Per-repo config: `.magpie.toml`
 
-Milestone 6-B (`task_220f`). A repo that Magpie already reviews (i.e. it's in
+A repo that Magpie already reviews (i.e. it's in
 the operator's `repo_allowlist`) can tune a small, pre-approved slice of
 review behaviour by committing a `.magpie.toml` file to its **default
 branch**. No operator action is needed to pick this file up — it's read

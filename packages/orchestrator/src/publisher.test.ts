@@ -200,7 +200,7 @@ describe("publishReview", () => {
   });
 });
 
-describe("publishReview — reviewedSha marker (M5-C)", () => {
+describe("publishReview — reviewedSha marker", () => {
   it("embeds the reviewed-sha marker when reviewedSha is passed on the ok:true path", async () => {
     const { client, createComment } = fakeClient();
     const result: ReviewResult = { ok: true, summary: "No issues found in this diff." };
@@ -516,7 +516,7 @@ describe("publishReviewWithFindings", () => {
 });
 
 // ---------------------------------------------------------------------------
-// M8-D2 (task_92d7) regression guard: the active isolation tier is
+// Regression guard: the active isolation tier is
 // OPERATOR-FACING INFORMATION ONLY (/healthz + logs — see server.ts's
 // buildHealthzTierSnapshot and index.ts's `tier-resolved` log line). The
 // design brief's original §8 text said the OPPOSITE — that the tier should
@@ -570,7 +570,7 @@ function expectTierSilent(text: string): void {
   }
 }
 
-describe("M8-D2 tier-silence guard (task_92d7): the published PR review never carries tier/runtime data", () => {
+describe("tier-silence guard: the published PR review never carries tier/runtime data", () => {
   it("publishReview: neither the ok:true summary nor the ok:false reason ever contains a tier/runtime string", async () => {
     const { client: okClient, createComment: okCreateComment } = fakeClient();
     const { client: failClient, createComment: failCreateComment } = fakeClient();

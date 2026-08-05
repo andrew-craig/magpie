@@ -29,7 +29,7 @@
 // `as unknown as string` at the one call site below. The same quirk applies to
 // `repos.compareCommitsWithBasehead` (see {@link computeIncrementalDiff}).
 //
-// Incremental re-review (M5-B): on a `synchronize` delivery the webhook payload
+// Incremental re-review: on a `synchronize` delivery the webhook payload
 // carries the pre/post-push head SHAs (`before`/`after`). Rather than
 // re-reviewing (and re-billing) the whole PR on every follow-up push,
 // {@link computeIncrementalDiff} asks GitHub's compare API for just the
@@ -43,7 +43,7 @@
 // incremental path from ever silently reviewing a WRONG or partial slice: when
 // in any doubt, review everything.
 //
-// Ignore-path filtering (M6-B, task_220f): a repo's `.magpie.toml` may name
+// Ignore-path filtering: a repo's `.magpie.toml` may name
 // `review.ignore_paths` glob patterns (see repo-config.ts). Every function
 // below that lists files/sums changed lines accepts an optional
 // `ignorePaths` and drops matching files BEFORE the `maxDiffLines` sum — so
@@ -80,7 +80,7 @@ export interface ComputePrDiffParams {
   /** Cap on total changed lines; caller passes `config.limits.maxDiffLines`. */
   maxDiffLines: number;
   /**
-   * Glob patterns (M6-B, repo-config.ts's `review.ignore_paths`) for files to
+   * Glob patterns (repo-config.ts's `review.ignore_paths`) for files to
    * exclude from BOTH the size count and the diff body. Defaults to `[]`
    * (no filtering — every existing caller/test is unaffected).
    */
@@ -132,7 +132,7 @@ export async function computePrDiff(
   let diff = response.data as unknown as string;
   // The diff body still contains EVERY file's hunks regardless of the
   // (already-filtered) size count above — strip ignored files' hunks too so
-  // the reviewer never sees their content (M6-B).
+  // the reviewer never sees their content.
   if (ignorePaths.length > 0) {
     diff = filterUnifiedDiff(diff, ignorePaths);
   }
@@ -146,7 +146,7 @@ export interface ListPrChangedFilesParams {
   owner: string;
   repo: string;
   prNumber: number;
-  /** Glob patterns to exclude (M6-B). Defaults to `[]` (no filtering). */
+  /** Glob patterns to exclude. Defaults to `[]` (no filtering). */
   ignorePaths?: string[];
 }
 
@@ -157,7 +157,7 @@ export interface ListPrChangedFilesParams {
  * file list as reviewer context even when only the incremental range is sent
  * to Pi (see {@link computeIncrementalDiff}).
  *
- * `ignorePaths` (M6-B) filters files out BEFORE the line-count sum, so an
+ * `ignorePaths` filters files out BEFORE the line-count sum, so an
  * ignored file never contributes to `changedLineCount` or `changedFiles` —
  * this is what lets `review.ignore_paths` actually shrink an over-cap PR
  * down to something reviewable, not just hide already-counted files later.
@@ -205,7 +205,7 @@ export interface ComputeIncrementalDiffParams {
   head: string;
   /** Cap on total changed lines; caller passes `config.limits.maxDiffLines`. */
   maxDiffLines: number;
-  /** Glob patterns to exclude (M6-B). Defaults to `[]` (no filtering). */
+  /** Glob patterns to exclude. Defaults to `[]` (no filtering). */
   ignorePaths?: string[];
 }
 
@@ -324,7 +324,7 @@ export async function computeIncrementalDiff(
     };
   }
 
-  // Ignore-path filtering (M6-B) applies AFTER the truncation check above
+  // Ignore-path filtering applies AFTER the truncation check above
   // (which is about whether the compare RESPONSE ITSELF is trustworthy, not
   // about which of its files we care about) but BEFORE the size sum, same
   // ordering rationale as listPrChangedFiles.
@@ -370,7 +370,7 @@ export async function computeIncrementalDiff(
   return { available: true, result: { diff, changedFiles, changedLineCount, tooLarge } };
 }
 
-// --- Ignore-path diff-body filtering (M6-B) --------------------------------
+// --- Ignore-path diff-body filtering ----------------------------------------
 //
 // A unified diff from GitHub's `format: "diff"` media type is a concatenation
 // of one block per file, each starting with a `diff --git a/<path> b/<path>`

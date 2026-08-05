@@ -212,7 +212,7 @@ describe("createWebhookServer", () => {
     expect(onPullRequest).not.toHaveBeenCalled();
   });
 
-  it("answers GET /healthz with 200 and the resolved isolation tier + probe details (M8-D2)", async () => {
+  it("answers GET /healthz with 200 and the resolved isolation tier + probe details", async () => {
     const snapshot = testTierSnapshot();
     const { baseUrl } = await start(vi.fn(), snapshot);
     const res = await fetch(`${baseUrl}${HEALTHZ_PATH}`);
@@ -249,7 +249,7 @@ describe("createWebhookServer", () => {
     expect(res.status).toBe(404);
   });
 
-  it("accepts a correctly-signed issue_comment delivery and fires the onIssueComment seam (M6-A)", async () => {
+  it("accepts a correctly-signed issue_comment delivery and fires the onIssueComment seam", async () => {
     const onIssueComment = vi.fn();
     const { baseUrl } = await start(vi.fn(), testTierSnapshot(), onIssueComment);
     const body = issueCommentPayload();

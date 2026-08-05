@@ -1,5 +1,5 @@
-# release-host.yml — publish the magpie HOST-SERVICE release tarballs (M7-3;
-# per-arch as of M8-D3).
+# release-host.yml — publish the magpie HOST-SERVICE release tarballs,
+# one per architecture.
 #
 # WHAT THIS DOES
 #   On a `v*` release tag (e.g. `v0.4.0`) this builds the two host systemd
@@ -10,8 +10,8 @@
 #   two workspaces via `scripts/pack-host.sh`, attaches SLSA build provenance,
 #   and publishes ONE GitHub Release carrying BOTH per-arch tarballs.
 #
-# PER-ARCH (M8-D3)
-#   The tarball now bundles the native `magpie-tier-probe` binary, which is
+# PER-ARCH
+#   The tarball bundles the native `magpie-tier-probe` binary, which is
 #   per-arch, so the host artifact is NO LONGER architecture-independent. The
 #   `build` job is a matrix (linux/amd64 on ubuntu-24.04, linux/arm64 on
 #   ubuntu-24.04-arm), each producing `magpie-<version>-<arch>.tar.gz`; a final

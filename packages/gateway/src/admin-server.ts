@@ -3,8 +3,8 @@
 // SECURITY BOUNDARY: this is the plane that must NEVER be reachable from
 // magpie-net (the review container's network) — only the host orchestrator
 // (and an operator on the host) may mint/revoke keys. Enforced two ways,
-// deliberately redundant (see M4-A task contract's "Prefer two separate
-// http.Server listeners" guidance):
+// deliberately redundant ("prefer two separate http.Server listeners" over
+// relying on either check alone):
 //   1. This server is only ever bound to 127.0.0.1 (config.ts hardcodes
 //      `mgmt.host`, it is not an env-configurable value — see config.ts's
 //      doc comment on that field).
@@ -29,7 +29,7 @@ import type { KeyStore } from "./keystore.js";
 
 const mintKeyBodySchema = z
   .object({
-    // The orchestrator's job id — REQUIRED as of Design D (M7-1): every
+    // The orchestrator's job id — REQUIRED under Design D: every
     // minted key gets its own proxy-plane unix socket keyed by this value
     // (see job-sockets.ts's `JobSocketManager.bind`), so there is no longer
     // a mint request that doesn't need one.
@@ -71,9 +71,9 @@ function isAuthorized(req: http.IncomingMessage, masterKey: string): boolean {
  * Routes:
  *  - `POST   /admin/keys`     — mint a virtual key AND bind its per-job proxy socket. Body: `{ jobId, model?, budgetUsd, ttlSeconds }`. 201 `{ id, key, socketDir }` (`socketDir` is the directory the orchestrator bind-mounts — see job-sockets.ts).
  *  - `DELETE /admin/keys/:id` — revoke a virtual key AND tear down its per-job socket. 200
- *    `{ id, revoked, spentUsd?, budgetUsd? }` (M5-D — the final spend snapshot, so the
+ *    `{ id, revoked, spentUsd?, budgetUsd? }` (the final spend snapshot, so the
  *    orchestrator can log the gateway's own authoritative cost figure alongside Pi's
- *    self-reported usage; see PLAN.md §6 / task_8a10). Idempotent: an unknown/already-revoked
+ *    self-reported usage; see ARCHITECTURE.md §6). Idempotent: an unknown/already-revoked
  *    id still responds 200 with `revoked: false` and no spend fields, never an error.
  *  - anything else            — 404.
  *

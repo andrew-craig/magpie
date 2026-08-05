@@ -1,6 +1,6 @@
 // Publisher: post the review result back to the PR as ONE summary comment.
 //
-// This is the last host-privileged step of the M1 pipeline (webhook -> auth
+// This is the last host-privileged step of the pipeline (webhook -> auth
 // -> clone -> reviewer.ts -> HERE). It takes the `ReviewResult` produced by
 // reviewer.ts and turns it into exactly one `issues.createComment` call —
 // never zero (a silent failure looks worse than an ugly comment) and never
@@ -26,10 +26,10 @@ export type { Finding, InlineComment };
 /**
  * Machine-greppable marker embedded (as an HTML comment, so invisible in
  * rendered markdown) in every comment this module posts. Exported as a
- * constant — rather than inlined per call site — so later milestones (e.g.
- * "find and update/minimize the existing magpie comment on this PR instead
- * of posting a new one") and this module's own tests both key off the exact
- * same literal instead of two copies drifting apart.
+ * constant — rather than inlined per call site — so the dedup/minimize logic
+ * that finds and updates the existing magpie comment on a PR (see
+ * rereview.ts) and this module's own tests both key off the exact same
+ * literal instead of two copies drifting apart.
  */
 export const MAGPIE_REVIEW_MARKER = "<!-- magpie-review -->";
 
@@ -37,7 +37,7 @@ export const MAGPIE_REVIEW_MARKER = "<!-- magpie-review -->";
 const COMMENT_HEADER = "## \u{1F426} Magpie review";
 
 /**
- * Build the hidden "reviewed-sha" marker (M5-C) embedded, in addition to
+ * Build the hidden "reviewed-sha" marker embedded, in addition to
  * {@link MAGPIE_REVIEW_MARKER}, in every DEFINITIVE-outcome publish: a real
  * successful review ({@link publishReviewWithFindings}) or a too-large skip
  * ({@link publishReview}'s `{ok:true}` path). Deliberately NEVER embedded in
@@ -88,7 +88,7 @@ export interface MinimalIssuesClient {
     }): Promise<{ data: { id: number; html_url: string } }>;
   };
   /**
-   * Used only by the M2 structured-findings publish path
+   * Used only by the structured-findings publish path
    * ({@link publishReviewWithFindings}) — `publishReview` never touches it.
    * Included on this same minimal-client interface (rather than a second,
    * parallel interface) so production code hands both publish functions the
@@ -124,7 +124,7 @@ export interface PublishReviewParams {
   /** The outcome of reviewer.ts's `runReview` — either branch is always published, never dropped. */
   result: ReviewResult;
   /**
-   * M5-C: when set, embeds {@link buildReviewedShaMarker}'s hidden marker in
+   * When set, embeds {@link buildReviewedShaMarker}'s hidden marker in
    * the comment body IN ADDITION TO `result.ok`'s own success/failure body —
    * see that function's doc comment for the "definitive outcome only" rule.
    * Callers (pipeline.ts) should only ever pass this on the `result.ok`
@@ -151,11 +151,12 @@ export interface PublishedComment {
  * that still surfaces `result.reason` for debugging. Magpie's publish step
  * intentionally never goes silent — a bare "review failed" comment is far
  * more useful to a human than no comment at all, and it's the only signal
- * this bot ever gives besides inline findings in later milestones.
+ * this bot ever gives besides inline findings (see
+ * {@link publishReviewWithFindings} below).
  *
- * Every comment carries {@link MAGPIE_REVIEW_MARKER} so future milestones
- * (dedup, edit-in-place, minimize-on-update) can find comments this bot
- * posted without guessing at comment text or author heuristics.
+ * Every comment carries {@link MAGPIE_REVIEW_MARKER} so the dedup/edit-in-
+ * place/minimize-on-update logic (see rereview.ts) can find comments this
+ * bot posted without guessing at comment text or author heuristics.
  */
 export async function publishReview(
   params: PublishReviewParams,
@@ -250,17 +251,17 @@ function formatUsageFooter(usage: ReviewUsage | undefined): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// M2: structured findings -> one PR review with inline comments.
+// Structured findings -> one PR review with inline comments.
 //
 // `publishReviewWithFindings` is DECOUPLED from reviewer.ts's `ReviewResult`:
 // it takes already-anchored data (an `anchor.ts` `AnchorResult`'s `inline` /
-// `other`, plus the review `summary`), not a `ReviewResult`. The pipeline
-// (wave 3) is the one that calls `anchorFindings()` and passes its output in
-// here; this module stays ignorant of diff-anchoring entirely. It is
-// additive — `publishReview`, `buildFailureBody`, `fenceReason`,
-// `buildSuccessBody`, `formatUsageFooter`, the `{ok:false}` failure path, and
-// the no-findings success path above are all unchanged and still used by
-// the M1 pipeline until wave 3 rewires it.
+// `other`, plus the review `summary`), not a `ReviewResult`. pipeline.ts is
+// the one that calls `anchorFindings()` and passes its output in here; this
+// module stays ignorant of diff-anchoring entirely. `publishReview`,
+// `buildFailureBody`, `fenceReason`, `buildSuccessBody`, `formatUsageFooter`,
+// the `{ok:false}` failure path, and the no-findings success path above
+// remain in use for pipeline.ts's plain-comment publish path, alongside
+// `publishReviewWithFindings` for the structured-findings path.
 // ---------------------------------------------------------------------------
 
 /** Parameters for {@link publishReviewWithFindings}. */
@@ -279,7 +280,7 @@ export interface PublishReviewWithFindingsParams {
   usage?: ReviewUsage;
   /**
    * Advisory only. ACCEPTED BUT IGNORED: Magpie never approves or requests
-   * changes (see PLAN.md §7 / CLAUDE.md's core security principle — a human
+   * changes (see CLAUDE.md's core security principle — a human
    * always decides), so every review this function posts uses
    * `event: "COMMENT"` regardless of what's passed here. The parameter
    * exists purely so callers holding a `verdict` from the findings payload
@@ -287,7 +288,7 @@ export interface PublishReviewWithFindingsParams {
    */
   verdict?: "approve" | "comment";
   /**
-   * M5-C: embeds {@link buildReviewedShaMarker}'s hidden marker in the review
+   * Embeds {@link buildReviewedShaMarker}'s hidden marker in the review
    * body. This function is only ever called by pipeline.ts on the genuine
    * `result.ok` success path (never for a failure), so — unlike
    * `PublishReviewParams.reviewedSha` — this is effectively always set by the
@@ -301,12 +302,13 @@ export interface PublishReviewWithFindingsParams {
  * Publish exactly one GitHub PR review (`pulls.createReview`) carrying
  * inline comments for every diff-anchored finding, with a summary body that
  * also surfaces every un-anchored finding under "Other observations" so
- * nothing is silently dropped (PLAN.md §7's diff-anchoring constraint).
+ * nothing is silently dropped (see ARCHITECTURE.md's "Findings and
+ * publishing" section for the diff-anchoring constraint).
  *
  * `event` is always `"COMMENT"` — see {@link PublishReviewWithFindingsParams.verdict}.
  *
  * FALLBACK CHAIN (never throws, never goes silent — mirrors `publishReview`'s
- * M1 contract):
+ * never-go-silent contract):
  *  1. `pulls.createReview` with the full `comments[]` built from `inline`.
  *  2. If that rejects (GitHub 422s when any comment anchors to a line it
  *     doesn't consider part of the diff — see `anchor.ts`'s module doc
@@ -314,7 +316,8 @@ export interface PublishReviewWithFindingsParams {
  *     folded into the body's "Other observations" section alongside `other`,
  *     so they're preserved as text instead of lost.
  *  3. If the retry ALSO rejects, fall back to a single `issues.createComment`
- *     (the M1-style plain summary comment) carrying that same folded body.
+ *     (the same plain-summary-comment shape as `publishReview`) carrying
+ *     that same folded body.
  */
 export async function publishReviewWithFindings(
   params: PublishReviewWithFindingsParams,
@@ -352,8 +355,9 @@ export async function publishReviewWithFindings(
       return { id: response.data.id, url: response.data.html_url };
     } catch {
       // Second failure: give up on posting a review object at all and fall
-      // back to the M1-style single issue comment, so a run never goes
-      // silent even if `pulls.createReview` is unusable for this PR.
+      // back to a single issue comment (the same shape as `publishReview`),
+      // so a run never goes silent even if `pulls.createReview` is unusable
+      // for this PR.
       const response = await octokit.issues.createComment({
         owner,
         repo,
@@ -408,7 +412,7 @@ function toReviewComment(comment: InlineComment): {
  * share one section/renderer instead of needing two.
  *
  * `reviewedSha`, when provided, embeds {@link buildReviewedShaMarker}'s
- * hidden marker right after the identity marker (M5-C) — see that function's
+ * hidden marker right after the identity marker — see that function's
  * doc comment.
  */
 function buildFindingsBody(params: {

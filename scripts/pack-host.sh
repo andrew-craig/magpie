@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pack-host.sh — assemble the HOST-SERVICE release artifact (M7-3, task_d54c).
+# pack-host.sh — assemble the HOST-SERVICE release artifact.
 #
 # Packages the two host systemd services — @magpie/orchestrator and
 # @magpie/gateway — as a versioned tarball: prebuilt `dist/**` plus a lockfile
@@ -16,7 +16,7 @@
 # tarball; the adopter only runs `npm ci --omit=dev` to materialize
 # node_modules for the two pure-JS workspaces.
 #
-# PER-ARCH (M8-D3): as of the isolation-tier work the tarball ALSO bundles the
+# PER-ARCH: the tarball ALSO bundles the
 # native `magpie-tier-probe` binary (the /dev/kvm KVM_CREATE_VM preflight,
 # rust/magpie-tier-probe) at `bin/magpie-tier-probe`. That binary is per-arch
 # (static-musl amd64 / arm64 — built by .github/workflows/rust.yml), so the host
@@ -81,7 +81,7 @@ VERSION="${VERSION#v}"
 log "packaging version: $VERSION"
 
 # ---------------------------------------------------------------------------
-# 1b. Resolve the target arch + the matching magpie-tier-probe binary (M8-D3).
+# 1b. Resolve the target arch + the matching magpie-tier-probe binary.
 # ---------------------------------------------------------------------------
 
 ARCH="${MAGPIE_ARCH:-}"
@@ -167,7 +167,7 @@ cp "$REPO_ROOT/config.example.toml" "$STAGE/config.example.toml"
 cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE"
 cp "$REPO_ROOT/INSTALL.md" "$STAGE/INSTALL.md"
 
-# -- native per-arch magpie-tier-probe (M8-D3): install.sh installs it from
+# -- native per-arch magpie-tier-probe: install.sh installs it from
 # bin/magpie-tier-probe onto PATH at /usr/local/bin.
 mkdir -p "$STAGE/bin"
 install -m 0755 "$TIER_PROBE_BIN" "$STAGE/bin/magpie-tier-probe"

@@ -1,4 +1,4 @@
-// Minimal glob matcher for repo-relative file paths (M6-B, task_220f).
+// Minimal glob matcher for repo-relative file paths.
 //
 // WHY A HAND-ROLLED MATCHER: `.magpie.toml`'s `review.ignore_paths` (see
 // repo-config.ts) needs `*`/`**`/`?` glob matching against diff/changed-file

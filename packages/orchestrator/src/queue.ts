@@ -5,8 +5,8 @@
 // runaway job (e.g. Pi hanging on a huge diff, a wedged docker run) can never
 // pile up unbounded work or block the service forever. This is in-process
 // only: no persistence, no Redis/BullMQ. Queued-but-not-started jobs are
-// lost on a crash or restart, which is acceptable for this milestone (see
-// PLAN.md Milestone 1).
+// lost on a crash or restart, which is an accepted tradeoff for a
+// self-hosted, single-process orchestrator.
 //
 // BACKSTOP, not the primary deadline: reviewer.ts's `runReview` already
 // enforces `config.limits.jobTimeoutSeconds` as its own hard wall-clock
@@ -74,7 +74,7 @@ export interface JobDescriptor {
   after?: string;
   /**
    * Set by comment-command.ts for an `@magpie review` job: bypasses
-   * pipeline.ts's M5-C dedup skip (`lastReviewedSha === job.headSha`) so an
+   * pipeline.ts's dedup skip (`lastReviewedSha === job.headSha`) so an
    * explicit human request always runs a fresh, full review even when this
    * head SHA was already reviewed. Never set by filter.ts.
    */
@@ -155,7 +155,7 @@ export interface JobQueueOptions {
  * equal.
  *
  * `concurrency` is derived via config.ts's {@link resolveQueueConcurrency}
- * (M8-C3) rather than reading `config.limits.concurrency` directly: under
+ * rather than reading `config.limits.concurrency` directly: under
  * the `"microvm"` reviewer tier it's instead `floor(host_ram_budget_mib /
  * ram_mib)` (brief §6.4) so the queue can never schedule more concurrent
  * microVMs than the deployment's own configured RAM budget allows. Under

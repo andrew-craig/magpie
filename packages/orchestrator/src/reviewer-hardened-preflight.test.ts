@@ -1,7 +1,7 @@
-// M8-B2 / task_bfaf — runtime fail-closed hardened-flag preflight tests.
+// Runtime fail-closed hardened-flag preflight tests.
 //
 // findMissingHardenedFlags() is the RUNTIME counterpart (CTO binding edit #3's
-// "CI or preflight" language) to the M8-B1 build-time floor golden: it runs on
+// "CI or preflight" language) to the build-time floor golden: it runs on
 // the real, fully-templated argv immediately before spawn and returns the
 // labels of any hardened flags that regressed, so runReview can fail the job
 // CLOSED (loud log + {ok:false}) instead of launching an under-hardened

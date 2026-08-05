@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — idempotent production install for magpie (Milestone 5, task_56ad).
+# install.sh — idempotent production install for magpie.
 #
 # Sets up the two unprivileged service users, the config/secret/state
 # directories, and the two systemd units (gateway -> orchestrator) so a
@@ -13,7 +13,7 @@
 # none`, so there is no bridge/iptables apparatus to provision at boot
 # (magpie-firewall.service and scripts/setup-network.sh do not exist).
 #
-# As of M8-D3 (task_67aa) the reviewer runs under ROOTLESS podman — no root
+# The reviewer runs under ROOTLESS podman — no root
 # daemon, no `docker` group. This installer therefore provisions the rootless
 # substrate for the `magpie` user instead of a docker-group grant:
 #   * subuid/subgid ranges (so newuidmap/newgidmap can map the container uids),
@@ -23,7 +23,7 @@
 #   * `kvm`-group membership (so the optional micro-VM tier can open /dev/kvm),
 #   * the numeric magpie uid rewritten into magpie.service's XDG_RUNTIME_DIR /
 #     DBUS_SESSION_BUS_ADDRESS.
-# It also installs the `magpie-tier-probe` binary and runs the M8-D1 KVM
+# It also installs the `magpie-tier-probe` binary and runs the KVM
 # PREFLIGHT, failing loud (and requiring MAGPIE_ACK_TIER acknowledgement) when
 # the host can't reach the isolation tier the operator asked for.
 #
@@ -32,7 +32,7 @@
 # deliberate final step once secrets are filled in. Both are printed as clear
 # next steps at the end.
 #
-# PRIMARY FLOW (M7-3): download a release tarball (built by
+# PRIMARY FLOW: download a release tarball (built by
 # scripts/pack-host.sh / .github/workflows/release-host.yml — see
 # INSTALL.md), unpack it to /opt/magpie (or MAGPIE_PREFIX), then:
 #   sudo ./scripts/install.sh
@@ -46,7 +46,7 @@
 #   sudo MAGPIE_PREFIX=/opt/magpie ./scripts/install.sh
 #   sudo ./scripts/install.sh --enable   # also `systemctl enable` the units
 #
-# Tier preflight env vars (M8-D3):
+# Tier preflight env vars:
 #   MAGPIE_INSTALL_TIER=crun|microvm   the isolation tier you intend to run
 #                                      (default: crun — today's hardened floor).
 #   MAGPIE_ACK_TIER=crun               explicit acknowledgement that a
@@ -184,10 +184,10 @@ ensure_system_user magpie
 ensure_system_user magpie-gateway
 
 # ---------------------------------------------------------------------------
-# 1a. Rootless-podman substrate for the `magpie` user (M8-D3).
+# 1a. Rootless-podman substrate for the `magpie` user.
 # ---------------------------------------------------------------------------
 #
-# Replaces the pre-M8 docker-group grant entirely: rootless podman needs NO
+# Replaces a docker-group grant entirely: rootless podman needs NO
 # privileged group, only (a) subuid/subgid ranges to map the container uids and
 # (b) a lingering user session. The gateway user gets NONE of this — it must
 # never be able to launch a container.
@@ -309,7 +309,7 @@ MAGPIE_GATEWAY_OPENROUTER_KEY=
 # MAGPIE_GATEWAY_MASTER_KEY (one shared secret known to both processes).
 # Generate it once with: openssl rand -hex 32
 MAGPIE_GATEWAY_MASTER_KEY=
-# No proxy-plane host/port to set: as of M7-1 (Design D) the proxy plane is a
+# No proxy-plane host/port to set: under Design D the proxy plane is a
 # per-job UNIX SOCKET under systemd's RuntimeDirectory (see
 # systemd/magpie-gateway.service's GATEWAY_SOCKET_DIR), not a bound TCP
 # host:port — GATEWAY_PROXY_HOST/GATEWAY_PROXY_PORT no longer exist. The mgmt
@@ -333,7 +333,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4a. Install the KVM tier-probe binary + run the install-time preflight (M8-D3).
+# 4a. Install the KVM tier-probe binary + run the install-time preflight.
 # ---------------------------------------------------------------------------
 #
 # `magpie-tier-probe` is the SAME binary the orchestrator shells out to at
@@ -494,7 +494,7 @@ cat <<NOTES
          HOME=$STATE_DIR podman pull \\
          \$(grep -E '^image *=' $ETC_MAGPIE/config.toml | cut -d'"' -f2)
 
-  6. Cloudflare Tunnel ingress (from Milestone 1) is a separate unit:
+  6. Cloudflare Tunnel ingress is a separate unit:
      systemd/cloudflared.service + scripts/setup-cloudflared.sh. Install/enable
      it per docs/cloudflared.md if you haven't already.
 

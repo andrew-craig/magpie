@@ -414,7 +414,7 @@ describe("cleanupOrphanScratchDirs", () => {
   });
 });
 
-describe("crash-restart reap (task_df53 acceptance test)", () => {
+describe("crash-restart reap", () => {
   it("on restart under the microvm tier, reaps orphaned containers AND orphaned launcher processes AND stale scratch dirs, all in one pass, with the gateway-key decision exercised as a documented no-op", async () => {
     // Simulates exactly the scenario this task backstops: the orchestrator
     // was `kill -9`'d mid-review, leaving one dangling crun/podman
@@ -482,16 +482,16 @@ describe("crash-restart reap (task_df53 acceptance test)", () => {
     );
     expect(logger.calls.some((c) => c.level === "error")).toBe(false);
 
-    // 5. The gateway-key design fork (task_df53 §4), exercised rather than
-    //    silently skipped: none of the three calls above were given a
-    //    gateway base URL, master key, or HTTP client of any kind — this
-    //    whole reap sequence (container + launcher-process + scratch-dir)
-    //    completed with no gateway interaction whatsoever, which is exactly
-    //    the documented decision (rely on the gateway's own TTL + per-key
+    // 5. The gateway-key design fork, exercised rather than silently
+    //    skipped: none of the three calls above were given a gateway base
+    //    URL, master key, or HTTP client of any kind — this whole reap
+    //    sequence (container + launcher-process + scratch-dir) completed
+    //    with no gateway interaction whatsoever, which is exactly the
+    //    documented decision (rely on the gateway's own TTL + per-key
     //    budget cap once the orphaned launcher's guest is killed above,
     //    rather than add a new bulk-revoke admin-plane endpoint — see
-    //    cleanupOrphanLauncherProcesses's doc comment and this task's
-    //    plan §4 for the full justification).
+    //    cleanupOrphanLauncherProcesses's doc comment for the full
+    //    justification).
   });
 });
 

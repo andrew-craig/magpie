@@ -1,13 +1,12 @@
-# Magpie's Rust cargo workspace (RUST-2 / task_2a18).
+# Magpie's Rust cargo workspace.
 #
 # Scope: see docs/design/rust-adoption.md "Build & signing". This workspace
 # exists alongside the npm workspaces at the repo root; it is the build lane
-# for Magpie's native (Rust) process-boundary components — today the
-# scaffolding crates (`vsock-framing`, `vsock-client`) plus the production
-# host-side libkrun launcher (`magpie-microvm-launcher`, task_76d6) plus the
-# install-time/runtime KVM preflight (`magpie-tier-probe`, M8-D1 /
-# task_2f46). The guest-side vsock client (task_2d6c) still needs to land in
-# `vsock-client`.
+# for Magpie's native (Rust) process-boundary components: the
+# scaffolding crate `vsock-framing`, the guest-side vsock client
+# `vsock-client`, the production host-side libkrun launcher
+# `magpie-microvm-launcher`, and the install-time/runtime KVM preflight
+# `magpie-tier-probe`.
 #
 # NOTE on `magpie-microvm-launcher`: unlike the other members, it dynamically
 # links a HOST-installed `libkrun.so` (see its Cargo.toml/build.rs doc

@@ -1,28 +1,28 @@
 # magpie.service — the orchestrator (webhook server, queue, git ops, rootless
-# podman reviewer runner, publisher). Milestone 5 (task_56ad); converted to the
-# ROOTLESS-PODMAN + micro-VM substrate in Milestone 8 (M8-D3, task_67aa).
+# podman reviewer runner, publisher). Runs on the ROOTLESS-PODMAN + micro-VM
+# substrate.
 #
-# Runs as a dedicated unprivileged `magpie` user. As of M8-B2/M8-D3 the reviewer
-# is launched with ROOTLESS podman (no root daemon, no `docker` group) — see
+# Runs as a dedicated unprivileged `magpie` user. The reviewer is launched
+# with ROOTLESS podman (no root daemon, no `docker` group) — see
 # packages/orchestrator/src/reviewer.ts and docs/design/cto-decision-brief.md §5.
 # The orchestrator therefore no longer needs ANY privileged group: rootless
 # podman relies only on the `magpie` user's subuid/subgid ranges + a lingering
 # per-user systemd session (both provisioned by scripts/install.sh). It never
 # holds the real OpenRouter key (it mints a short-lived per-job virtual key from
-# the gateway instead, M4-C); only the webhook secret + GitHub App key live in
+# the gateway instead); only the webhook secret + GitHub App key live in
 # its environment / config.
 #
 # ============================================================================
 # WHY THE HARDENING PROFILE IS DELIBERATELY LIGHTER THAN THE GATEWAY'S
 # ============================================================================
 # This unit's sandbox is INTENTIONALLY relaxed relative to magpie-gateway.service
-# and relative to this unit's own pre-M8 (rootful-docker) form. That is not an
+# and relative to this unit's own earlier rootful-docker form. That is not an
 # oversight — it is inherent to the CTO-approved rootless design (brief §5): the
 # review CONTAINER / micro-VM is the security boundary around untrusted PR
 # content, and the orchestrator is TRUSTED host code whose job is to CREATE the
 # user/mount/pid/... namespaces that launch that sandbox rootlessly. Two
-# structural facts force the relaxations, both proven empirically on the M8-D3
-# target (arm64, 16 KB pages, podman 4.3.1):
+# structural facts force the relaxations, both proven empirically on target
+# hardware (arm64, 16 KB pages, podman 4.3.1):
 #
 #   1. Rootless podman maps the container's uid range with the setuid-root
 #      helpers newuidmap/newgidmap (the ONLY setuid surface in the whole
@@ -66,8 +66,8 @@
 #
 # Ordering: started AFTER the gateway (so a webhook arriving right after boot
 # can immediately mint a virtual key). There is no docker.service / firewall
-# unit to order after any more — rootless podman has no daemon, and M7-1's
-# Design D runs each review container `--network none` (no bridge/iptables to
+# unit to order after any more — rootless podman has no daemon, and Design D
+# runs each review container `--network none` (no bridge/iptables to
 # provision). On stop it must DRAIN in-flight jobs rather than be killed
 # mid-review — the SIGTERM graceful-shutdown path already exists
 # (packages/orchestrator/src/index.ts + shutdown.ts); TimeoutStopSec below is

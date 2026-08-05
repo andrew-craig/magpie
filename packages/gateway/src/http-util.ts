@@ -1,7 +1,6 @@
 // Small `node:http` helpers shared by the proxy and admin planes. Kept
-// framework-free per the M4-A contract (matches orchestrator/src/server.ts's
-// plain `node:http` convention — no Express/Fastify for a two-endpoint
-// service).
+// framework-free (matches orchestrator/src/server.ts's plain `node:http`
+// convention — no Express/Fastify for a two-endpoint service).
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 

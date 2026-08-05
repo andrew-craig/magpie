@@ -1,4 +1,4 @@
-// Diff-hunk parsing and finding-to-comment anchoring for Milestone 2.
+// Diff-hunk parsing and finding-to-comment anchoring.
 //
 // GitHub's `POST /repos/{owner}/{repo}/pulls/{number}/reviews` 422s any
 // inline `comments[]` entry whose `line` isn't part of the PR's diff — the
@@ -17,7 +17,8 @@
 // and the validated findings (see findings.ts) and produces GitHub-ready
 // inline comment locations, folding anything that can't be anchored into an
 // `other` bucket for the publisher to append to the review summary instead
-// of dropping it silently (see PLAN.md's "Diff-anchoring constraint").
+// of dropping it silently (see ARCHITECTURE.md's "Findings and publishing"
+// section).
 //
 // Ranged findings (`end_line` present) map to GitHub's start_line/line
 // convention: GitHub's REST review-comment API anchors a *range* at its

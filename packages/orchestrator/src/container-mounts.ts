@@ -1,10 +1,10 @@
-// Host-side filesystem helpers for the M3 review container's two bind
-// mounts (see PLAN.md §4's `docker run` invocation:
-// `-v <workspace>:/work:ro` and `-v <output-dir>:/out`). Both helpers here
-// are pure host-side fs operations with no docker/child-process dependency
-// at all — the M3-C docker runner (task_4ed4) imports them and wires their
-// results into the actual `docker run` args; this module doesn't know or
-// care what container consumes its output.
+// Host-side filesystem helpers for the review container's two bind
+// mounts (see ARCHITECTURE.md's "Review sandbox" section and reviewer.ts's
+// `docker run` invocation: `-v <workspace>:/work:ro` and
+// `-v <output-dir>:/out`). Both helpers here are pure host-side fs
+// operations with no docker/child-process dependency at all — reviewer.ts
+// imports them and wires their results into the actual `docker run` args;
+// this module doesn't know or care what container consumes its output.
 
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,12 +12,12 @@ import { isAbsolute, join } from "node:path";
 
 /**
  * Strips `.git` from a checked-out workspace so the directory is safe to
- * bind-mount **read-only** into the review container at `/work` (see
- * PLAN.md §4: "Repo mounted read-only, with `.git` stripped so no lazy blob
- * fetch or `git` invocation can try to reach `origin`").
+ * bind-mount **read-only** into the review container at `/work` (repo
+ * mounted read-only, with `.git` stripped so no lazy blob fetch or `git`
+ * invocation can try to reach `origin`).
  *
- * Approach chosen (option (c) from task_037b's spec): delete `.git` IN PLACE
- * under `workspaceDir` and return that same directory, rather than
+ * Approach chosen: delete `.git` IN PLACE under `workspaceDir` and return
+ * that same directory, rather than
  * `git archive`-ing HEAD into a fresh directory or copying the whole tree
  * minus `.git`. This is the simplest option, and it's valid here specifically
  * because:
@@ -67,18 +67,18 @@ export class GitNotStrippedError extends Error {
     super(
       `review mount ${mountDir} still contains a .git directory — refusing to mount it into the ` +
         `review container (a live .git could trigger a lazy blob fetch or a git invocation that ` +
-        `reaches origin; see prepareReviewMount and PLAN.md §4)`,
+        `reaches origin; see prepareReviewMount)`,
     );
     this.name = "GitNotStrippedError";
   }
 }
 
 /**
- * Fail-closed runtime assertion (task_bfaf) that `mountDir` has NO `.git` entry
+ * Fail-closed runtime assertion that `mountDir` has NO `.git` entry
  * — the mount-preparation counterpart to reviewer.ts's `findMissingHardenedFlags`
  * argv preflight, extending the pinned hardened posture beyond the `docker run`
- * argv (which the M8-B1 golden covers) to the `.git`-stripped read-only `/work`
- * mount (which it does not). {@link prepareReviewMount} strips `.git`; this
+ * argv (which reviewer.ts's own golden test covers) to the `.git`-stripped
+ * read-only `/work` mount (which it does not). {@link prepareReviewMount} strips `.git`; this
  * re-checks it immediately before launch so a strip that silently did not take
  * effect (a permission error swallowed upstream, a `.git` re-materialised by a
  * concurrent process, a future refactor that drops the strip) FAILS the job
@@ -115,7 +115,8 @@ export interface OutputDir {
 
 /**
  * Creates a fresh, per-job host directory meant to be bind-mounted at `/out`
- * in the review container (see PLAN.md §4: `-v <output-dir>:/out`). `mkdtemp`
+ * in the review container (see reviewer.ts's `docker run` invocation:
+ * `-v <output-dir>:/out`). `mkdtemp`
  * is used (rather than a predictable name) so concurrent jobs never collide on
  * the same path and so the directory can't be pre-staged by anything else on
  * the host.
@@ -136,8 +137,8 @@ export interface OutputDir {
  * base (e.g. before the first job) doesn't make `mkdtemp` fail.
  *
  * Per epic decision #4, the container process runs as the orchestrator's own
- * uid (no separate `reviewer` user mapping across the mount boundary in M3),
- * so no extra chmod/chown is needed beyond `mkdtemp`'s default `0o700` —
+ * uid (no separate `reviewer` user mapping across the mount boundary), so no
+ * extra chmod/chown is needed beyond `mkdtemp`'s default `0o700` —
  * the directory is already owned by, and writable only by, this process's
  * user, which is exactly the container's runtime uid too.
  *

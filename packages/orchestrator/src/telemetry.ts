@@ -1,4 +1,4 @@
-// Per-job cost/outcome telemetry (M5-D, task_8a10 — see PLAN.md §6).
+// Per-job cost/outcome telemetry (see ARCHITECTURE.md's "Operability" section).
 //
 // The reviewer already parses Pi's self-reported NDJSON usage (reviewer.ts's
 // `ReviewUsage`) and the published PR comment carries a compact usage footer
@@ -43,7 +43,7 @@ import type { ReviewUsage } from "./reviewer.js";
  * field alone, without parsing `reason` text:
  *  - `success`             — a real review ran and was published (findings or none).
  *  - `diff-too-large`      — skipped (summary-only) because the diff exceeded the size cap.
- *  - `already-reviewed`    — M5-C dedup: this head SHA was already reviewed; no-op.
+ *  - `already-reviewed`    — dedup: this head SHA was already reviewed; no-op.
  *  - `head-sha-mismatch`   — a force-push landed mid-job; skipped without publishing.
  *  - `timeout-kill`        — reviewer.ts's own wall-clock timeout killed the container.
  *  - `aborted`             — the queue's backstop signal (or an external abort) killed the job.

@@ -1,11 +1,10 @@
 // The isolation-tier ladder: probes the host and selects the strongest
-// isolation tier a review job can actually run under (M8-D1 / task_2f46; see
+// isolation tier a review job can actually run under (see
 // docs/design/cto-decision-brief.md §5 "the isolation ladder" and §8's
-// implementation scope). This is the SINGLE auditable module the M8 epic's
-// tier-honesty invariant is built around -- "done when tier selection is a
+// implementation scope). This is the SINGLE auditable module the
+// tier-honesty invariant is built around -- tier selection is a
 // single auditable module, degradation always requires explicit
-// acknowledgement, and the selected tier is what actually launches jobs"
-// (task_2f46's own "Done when" line).
+// acknowledgement, and the selected tier is what actually launches jobs.
 //
 // THE LADDER (strongest first): micro-VM (KVM) > hardened crun (the floor).
 // Ranked, not just listed: {@link TIER_RANK} is the one place that encodes
@@ -43,13 +42,13 @@
 //
 // TWO CALLERS OF THE SAME PROBE BINARY: the KVM half of the probe below
 // shells out to `rust/magpie-tier-probe` (see that crate's module doc
-// comment) -- the same binary the M8-D3 installer will run directly, with
+// comment) -- the same binary the installer also runs directly, with
 // no Node in the loop at all. This module is the orchestrator-runtime
 // consumer only; it does not know or care that the installer also calls the
 // same binary.
 //
 // NOT SURFACED ON THE PR: the resolved tier is operator-only information
-// (index.ts logs it; M8-D2/task's follow-up surfaces it on `/healthz`) --
+// (index.ts logs it; it's also surfaced on `/healthz`) --
 // never posted to a PR review body/comment. This module doesn't touch the
 // publisher at all, but the constraint is worth restating here since a
 // future caller might otherwise be tempted to thread `TierSelectionResult`
@@ -147,8 +146,8 @@ export interface TierAvailability {
  * `reviewer.ts`/`pipeline.ts`, which need only `resolvedTier` (threaded
  * through as `RunReviewParams.resolvedTier` rather than letting reviewer.ts
  * re-read `config.container.tier` independently -- see this module's doc
- * comment and reviewer.ts's own note on the same point), and (2) the
- * still-to-come M8-D2 task, which surfaces the REST of this object on
+ * comment and reviewer.ts's own note on the same point), and (2)
+ * server.ts's `/healthz` handler, which surfaces the REST of this object on
  * `/healthz` and in structured logs (never the PR itself -- see this
  * module's doc comment).
  */
@@ -382,8 +381,7 @@ const KNOWN_TIERS: readonly Tier[] = ["microvm", "crun"];
 /**
  * Parses the `MAGPIE_ACK_TIER` environment variable -- the operator's
  * explicit, per-host, EXPLICIT acknowledgement that a weaker-than-requested
- * tier is expected and accepted on this host (task_2f46's suggested
- * mechanism). Deliberately an ENVIRONMENT variable, not a `config.toml`
+ * tier is expected and accepted on this host. Deliberately an ENVIRONMENT variable, not a `config.toml`
  * field: a config field would persist silently across a host migration/
  * upgrade/config-copy and could end up quietly acknowledging a DIFFERENT,
  * future degradation an operator never actually looked at -- exactly the
@@ -471,7 +469,7 @@ export async function resolveTier(config: Config, deps: ResolveTierDeps = {}): P
         `actually available on this host is "${resolvedTier}" (${requestedTier} unavailable: ` +
         `${explainTierUnavailable(requestedTier, probe)}). Magpie refuses to silently run a weaker ` +
         "isolation posture than configured over untrusted PR content -- this is the exact silent-" +
-        "degradation failure mode the isolation ladder (M8-D1 / task_2f46, " +
+        "degradation failure mode the isolation ladder (see " +
         "docs/design/cto-decision-brief.md §5) exists to prevent. To proceed anyway on this host, an " +
         `operator must explicitly acknowledge the weaker tier by setting MAGPIE_ACK_TIER=${resolvedTier} ` +
         "in the environment (NOT config.toml -- see parseAckTier's doc comment for why this is " +

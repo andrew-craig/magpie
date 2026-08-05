@@ -1,14 +1,12 @@
-// Pi container runner (M3): runs the Pi coding agent inside a hardened
+// Pi container runner: runs the Pi coding agent inside a hardened
 // `docker run` of the `magpie-reviewer` image (see docker/reviewer/) over a
 // mounted, `.git`-free, READ-ONLY copy of the checked-out PR worktree, and
 // returns STRUCTURED findings collected via the `report_findings` Pi
 // extension (packages/review-extension) rather than a plain-text summary.
 //
-// M1/M2 ran Pi as a plain host subprocess with a denylist-scrubbed copy of
-// this process's own env; M3 replaces that with a container that inherits
-// NOTHING from the launching process. The container's env is instead an
-// explicit ALLOWLIST built one `-e NAME` at a time (`OPENROUTER_API_KEY` plus,
-// as of M4-C, `OPENAI_BASE_URL`, plus, as of bug_df2d,
+// The container inherits NOTHING from the launching process. Its env is
+// instead an explicit ALLOWLIST built one `-e NAME` at a time
+// (`OPENROUTER_API_KEY`, `OPENAI_BASE_URL`,
 // `MAGPIE_REQUIRE_MEMORY_LIMIT` — see below), the `/work` mount is read-only,
 // and `/tmp` inside the container is a throwaway tmpfs (the container's own
 // root filesystem is `--read-only`). `--cap-drop=ALL
@@ -16,14 +14,14 @@
 // caps (see config.ts's `container.*`) bound what a compromised/malicious
 // review run can do to the host. The read-only Pi tool allowlist
 // (`read,grep,find,ls,report_findings` — no `bash`/`write`/`edit`) and the
-// model/provider/system-prompt/extension flags are now BAKED INTO the image
+// model/provider/system-prompt/extension flags are BAKED INTO the image
 // (see docker/reviewer/Dockerfile, docker/reviewer/entrypoint.sh) rather than
 // passed by this module; the only things this module supplies at
 // `docker run` time are the three bind mounts, the provider credential, the
 // gateway proxy-plane base URL, the memory-limit-enforcement escape hatch,
 // and `--provider`/`--model` as trailing container args.
 //
-// MEMORY-LIMIT ENFORCEMENT (bug_df2d): `--memory=<config.container.memory>`
+// MEMORY-LIMIT ENFORCEMENT: `--memory=<config.container.memory>`
 // above is only ENFORCED if the kernel's cgroup v2 `memory` controller is
 // available — on a host where it's disabled (e.g. some Raspberry Pi firmware
 // defaults), Docker accepts the flag and silently discards it. Two defences,
@@ -35,7 +33,7 @@
 // in-container, per job, as a defence-in-depth backstop over the startup
 // check.
 //
-// GATEWAY WIRING (M4-C, transport replaced by M7-1): the container never
+// GATEWAY WIRING: the container never
 // holds the real OpenRouter key. `OPENROUTER_API_KEY` is set to a per-job,
 // budget-capped, short-lived VIRTUAL key minted by pipeline.ts against
 // packages/gateway's management plane (see gateway.ts) —
@@ -53,7 +51,7 @@
 // module's job is only to deliver the value via env, same as any other
 // per-job input.
 //
-// NETWORK TRANSPORT (M7-1, Design D — see DISTRIBUTION.md §2): the review
+// NETWORK TRANSPORT (Design D — see DISTRIBUTION.md §2): the review
 // container runs `--network none` (no bridge, no `magpie-net`, no route to
 // the host or the internet at all — a property of the network namespace, not
 // an iptables rule) and reaches the gateway ONLY through a per-job unix
@@ -68,7 +66,7 @@
 // waves.
 //
 // SECURITY: the diff/PR title/body are untrusted, possibly-adversarial text
-// (see reviewer-prompt.md and PLAN.md's threat model) — this module never
+// (see reviewer-prompt.md and ARCHITECTURE.md's "Threat model" section) — this module never
 // evals or executes any of it; it only ever gets piped to the container's
 // stdin as data. The gateway virtual key is never logged, never written to
 // disk, and never placed on the command line — it is set only on the spawned
@@ -123,7 +121,7 @@ export interface RunReviewParams {
   prBody: string;
   /**
    * True when `diff` is an INCREMENTAL range (only the commits pushed since a
-   * prior review — see diff.ts's `computeIncrementalDiff` / M5-B) rather than
+   * prior review — see diff.ts's `computeIncrementalDiff`) rather than
    * the whole PR. Threaded into {@link buildPromptPayload} so the reviewer is
    * told the diff is just the new changes, while `changedFiles` still lists
    * every file changed across the whole PR as context. Defaults to `false`
@@ -132,18 +130,18 @@ export interface RunReviewParams {
   incremental?: boolean;
   config: Config;
   /**
-   * The per-job gateway VIRTUAL key (M4-B/gateway.ts's `GatewayKey.key`),
+   * The per-job gateway VIRTUAL key (gateway.ts's `GatewayKey.key`),
    * minted fresh by pipeline.ts before every review and revoked on cleanup.
    * Set verbatim as the container's `OPENROUTER_API_KEY` (see below) — this
    * module never substitutes, caches, or falls back to any other key. There
    * is no direct-to-OpenRouter path any more: `config.secrets` no longer
-   * carries a real provider key at all (M4-C — see config.ts), so a caller
+   * carries a real provider key at all (see config.ts), so a caller
    * that can't mint a virtual key can't run a review, by construction.
    */
   gatewayApiKey: string;
   /**
-   * Absolute HOST path to the per-job gateway socket directory (M7-1,
-   * Design D — see gateway.ts's `GatewayKey.socketDir` and
+   * Absolute HOST path to the per-job gateway socket directory (Design D —
+   * see gateway.ts's `GatewayKey.socketDir` and
    * DISTRIBUTION.md §2.6). Minted alongside {@link gatewayApiKey} and
    * bind-mounted READ-ONLY at `/run/gw` in the review container (`-v
    * <gatewaySocketDir>:/run/gw:ro`), which contains the gateway's
@@ -161,7 +159,7 @@ export interface RunReviewParams {
    * `config.container.dockerBin` (see config.ts) — this field, when set,
    * takes priority over that config value, which is how pipeline.ts's
    * existing `piBinary: deps.piBinary` wiring and pipeline.test.ts's fakes
-   * keep working unchanged across the M1/M2 host subprocess -> M3 container
+   * keep working unchanged across the host-subprocess -> container
    * swap: WHAT gets spawned changed (`pi` directly -> `docker run ...
    * <image>`), but the override mechanism and its position in this params
    * object did not. Production callers must leave this undefined;
@@ -174,8 +172,8 @@ export interface RunReviewParams {
    * Per-job identifier used to derive the review container's `--name`
    * (`magpie-<sanitized jobId>`), so the timeout/abort kill path
    * (`docker kill <name>`) can target the right container. Threaded from
-   * pipeline.ts's job descriptor starting in M3-D; when omitted (e.g. every
-   * reviewer.test.ts case written before M3-D lands, or any other caller
+   * pipeline.ts's job descriptor; when omitted (e.g. every
+   * reviewer.test.ts case, or any other caller
    * that doesn't have a natural job id) a fresh random id is generated per
    * run so container names never collide across concurrent jobs. Sanitized
    * to docker's `[a-zA-Z0-9_.-]` name charset before use, so characters
@@ -195,7 +193,7 @@ export interface RunReviewParams {
    */
   signal?: AbortSignal;
   /**
-   * The tier RESOLVED by tier-ladder.ts's `resolveTier` (M8-D1 / task_2f46),
+   * The tier RESOLVED by tier-ladder.ts's `resolveTier`,
    * computed ONCE at orchestrator startup (see index.ts) and threaded
    * through pipeline.ts to every job. When set, this OVERRIDES
    * `config.container.tier` below — the whole point of the isolation ladder
@@ -211,18 +209,18 @@ export interface RunReviewParams {
    */
   resolvedTier?: Tier;
   /**
-   * Repo-supplied advisory reviewer guidance (M6-B, task_220f — see
+   * Repo-supplied advisory reviewer guidance (see
    * repo-config.ts's `applyRepoConfig`), already length-capped by the
    * caller. Threaded into {@link buildPromptPayload} as its OWN nonce-tagged
    * block, distinct from `<UNTRUSTED_PR_DATA>`, clearly labelled as
    * advisory-only and unable to override the system prompt (see that
    * function's doc comment). `undefined`/empty means no repo override was
-   * present or accepted — the prompt is byte-for-byte unchanged from before
-   * M6-B in that case.
+   * present or accepted — the prompt is byte-for-byte unchanged when no
+   * repo guidance is supplied.
    */
   guidance?: string;
   /**
-   * Repo-supplied path-ignore globs (M6-B — see repo-config.ts's
+   * Repo-supplied path-ignore globs (see repo-config.ts's
    * `applyRepoConfig` and diff.ts's `filterUnifiedDiff`/`listPrChangedFiles`,
    * which already keep ignored files out of `diff`/`changedFiles` above).
    * Applied here too, belt-and-braces, to drop any finding Pi reports
@@ -267,10 +265,10 @@ function buildContainerName(jobId: string): string {
 /**
  * True when `dockerBin` is the rootless-Podman CLI (basename exactly `podman`),
  * as opposed to `docker` or any other docker-compatible client. This is the
- * M8-B2 rootless-substrate discriminator: Podman is Magpie's DEFAULT runtime as
- * of M8-B2 (`config.container.dockerBin` defaults to `"podman"`), run rootless
+ * rootless-substrate discriminator: Podman is Magpie's DEFAULT runtime
+ * (`config.container.dockerBin` defaults to `"podman"`), run rootless
  * as an unprivileged user with no root daemon and no `docker` group — the whole
- * point of the M8 "crun floor" tier (see docs/design/cto-decision-brief.md §5).
+ * point of the crun-floor tier (see docs/design/cto-decision-brief.md §5).
  *
  * The ONE argv consequence is `--userns=keep-id` (see
  * {@link buildReviewDockerArgs}): rootless Podman runs the container inside a
@@ -279,11 +277,11 @@ function buildContainerName(jobId: string): string {
  * files the container writes to the `/out` bind mount come back owned by that
  * mapped uid and are UNREADABLE by the orchestrator, silently failing every
  * review with "pi did not call report_findings" (empirically reproduced on this
- * host — see task_08ec). `--userns=keep-id` maps the invoking user's uid/gid
+ * host). `--userns=keep-id` maps the invoking user's uid/gid
  * straight through so `/out/findings.json` is written back owned by the
  * orchestrator, exactly as under rootful docker. Real `docker` HARD-ERRORS on
  * `--userns=keep-id`, so this flag is added ONLY for a `podman` binary; the
- * docker path (and thus the M8-B1 floor golden, whose fixed config uses
+ * docker path (and thus the crun-floor golden, whose fixed config uses
  * `dockerBin:"docker"`) is unaffected. Matched by basename so a full path like
  * `/usr/bin/podman` still counts.
  */
@@ -310,7 +308,7 @@ export interface BuildReviewDockerArgsParams {
    * {@link RunReviewParams.piBinary} / `config.container.dockerBin`). Used ONLY
    * to decide whether to inject the rootless-Podman `--userns=keep-id` shim
    * (see {@link isPodmanBinary} and {@link buildReviewDockerArgs}). Optional —
-   * defaults to `config.container.dockerBin`, so callers (e.g. the M8-B1 floor
+   * defaults to `config.container.dockerBin`, so callers (e.g. the crun-floor
    * golden test) that don't set it get the runtime named in the config. In
    * production {@link runReview} passes the resolved binary (which honours the
    * `piBinary` override) so keep-id tracks the binary actually spawned, not
@@ -323,10 +321,10 @@ export interface BuildReviewDockerArgsParams {
 /**
  * Pure builder for the hardened `docker run` argv this module ships today —
  * this is Magpie's CTO-designated "crun floor" posture (see
- * docs/design/cto-decision-brief.md's binding edit #3 and the M8 epic): the
- * last-resort isolation tier that must never silently erode while
- * milestone-8 work replaces `runReview`'s docker/crun-based launch with a
- * micro-VM one. `reviewer-crun-floor-argv.test.ts` pins this EXACT return
+ * docs/design/cto-decision-brief.md's binding edit #3): the
+ * last-resort isolation tier that must never silently erode now that
+ * `runReview` also supports launching a micro-VM tier.
+ * `reviewer-crun-floor-argv.test.ts` pins this EXACT return
  * value byte-for-byte against a committed golden fixture so any flag
  * addition/removal/reordering fails CI loudly, pointing at the fixture to
  * consciously update on an intentional posture change.
@@ -341,9 +339,9 @@ export interface BuildReviewDockerArgsParams {
 export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): string[] {
   const { containerName, uid, gid, mountDir, outDir, gatewaySocketDir, config } = params;
   const dockerBin = params.dockerBin ?? config.container.dockerBin;
-  // Rootless-Podman uid-mapping shim (M8-B2) — see isPodmanBinary's doc comment
+  // Rootless-Podman uid-mapping shim — see isPodmanBinary's doc comment
   // for the full rationale. Injected ONLY for a `podman` binary (real docker
-  // hard-errors on it), so the docker path — and the M8-B1 floor golden, which
+  // hard-errors on it), so the docker path — and the crun-floor golden, which
   // pins a `dockerBin:"docker"` config — is byte-for-byte unchanged. This is a
   // uid-mapping shim, NOT a hardening flag: it maps the host uid straight
   // through so the container can write `/out/findings.json` back to the
@@ -371,7 +369,7 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
     `${mountDir}:/work:ro`,
     "-v",
     `${outDir}:/out`,
-    // The per-job gateway socket directory (M7-1 — see
+    // The per-job gateway socket directory (see
     // `RunReviewParams.gatewaySocketDir`'s doc comment), mounted READ-ONLY:
     // the container can reach the already-bound `gw.sock` inside it via
     // `connect()` (unaffected by a read-only mount) but can't unlink/replace
@@ -386,7 +384,7 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
     // than name-only-via-env like OPENROUTER_API_KEY above.
     "-e",
     `OPENAI_BASE_URL=${config.gateway.containerBaseUrl}`,
-    // bug_df2d: also non-secret (a deployment-wide operator choice, not a
+    // Also non-secret (a deployment-wide operator choice, not a
     // per-job credential), so passed inline like OPENAI_BASE_URL above. Lets
     // docker/reviewer/entrypoint.sh's in-container `memory.max` assertion
     // honour the SAME fail-closed-vs-warn-and-continue escape hatch as the
@@ -406,8 +404,8 @@ export function buildReviewDockerArgs(params: BuildReviewDockerArgsParams): stri
 
 /**
  * The hardened-flag invariants every review-container launch MUST satisfy — the
- * runtime counterpart to the M8-B1 byte-for-byte floor golden
- * (`reviewer-crun-floor-argv.test.ts`), folded in from task_bfaf per CTO
+ * runtime counterpart to the byte-for-byte floor golden
+ * (`reviewer-crun-floor-argv.test.ts`), added per CTO
  * binding edit #3's "CI **or preflight**" language. The golden is a build-time
  * tripwire against source drift; this is a RUNTIME, defence-in-depth assertion
  * that runs on the real, fully-templated argv immediately before spawn, so a
@@ -500,12 +498,12 @@ export function findMissingHardenedFlags(argv: readonly string[]): string[] {
   return HARDENED_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
 }
 
-// --- Micro-VM tier (M8-C3, task_39ff) -------------------------------------
+// --- Micro-VM tier ----------------------------------------------------------
 //
 // Everything below is the ALTERNATIVE launch path selected by
 // `config.container.tier === "microvm"` (default remains `"crun"`, the
 // buildReviewDockerArgs path above, byte-for-byte unchanged — see the
-// M8-B1 floor golden). Instead of `docker run`/`podman run`, this spawns
+// crun-floor golden). Instead of `docker run`/`podman run`, this spawns
 // `magpie-krun-launch` (rust/magpie-microvm-launcher), a direct-libkrun
 // launcher that boots the reviewer image's unpacked rootfs as a rootless
 // KVM micro-VM. Three structural differences from the crun path:
@@ -514,7 +512,7 @@ export function findMissingHardenedFlags(argv: readonly string[]): string[] {
 //      The launcher's `--vsock-uds`/`--vsock-port` (see
 //      microvm-vsock.ts's `microvmVsockChannel`) make libkrun itself dial
 //      OUT to the gateway's `gw.sock` on each guest `connect()` — the
-//      guest's own `magpie-vsock-client` (M8-C1, already baked into the
+//      guest's own `magpie-vsock-client` (already baked into the
 //      image, selected by entrypoint.sh's `[ -c /dev/vsock ]` check) still
 //      bridges Pi's plain TCP request to that vsock port, so `OPENAI_BASE_URL`
 //      stays the SAME in-guest-loopback address as the crun tier
@@ -700,7 +698,7 @@ export function findMissingMicrovmFlags(argv: readonly string[]): string[] {
   return MICROVM_FLAG_CHECKS.filter((c) => !c.ok(argv)).map((c) => c.label);
 }
 
-// --- Layer 2 install/launch preflight (task_3b48 / M8-C4) -----------------
+// --- Layer 2 install/launch preflight --------------------------------------
 //
 // "No network" is a THREE-layer invariant (construction, install/launch
 // preflight, in-guest fail-closed assertion), not something trusted to a
@@ -717,7 +715,7 @@ export function findMissingMicrovmFlags(argv: readonly string[]): string[] {
 // silently launching a networked VM, rather than relying on nobody ever
 // wiring one in.
 //
-// TODO(M8-D1 / task_2f46): once the dedicated tier-preflight module lands,
+// TODO: once a dedicated tier-preflight module lands,
 // this check belongs there instead — kept minimal and self-contained here
 // in the meantime (this file is where the microvm-tier argv is actually
 // built and where `findMissingMicrovmFlags` already runs the analogous
@@ -755,7 +753,7 @@ export function findMicrovmNetworkTransportViolations(argv: readonly string[]): 
  *
  * Flow:
  *   1. Bind-mount the (`.git`-stripped) workspace read-only at `/work`, a
- *      fresh per-job host temp dir read-write at `/out`, and (M7-1) the
+ *      fresh per-job host temp dir read-write at `/out`, and the
  *      per-job gateway socket directory read-only at `/run/gw` (see
  *      container-mounts.ts's `prepareReviewMount`/`createOutputDir` for the
  *      first two; `params.gatewaySocketDir` for the third).
@@ -775,7 +773,7 @@ export function findMicrovmNetworkTransportViolations(argv: readonly string[]): 
  *      name-only); entrypoint.sh translates it into a `~/.pi/agent/
  *      models.json` provider override before exec'ing `pi` (see this
  *      module's doc comment for why — Pi has no direct env-var base-URL
- *      override). `--network none` (M7-1, Design D — DISTRIBUTION.md §2)
+ *      override). `--network none` (Design D — DISTRIBUTION.md §2)
  *      means the ONLY way that base URL resolves to anything is the
  *      in-container forwarder relaying to the mounted `/run/gw/gw.sock`;
  *      there is no bridge network or `magpie-net` any more.
@@ -798,7 +796,7 @@ export function findMicrovmNetworkTransportViolations(argv: readonly string[]): 
  * timeout, abort, Pi exiting 0 without ever calling `report_findings`, or a
  * findings file that fails `parseFindings` — resolves to
  * `{ ok: false, reason }` rather than throwing, so callers can always post a
- * "review failed" note instead of going silent (PLAN.md §6).
+ * "review failed" note instead of going silent (see ARCHITECTURE.md's "Review sandbox" section).
  */
 export async function runReview(params: RunReviewParams): Promise<ReviewResult> {
   const { workspaceDir, diff, changedFiles, prTitle, prBody, config, signal } = params;
@@ -812,7 +810,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     return { ok: false, reason: "aborted" };
   }
 
-  // Tier selection (M8-C3, refined M8-D1): "crun" (default) is the
+  // Tier selection: "crun" (default) is the
   // docker/podman path below, byte-for-byte unchanged; "microvm" spawns
   // `magpie-krun-launch` instead — see this module's "Micro-VM tier" section
   // above. `piBinary` is the SAME test-seam field regardless of tier (it
@@ -820,7 +818,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // compatible) binary this module spawns" — the micro-VM tier reuses it
   // unchanged rather than adding a parallel override field).
   //
-  // As of M8-D1 (task_2f46), `params.resolvedTier` — the isolation ladder's
+  // `params.resolvedTier` — the isolation ladder's
   // active-probe decision, computed ONCE at startup by tier-ladder.ts's
   // `resolveTier` and threaded through pipeline.ts — takes priority over the
   // static `config.container.tier` when set, so this module never launches
@@ -881,7 +879,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
   // Bound ONCE, here, and used for BOTH tiers below (crun's `--user
   // <uid>:<gid>`, and the micro-VM tier's `krun_setuid`/`krun_setgid` AND the
-  // reviewer uid its guest drops to). M8-E5 (task_a749): these two used to be
+  // reviewer uid its guest drops to). These two used to be
   // read independently per call site, which let the micro-VM tier's in-guest
   // identity drift away from the host uid that actually owns the `/out`
   // virtiofs — see the MAGPIE_MICROVM_REVIEWER_UID/_GID entries in the
@@ -899,8 +897,8 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   // belt-and-suspenders: nothing here should legitimately reach the docker
   // client's env, but deleting the whole `MAGPIE_` prefix costs nothing and
   // stays robust as new secrets are added. We THEN set the one credential
-  // the container legitimately needs — the per-job gateway VIRTUAL key (M4-C
-  // — see this module's doc comment and `RunReviewParams.gatewayApiKey`) —
+  // the container legitimately needs — the per-job gateway VIRTUAL key
+  // (see this module's doc comment and `RunReviewParams.gatewayApiKey`) —
   // on the SAME env object, referenced in argv by name only
   // (`-e OPENROUTER_API_KEY`, never `-e OPENROUTER_API_KEY=<value>`). Never
   // log this object and never add the key to `args` below.
@@ -910,15 +908,15 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   }
   env.OPENROUTER_API_KEY = params.gatewayApiKey;
 
-  // The hardened `docker run` invocation (mirrors PLAN.md §4 exactly — see
-  // this module's doc comment above for the full flag-by-flag rationale).
+  // The hardened `docker run` invocation (see this module's doc comment
+  // above for the full flag-by-flag rationale).
   // Model/provider are the only per-job, non-secret inputs the image needs
   // and arrive as TRAILING container args, forwarded by
   // docker/reviewer/entrypoint.sh's `"$@"` onto the baked `pi` invocation —
   // everything else Pi needs (tools, extension, system prompt) is baked into
   // the image itself, not passed here.
   //
-  // `--network none` (M7-1, Design D — DISTRIBUTION.md §2.3) replaces the old
+  // `--network none` (Design D — DISTRIBUTION.md §2.3) replaces the old
   // `--network <config.container.network>` bridge/`magpie-net` attachment:
   // the container gets no network interfaces at all except its own loopback,
   // a property of the network namespace rather than any daemon-config-
@@ -927,7 +925,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
   //
   // The actual argv is assembled by the pure {@link buildReviewDockerArgs}/
   // {@link buildMicrovmLaunchArgs} (see their doc comments) so either can be
-  // unit-tested — including the M8-B1 byte-for-byte golden/floor-invariant
+  // unit-tested — including the byte-for-byte golden/floor-invariant
   // regression test for the crun path — independently of this function's
   // spawn/timeout/kill machinery. `binary`/`argv` below are what actually
   // gets spawned; everything from here down is written against those two
@@ -953,7 +951,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       env: {
         OPENAI_BASE_URL: config.gateway.containerBaseUrl,
         MAGPIE_REQUIRE_MEMORY_LIMIT: String(config.container.requireMemoryLimit),
-        // M8-E3 (task_2541): the configured guest RAM ceiling, non-secret,
+        // The configured guest RAM ceiling, non-secret,
         // inline (same convention as the two entries above) — entrypoint.sh
         // cross-checks this against the guest's own /proc/meminfo MemTotal
         // as its positive proof that libkrun's --ram-mib ceiling (set from
@@ -962,7 +960,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         // at all (see that script's memory-ceiling section for the full
         // rationale).
         MAGPIE_MICROVM_RAM_MIB: String(config.microvm.ramMib),
-        // M8-E5 (task_a749): the uid/gid entrypoint.sh must drop to before
+        // The uid/gid entrypoint.sh must drop to before
         // `exec pi` in the guest — non-secret, inline, same convention as the
         // entries above. These are the SAME `hostUid`/`hostGid` passed as
         // `uid`/`gid` just above (bound once at the top of this function), and
@@ -1009,7 +1007,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       return { ok: false, reason: `microvm-flag preflight failed: missing ${missingFlags.join(", ")}` };
     }
 
-    // Layer 2 (task_3b48 / M8-C4): the launch argv must never enable a
+    // Layer 2: the launch argv must never enable a
     // network transport — see findMicrovmNetworkTransportViolations's doc
     // comment. This check is expected to always pass today (no code path
     // in this builder can emit one of these flags); it exists as a
@@ -1031,15 +1029,15 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     }
     binary = launcherBin;
   } else {
-    // The hardened `docker run` invocation (mirrors PLAN.md §4 exactly — see
-    // this module's doc comment above for the full flag-by-flag rationale).
+    // The hardened `docker run` invocation (see this module's doc comment
+    // above for the full flag-by-flag rationale).
     // Model/provider are the only per-job, non-secret inputs the image needs
     // and arrive as TRAILING container args, forwarded by
     // docker/reviewer/entrypoint.sh's `"$@"` onto the baked `pi` invocation —
     // everything else Pi needs (tools, extension, system prompt) is baked into
     // the image itself, not passed here.
     //
-    // `--network none` (M7-1, Design D — DISTRIBUTION.md §2.3) replaces the old
+    // `--network none` (Design D — DISTRIBUTION.md §2.3) replaces the old
     // `--network <config.container.network>` bridge/`magpie-net` attachment:
     // the container gets no network interfaces at all except its own loopback,
     // a property of the network namespace rather than any daemon-config-
@@ -1056,8 +1054,8 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       config,
     });
 
-    // Runtime fail-closed preflight (task_bfaf / CTO edit #3 "or preflight" leg),
-    // defence-in-depth over the M8-B1 build-time floor golden. Assert the fully-
+    // Runtime fail-closed preflight (CTO edit #3 "or preflight" leg),
+    // defence-in-depth over the build-time floor golden. Assert the fully-
     // templated argv still carries the complete hardened posture BEFORE we
     // spawn a container over untrusted PR content — never launch an
     // under-hardened sandbox. Resolves `{ ok: false }` (never throws) per this
@@ -1068,7 +1066,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       console.error(
         `[reviewer] FAIL-CLOSED: refusing to launch review container — hardened flag preflight ` +
           `failed, missing: ${missingFlags.join(", ")}. This is a posture regression (see ` +
-          `reviewer.ts findMissingHardenedFlags / the M8-B1 floor golden); no container was started.`,
+          `reviewer.ts findMissingHardenedFlags / the crun-floor golden); no container was started.`,
       );
       await output.cleanup().catch(() => {});
       return { ok: false, reason: `hardened-flag preflight failed: missing ${missingFlags.join(", ")}` };
@@ -1232,14 +1230,14 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     /**
      * Appends the retained guest/container stderr tail to a failure reason.
      *
-     * M8-E6 (task_e5c4): the non-zero-exit path has always included
+     * The non-zero-exit path has always included
      * `stderrTail`, but the ZERO-exit failure paths below (no findings file,
      * unparsable findings file, a post-run processing throw) did not — so a
      * sandbox that started, logged a detailed fail-closed reason to stderr, and
      * then exited 0 discarded every one of those lines. That is precisely the
      * common case for this image: `docker/reviewer/entrypoint.sh` narrates its
      * whole confinement/mount/privilege-drop sequence on stderr, and Pi itself
-     * exits 0 even when a provider call failed. During the M8-E4 live
+     * exits 0 even when a provider call failed. During micro-VM tier
      * validation this hole made a micro-VM failure undiagnosable from the host
      * — the entire ordered entrypoint log existed, was buffered right here, and
      * was thrown away because the container happened to exit 0.
@@ -1336,7 +1334,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
         stdoutBuffer = "";
       }
 
-      // Best-effort usage/cost telemetry (M5-D, task_8a10) for the three
+      // Best-effort usage/cost telemetry for the three
       // early-exit failure paths below (timeout, abort, non-zero exit): these
       // return before the code===0 branch's own `usage` computation (which
       // relies on `agentEndMessages`/a clean finish that never arrived here),
@@ -1419,7 +1417,8 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             // last assistant turn carries error info (important for debugging
             // live OpenRouter runs); otherwise it's a genuine "model never
             // called the tool" (refusal, ran out of turns) or an I/O surprise
-            // reading the file. Either way we must not go silent (PLAN.md §6).
+            // reading the file. Either way we must not go silent (see
+            // ARCHITECTURE.md's "Review sandbox" section).
             const last = messages[messages.length - 1];
             if (last && (last.stopReason === "error" || last.errorMessage)) {
               const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
@@ -1449,7 +1448,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
           const summary =
             fileSummary.length > 0 ? parsed.value.summary : (extractSummaryText(messages) || "No summary provided.");
 
-          // M6-B belt-and-braces: diff.ts already keeps ignored files out of
+          // Belt-and-braces: diff.ts already keeps ignored files out of
           // the diff/changed-file list Pi saw (see `RunReviewParams
           // .ignorePaths`'s doc comment), but drop any finding against an
           // ignored path here too before it ever leaves this module — cheap
@@ -1485,7 +1484,7 @@ export interface PromptPayloadParams {
   changedFiles: string[];
   diff: string;
   /**
-   * When true, `diff` is only the range pushed since a prior review (M5-B) and
+   * When true, `diff` is only the range pushed since a prior review and
    * `changedFiles` is the whole-PR file list as context. Adds a leading
    * TRUSTED notice (outside the untrusted fence) telling the reviewer so.
    * Defaults to `false`.
@@ -1498,12 +1497,12 @@ export interface PromptPayloadParams {
    */
   nonce?: string;
   /**
-   * Repo-supplied advisory reviewer guidance (M6-B, repo-config.ts's
+   * Repo-supplied advisory reviewer guidance (repo-config.ts's
    * `applyRepoConfig` — already length-capped by that function). Rendered in
    * its own nonce-tagged `<REPO_REVIEW_GUIDANCE>` block, separate from
    * `<UNTRUSTED_PR_DATA>` (see this function's doc comment for why it's kept
    * distinct). `undefined` or empty omits the block entirely, so the prompt
-   * is byte-for-byte identical to the pre-M6-B shape when no repo override
+   * is byte-for-byte identical to the no-guidance shape when no repo override
    * is present.
    */
   guidance?: string;
@@ -1525,10 +1524,10 @@ export interface PromptPayloadParams {
  * control can terminate the fence. We deliberately do NOT sanitize/mangle the
  * inner content (e.g. inserting zero-width spaces into closing tags): the diff
  * legitimately contains real closing tags (HTML/JSX/XML/Vue) and corrupting
- * them would misrepresent the reviewed code and break M2 inline-comment
+ * them would misrepresent the reviewed code and break inline-comment
  * anchoring. The nonce defends the boundary without touching the data.
  *
- * REPO GUIDANCE (M6-B, task_220f): `params.guidance`, when present, is
+ * REPO GUIDANCE: `params.guidance`, when present, is
  * rendered in its own `<REPO_REVIEW_GUIDANCE nonce="...">` block — reusing
  * the SAME nonce as the `<UNTRUSTED_PR_DATA>` fence above (one fresh
  * unguessable value per invocation is enough; a second independent nonce
@@ -1564,7 +1563,7 @@ export function buildPromptPayload(params: PromptPayloadParams): string {
     : [];
   // See this function's doc comment "REPO GUIDANCE" section. Omitted
   // entirely (not even an empty block) when there's no guidance to show, so
-  // the prompt is byte-for-byte unchanged from before M6-B in the common
+  // the prompt is byte-for-byte unchanged in the common
   // case of a repo with no `.magpie.toml` override.
   const guidanceBlock =
     guidance && guidance.length > 0
@@ -1633,8 +1632,8 @@ export function buildPromptPayload(params: PromptPayloadParams): string {
 // else (tool_execution_*, turn_start, queue_update, ...) is ignored. Parsed
 // as `unknown` and narrowed defensively since this is untrusted-shape
 // external process output, not a type this codebase controls. Docker
-// forwards the container's stdout unchanged, so this parser is unaffected by
-// the M1/M2 host subprocess -> M3 container swap.
+// forwards the container's stdout unchanged, so this parser is agnostic to
+// whether Pi is running as a host subprocess or inside a container.
 
 /** The handful of `AssistantMessage` fields this module actually reads. */
 interface AssistantMessageLike {

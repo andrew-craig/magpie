@@ -70,7 +70,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 ### Proxy plane (per-job unix socket — `<GATEWAY_SOCKET_DIR>/<sanitized-jobId>/gw.sock`)
 
-- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by M4-E's gateway-reachable probe —
+- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by the gateway-reachable probe —
   the reviewer entrypoint health-probes this THROUGH the mounted socket before starting Pi.
 - `POST /v1/chat/completions` — OpenAI-compatible, streaming (SSE, `stream: true`) and
   non-streaming.
@@ -115,7 +115,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   (`server.close()`, unlink the socket, remove the now-empty job directory).
   - Auth: same as above.
   - Response: `200 { "id": string, "revoked": boolean, "spentUsd"?: number, "budgetUsd"?: number }`.
-    `spentUsd`/`budgetUsd` are the key's final spend snapshot (M5-D), taken immediately before
+    `spentUsd`/`budgetUsd` are the key's final spend snapshot, taken immediately before
     deletion — this is the gateway's own authoritative cost figure the orchestrator logs
     alongside Pi's self-reported usage (see `packages/orchestrator/src/telemetry.ts`). Present
     only when `revoked` is `true`.
@@ -131,7 +131,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 ## Security model (summary)
 
-- The real OpenRouter key exists in exactly one place after M4: this process's environment
+- The real OpenRouter key exists in exactly one place: this process's environment
   (`MAGPIE_GATEWAY_OPENROUTER_KEY`). It's set on the *outbound* request to OpenRouter only,
   never logged, and never appears in any response this service sends (see
   `proxy-server.test.ts`'s "real key never leaks" assertions).
@@ -152,7 +152,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   ever needs to reach `openrouter.ai`. An SNI/domain allowlist on the gateway process's own
   egress (e.g. host `iptables`/`ipset` scoped to the gateway user, or an actual SNI-filtering
   outbound proxy) would add defense-in-depth against the gateway process itself being
-  compromised, but is out of scope for M4-A.
+  compromised, but is out of scope for now.
 
 ## Provisioning as its own unprivileged user
 
@@ -182,5 +182,5 @@ sudo -u magpie-gateway env $(cat /etc/magpie-gateway/gateway.env | xargs) \
 In production the gateway runs as a **systemd unit** — `systemd/magpie-gateway.service`
 (`User=magpie-gateway`, `EnvironmentFile=/etc/magpie-gateway/gateway.env`, ordered before
 `magpie.service`, with a `RuntimeDirectory` for the per-job socket tree) — installed by
-`scripts/install.sh` (M5-A). The manual invocation above is only for iterating locally; see
+`scripts/install.sh`. The manual invocation above is only for iterating locally; see
 `INSTALL.md` / `QUICKSTART.md` for the packaged install.

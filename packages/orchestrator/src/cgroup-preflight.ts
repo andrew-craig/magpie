@@ -1,4 +1,4 @@
-// cgroup v2 memory-controller preflight for the magpie orchestrator (bug_df2d).
+// cgroup v2 memory-controller preflight for the magpie orchestrator.
 //
 // WHY THIS EXISTS: `config.container.memory` is passed as `docker/podman run
 // --memory=<limit>` on every review container (see reviewer.ts) — the hard
@@ -12,7 +12,7 @@
 //   - Docker/dockerd FAILS OPEN: it prints a warning
 //     ("your kernel does not support memory limit capabilities") and starts
 //     the container anyway, unconfined — silent, ongoing risk. This is the
-//     exact behavior bug_df2d reports.
+//     exact silent-failure behavior this preflight check exists to catch.
 //   - Podman/crun FAILS CLOSED, but late and cryptically: container CREATION
 //     itself errors ("crun: opening file 'memory.max' for writing: No such
 //     file or directory"), so every single review job fails from the first

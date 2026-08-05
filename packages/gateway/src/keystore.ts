@@ -1,6 +1,6 @@
 // In-memory virtual-key store for the magpie gateway.
 //
-// NO database (CTO decision — see PLAN.md §5's "Custom OpenRouter-only proxy"
+// NO database (see ARCHITECTURE.md §5's "Custom OpenRouter-only proxy"
 // note and this package's README). Keys are per-job and ephemeral by design:
 // the orchestrator mints one right before a review run and revokes it on
 // cleanup, so losing the whole store on a process restart is an accepted,
@@ -18,7 +18,7 @@
 
 import { randomBytes } from "node:crypto";
 
-/** One virtual key's full record. Matches the M4-A task's LOCKED shape exactly. */
+/** One virtual key's full record. */
 export interface KeyEntry {
   id: string;
   key: string;
@@ -36,7 +36,7 @@ export interface MintKeyParams {
   ttlSeconds: number;
 }
 
-/** A revoked key's final spend snapshot — see {@link KeyStore.revoke} (M5-D). */
+/** A revoked key's final spend snapshot — see {@link KeyStore.revoke}. */
 export interface RevokedKeySpend {
   id: string;
   spentUsd: number;
@@ -80,15 +80,15 @@ export class KeyStore {
   }
 
   /**
-   * Revoke a key by id. Idempotent by contract (M4-A): revoking an
+   * Revoke a key by id. Idempotent by contract: revoking an
    * unknown or already-revoked id is a silent no-op, never an error — the
    * orchestrator's cleanup path calls this unconditionally and must never
    * fail a job over a double-revoke race.
    *
    * Returns the entry's final `{ id, spentUsd, budgetUsd }` snapshot (taken
    * BEFORE deletion) so the caller can surface the key's authoritative final
-   * spend — see admin-server.ts's `DELETE /admin/keys/:id`, added in M5-D so
-   * the orchestrator can log real gateway-tracked cost instead of only Pi's
+   * spend — see admin-server.ts's `DELETE /admin/keys/:id`, which lets
+   * the orchestrator log real gateway-tracked cost instead of only Pi's
    * self-reported usage. Returns `undefined` for an unknown/already-revoked
    * id — there is no spend to report for a key this store never held (or no
    * longer holds).

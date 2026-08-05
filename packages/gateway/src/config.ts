@@ -3,9 +3,9 @@
 // The gateway is a standalone service with its OWN process/env, deliberately
 // separate from the orchestrator's `config.toml` + `MAGPIE_*` secrets (see
 // packages/orchestrator/src/config.ts and CLAUDE.md's capability-separation
-// principle: after M4, the real OpenRouter key lives ONLY in this process's
-// environment, never the orchestrator's or the review container's). Per the
-// M4-A task contract, non-secret settings are plain `GATEWAY_*` env vars
+// principle: the real OpenRouter key lives ONLY in this process's
+// environment, never the orchestrator's or the review container's).
+// Non-secret settings are plain `GATEWAY_*` env vars
 // (no TOML file for this small a surface) and the two secrets are
 // `MAGPIE_GATEWAY_*`-namespaced so they're unambiguously gateway-owned even
 // though they share the `MAGPIE_` prefix convention with the orchestrator's
@@ -59,7 +59,7 @@ export interface GatewayConfig {
   defaultModel?: string;
   /** Secrets resolved from the environment. Never sourced from a file, never logged. */
   secrets: {
-    /** The real OpenRouter API key. The ONLY place it lives after M4 (PLAN.md §5). */
+    /** The real OpenRouter API key. The ONLY place it lives (ARCHITECTURE.md §5). */
     openrouterKey: string;
     /** Bearer token guarding the `/admin/*` management plane. */
     masterKey: string;

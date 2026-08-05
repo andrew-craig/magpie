@@ -1,6 +1,6 @@
-// Per-repo configuration overrides via `.magpie.toml` (M6-B, task_220f).
+// Per-repo configuration overrides via `.magpie.toml`.
 //
-// PLAN.md milestone 6: let a repo tune a narrow, pre-approved slice of review
+// Lets a repo tune a narrow, pre-approved slice of review
 // behaviour (which model, how much diff to review, freeform reviewer
 // guidance, which paths to skip) without an operator touching the server's
 // `config.toml`. The entire point of this module is that repo-supplied
@@ -28,7 +28,7 @@
 // SECURITY — the overridable subset is EXACTLY four knobs, gated field-by-
 // field (see {@link applyRepoConfig}):
 //   - `llm.model`, but ONLY if it's a member of the server's OWN
-//     `config.llm.allowedModels` (config.ts, M6-B). Absent/empty
+//     `config.llm.allowedModels` (config.ts). Absent/empty
 //     `allowedModels` silently refuses every model override. This exists
 //     because the model choice feeds straight into gateway.ts's
 //     `mintGatewayKeyFromConfig`, which scopes the per-job virtual key to a

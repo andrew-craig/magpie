@@ -97,10 +97,10 @@ describe("formatStartupError (entrypoint catch wiring)", () => {
     for (const err of [
       new ConfigError(["missing [gateway].base_url"], "/etc/magpie/config.toml"),
       new DockerUnavailableError("docker CLI not found on PATH"),
-      // bug_df2d: a memory-controller failure must be surfaced as an actionable
+      // A memory-controller failure must be surfaced as an actionable
       // message, NOT swallowed into a generic internal-fault trace.
       new MemoryControllerUnavailableError("cgroup memory-controller preflight failed: ..."),
-      // M8-D1 (task_2f46): an unacknowledged isolation-tier degradation must
+      // An unacknowledged isolation-tier degradation must
       // be surfaced the same way — actionable, no stack noise.
       new TierSelectionError("isolation-tier DEGRADATION: ..."),
     ]) {

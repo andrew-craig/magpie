@@ -1,4 +1,4 @@
-// MERGE-BLOCKER regression test (CTO binding edit #1, epic_59b1 / task_08ec):
+// Regression test enforcing a binding CTO decision:
 // the orchestrator ⟂ gateway uid separation must hold in EVERY tier from the
 // first landed commit. The real threat is indirect prompt injection against the
 // review agent, so the process that parses untrusted PR content (this
@@ -27,7 +27,7 @@
 //                     key's budget.
 //   reviewer container — holds only the per-job virtual key (as
 //                     OPENROUTER_API_KEY), --network none, no host secret.
-// The docker→rootless-podman port (M8-B2) does not touch this split: the
+// The docker→rootless-podman port does not touch this split: the
 // launcher change is uid-mapping only; the mint/revoke management plane and the
 // per-job socket handoff are unchanged.
 

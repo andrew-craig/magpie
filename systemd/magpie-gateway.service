@@ -15,7 +15,7 @@
 # directory (`RuntimeDirectory=` below), which holds only unix socket special
 # files, never secrets or review content.
 #
-# Proxy-plane transport (M7-1): as of Design D there is no more magpie-net
+# Proxy-plane transport: as of Design D there is no more magpie-net
 # bridge / fixed proxy IP to bind. Each job gets its own unix domain socket
 # under `RuntimeDirectory=magpie-gateway` (systemd creates and owns
 # `/run/magpie-gateway`, mode 0700, `magpie-gateway:magpie-gateway`); this
@@ -100,7 +100,7 @@ LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
 # INET(6) for the mgmt-plane listener + the outbound call to OpenRouter; UNIX
-# for the per-job proxy-plane sockets under RuntimeDirectory (M7-1) and
+# for the per-job proxy-plane sockets under RuntimeDirectory and
 # Node's internal use (e.g. DNS/threadpool signalling); NETLINK because
 # glibc's resolver (getaddrinfo) opens an AF_NETLINK socket to enumerate
 # interfaces for source-address/IPv6 selection — blocking it can make DNS

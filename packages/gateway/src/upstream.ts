@@ -6,7 +6,7 @@
 // cap) can be unit tested against fixture strings without spinning up an
 // HTTP server or a real/mocked fetch.
 //
-// OpenRouter usage/cost contract (per the M4-A task brief): requesting
+// OpenRouter usage/cost contract: requesting
 // `usage: { include: true }` on the forwarded request makes OpenRouter
 // include a `usage` object carrying `cost` (USD, already computed
 // server-side) — on a non-streaming response that's the top-level

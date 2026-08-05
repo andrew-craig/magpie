@@ -1,23 +1,22 @@
 # ci.yml — TypeScript workspace lint/typecheck/test gate for pull requests.
 #
-# Added with the M8-B1 floor-invariant regression test (task_89c4): CTO binding
-# edit #3 requires CI to fail on any drift of the reviewer's hardened "crun
-# floor" argv from its committed golden. That test
+# Runs a floor-invariant regression test: CTO binding edit #3 requires CI to
+# fail on any drift of the reviewer's hardened "crun floor" argv from its
+# committed golden. That test
 # (packages/orchestrator/src/reviewer-crun-floor-argv.test.ts) only actually
-# gates merges if a workflow runs the suite on PRs — before this, the repo had
-# no PR-triggered TS test job (only the release-* workflows), so this file wires
+# gates merges if a workflow runs the suite on PRs, so this file wires
 # `npm test` (vitest across all workspaces) + a typecheck into every PR that
 # touches the TypeScript packages.
 #
-# `docker/reviewer/**` added to `paths:` with the M8-E8 image-config-drift
-# guard (task_0208): reviewer-microvm-env-parity.test.ts (under
-# packages/orchestrator/src, so already covered by the `packages/**` glob
-# below) reads docker/reviewer/Dockerfile and docker/reviewer/entrypoint.sh
-# straight off disk to assert every Dockerfile `ENV` is covered for the
-# micro-VM tier. Without this line, a PR that touched ONLY those two files
-# (e.g. adding a new `ENV` with no accompanying packages/ change) would never
-# trigger this workflow at all — the test would exist but never actually run
-# on the PR that needs it, silently defeating the whole point of the guard.
+# `docker/reviewer/**` is included in `paths:` for the image-config-drift
+# guard: reviewer-microvm-env-parity.test.ts (under packages/orchestrator/src,
+# so already covered by the `packages/**` glob below) reads
+# docker/reviewer/Dockerfile and docker/reviewer/entrypoint.sh straight off
+# disk to assert every Dockerfile `ENV` is covered for the micro-VM tier.
+# Without this line, a PR that touched ONLY those two files (e.g. adding a new
+# `ENV` with no accompanying packages/ change) would never trigger this
+# workflow at all — the test would exist but never actually run on the PR that
+# needs it, silently defeating the whole point of the guard.
 name: ci
 
 on:
@@ -61,7 +60,7 @@ jobs:
         run: npm ci
 
       # Typecheck (the orchestrator build is `tsc -p`), then run the full
-      # vitest suite across every workspace — this is what makes the M8-B1
+      # vitest suite across every workspace — this is what makes the
       # crun-floor golden test a real merge gate.
       - name: Typecheck
         run: npm run build

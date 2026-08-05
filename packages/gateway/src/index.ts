@@ -1,5 +1,5 @@
-// Entrypoint for the magpie gateway (M4-A; per-job unix-socket proxy plane
-// added in M7-1, DISTRIBUTION.md §2.6 "Design D").
+// Entrypoint for the magpie gateway: a per-job unix-socket proxy plane
+// (DISTRIBUTION.md §2.6 "Design D").
 //
 // Composition root: load config -> build the in-memory key store and the
 // per-job socket manager -> start the ONE HTTP listener this process binds
@@ -28,7 +28,7 @@
 // left untouched).
 //
 // SECURITY: this process is the ONLY place `config.secrets.openrouterKey`
-// exists after M4 (see config.ts, PLAN.md §5). This module never logs
+// exists (see config.ts, ARCHITECTURE.md §5). This module never logs
 // `config.secrets` — the one startup log line below intentionally lists
 // only non-secret fields.
 

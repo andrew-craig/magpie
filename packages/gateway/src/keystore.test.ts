@@ -46,7 +46,7 @@ describe("KeyStore", () => {
     expect(store.revoke(id)).toBeUndefined(); // second revoke, same id — no spend to report
   });
 
-  it("revoke returns the final spend snapshot (id, spentUsd, budgetUsd) taken before deletion (M5-D)", () => {
+  it("revoke returns the final spend snapshot (id, spentUsd, budgetUsd) taken before deletion", () => {
     const store = createKeyStore();
     const { id, key } = store.mint({ budgetUsd: 2, ttlSeconds: 60 });
     store.recordSpend(id, 0.75);

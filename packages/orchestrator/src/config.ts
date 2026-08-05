@@ -4,10 +4,10 @@
 // template and per-field documentation), validates it, applies defaults, and
 // resolves the handful of secrets that deliberately live in the environment
 // rather than the TOML file (webhook secret, gateway master key, and
-// optionally the GitHub App private key). See PLAN.md "Repository layout" /
-// "Defaults chosen" for the surrounding design.
+// optionally the GitHub App private key). See ARCHITECTURE.md "Repository
+// layout" / "Defaults" for the surrounding design.
 //
-// NOTE (M4-C): there is no LLM provider API key here. The real OpenRouter
+// There is no LLM provider API key here. The real OpenRouter
 // key now lives ONLY in packages/gateway's own process env
 // (MAGPIE_GATEWAY_OPENROUTER_KEY) — this orchestrator mints a short-lived,
 // budget-capped virtual key per job against the gateway's management plane
@@ -35,7 +35,7 @@ const rawConfigSchema = z
       .object({
         base_url: z.string().min(1).default("https://openrouter.ai/api/v1"),
         model: z.string().min(1),
-        // M6-B (task_220f): the server-side allowlist gating a repo's
+        // The server-side allowlist gating a repo's
         // `.magpie.toml`'s `[llm] model` override (see repo-config.ts's
         // `applyRepoConfig`). A repo can ONLY switch models to a value the
         // OPERATOR has explicitly opted into here — never an arbitrary
@@ -87,22 +87,22 @@ const rawConfigSchema = z
       .prefault({}),
     container: z
       .object({
-        // The reviewer image the review container runs. As of M7-2
-        // (DISTRIBUTION.md §3.1) this is PULLED from GHCR rather than built
-        // locally: it's published multi-arch (amd64+arm64), cosign-signed with
+        // The reviewer image the review container runs. This is PULLED
+        // from GHCR rather than built locally (DISTRIBUTION.md §3.1): it's
+        // published multi-arch (amd64+arm64), cosign-signed with
         // SLSA provenance by .github/workflows/release-reviewer.yml on
         // `reviewer-v*` tags, and is the ONLY container in the product
         // (orchestrator + gateway are host services). Not just a convention:
-        // task_4ed4 (M3-C)'s `docker run` invocation uses this value directly
+        // the `docker run` invocation uses this value directly
         // as the image to run. The default is PINNED BY DIGEST (the `@sha256:`
         // below is the multi-arch image-index digest published by the
         // `reviewer-v0.3.1` tag) so a re-tagged upstream image can't silently
         // swap the untrusted-content runtime under you — the tag portion is
         // human-readable provenance only; the digest is what docker resolves.
-        // `0.3.0` (M8-E1) was the first image with micro-VM-tier support baked in
+        // `0.3.0` was the first image with micro-VM-tier support baked in
         // (the `vsock-client` binary + the `MAGPIE_IS_MICROVM` vsock-egress
-        // entrypoint path); `0.3.1` folds in the M8-E2..E7 guest fixes found
-        // during live micro-VM validation; `0.2.0` was M7-era (crun floor only).
+        // entrypoint path); `0.3.1` folds in guest fixes found
+        // during live micro-VM validation; `0.2.0` supported the crun floor only.
         // `scripts/build-reviewer-image.sh` still builds a local
         // `magpie-reviewer:*` image for development (override this to use it).
         image: z
@@ -116,38 +116,38 @@ const rawConfigSchema = z
         // containers — see reviewer.ts's MAGPIE_REQUIRE_MEMORY_LIMIT env var)
         // when the kernel's cgroup v2 `memory` controller is unavailable, so
         // the `memory` limit above would otherwise be silently unenforced
-        // (see cgroup-preflight.ts and bug_df2d). Some hosts boot with the
+        // (see cgroup-preflight.ts). Some hosts boot with the
         // controller disabled (e.g. Raspberry Pi firmware defaults ship
         // `cgroup_disable=memory` — see INSTALL.md/QUICKSTART.md); set this
         // to `false` on such a host to run anyway, accepting an unenforced
         // memory ceiling, rather than being unable to start Magpie at all.
         // Default `true`: fail closed, matching Magpie's asserted-confinement
-        // posture (M7 "Design D") — a hardening flag that can silently become
+        // posture ("Design D") — a hardening flag that can silently become
         // a no-op is exactly the class of gap that posture exists to catch.
         require_memory_limit: z.boolean().default(true),
         cpus: z.string().min(1).default("2"),
         pids_limit: z.number().int().positive().default(256),
-        // M8-B2: the review-container runtime. Defaults to `podman` (rootless,
-        // no root daemon, no `docker` group) — the M8 "crun floor" rootless
+        // The review-container runtime. Defaults to `podman` (rootless,
+        // no root daemon, no `docker` group) — the rootless
         // substrate (docs/design/cto-decision-brief.md §5). Any docker-
         // compatible CLI still works via this seam (set it to `docker` or a
         // full path). reviewer.ts keys the one rootless-only argv difference —
         // `--userns=keep-id` — off whether this binary's basename is `podman`
         // (see isPodmanBinary), so a `docker` value reproduces the exact
-        // pre-M8-B2 argv. NOTE: running podman rootless as the `magpie` service
-        // user needs subuid/subgid + linger provisioning; that installer/
-        // systemd work is M8-D3 (task_67aa).
+        // pre-rootless argv. NOTE: running podman rootless as the `magpie`
+        // service user needs subuid/subgid + linger provisioning; that's
+        // handled by the installer/systemd unit.
         docker_bin: z.string().min(1).default("podman"),
-        // M8-C3 (task_39ff): the reviewer launch TIER. "crun" (default) is
+        // The reviewer launch TIER. "crun" (default) is
         // today's hardened `docker run`/`podman run` path
-        // (buildReviewDockerArgs, the M8-B1 "floor" golden) — unchanged
+        // (buildReviewDockerArgs, the "floor" golden) — unchanged
         // unless a deployment opts into "microvm" (rootless libkrun via
         // `magpie-krun-launch`, see reviewer.ts's buildMicrovmLaunchArgs).
         // Defaulting to "crun" means an existing deployment's behavior, and
         // the floor golden fixture, are BYTE-FOR-BYTE unaffected by this
         // field's mere existence.
         tier: z.enum(["crun", "microvm"]).default("crun"),
-        // M8-D1 (task_2f46): path to the `magpie-tier-probe` binary
+        // Path to the `magpie-tier-probe` binary
         // (rust/magpie-tier-probe) the isolation-tier ladder (tier-ladder.ts)
         // shells out to for its KVM_CREATE_VM check. Mirrors
         // `microvm.launcher_bin`'s "basename resolved via PATH, or a full
@@ -161,7 +161,7 @@ const rawConfigSchema = z
       })
       .strict()
       .prefault({}),
-    // M8-C3 (task_39ff): guest knobs for the "microvm" container.tier. Only
+    // Guest knobs for the "microvm" container.tier. Only
     // load-bearing when container.tier === "microvm" — loadConfig() below
     // fails closed if that tier is selected without a valid rootfs_path, but
     // otherwise these fields are inert (same "present but unused unless
@@ -171,7 +171,7 @@ const rawConfigSchema = z
         // Guest RAM, mirroring rust/magpie-microvm-launcher/src/cli.rs's
         // --ram-mib and docs/design's brief §6.4 "~1 GB/review" default —
         // deliberately smaller than container.memory's "4g" docker default:
-        // the microVM's RAM is VMM-ENFORCED (bug_df2d's structural fix, see
+        // the microVM's RAM is VMM-ENFORCED (a structural fix — see
         // that crate's config.rs doc comment), not a cgroup ceiling that can
         // be silently unenforced, so a tighter default is safe to ship.
         ram_mib: z.number().int().positive().default(1024),
@@ -179,7 +179,7 @@ const rawConfigSchema = z
         vcpus: z.number().int().positive().default(2),
         // Absolute host path to the PREPARED guest root filesystem (an
         // unpacked OCI image directory — see rust/magpie-microvm-launcher's
-        // --rootfs and the M8-A1 spike's virtiofs unpack-to-dir approach).
+        // --rootfs and its virtiofs unpack-to-dir approach).
         // Required (and validated absolute) only when container.tier is
         // "microvm" — see loadConfig()'s post-parse check below; left
         // optional here (empty-string default) so a "crun"-tier deployment
@@ -205,19 +205,19 @@ const rawConfigSchema = z
     gateway: z
       .object({
         // Management (control) plane base URL for the credential-injecting
-        // LLM gateway (M4-A, packages/gateway; PLAN.md §5). This orchestrator
+        // LLM gateway (packages/gateway; ARCHITECTURE.md §5). This orchestrator
         // process only ever talks to the mgmt plane (mint/revoke virtual
         // keys, see gateway.ts) — never the proxy/data plane, which the
-        // review container reaches directly (M4-C wiring, not this field).
+        // review container reaches directly (not this field).
         // Default matches packages/gateway's own default
         // GATEWAY_MGMT_PORT=4100 on loopback.
         base_url: z.string().min(1).default("http://127.0.0.1:4100"),
         // Container-facing PROXY (data) plane base URL — where the review
-        // CONTAINER itself sends chat-completions requests (M4-C). This is a
+        // CONTAINER itself sends chat-completions requests. This is a
         // SEPARATE address from `base_url` above on purpose: `base_url` is
         // the loopback-only mgmt plane this orchestrator process calls to
         // mint/revoke keys, while this one is what the review container
-        // itself is pointed at. As of M7-1 (Design D — see DISTRIBUTION.md
+        // itself is pointed at. Under Design D (see DISTRIBUTION.md
         // §2) the reviewer runs `--network none` and has no bridge/host
         // route at all; this address is served by a tiny in-container
         // TCP->unix forwarder listening on the container's OWN loopback
@@ -250,8 +250,8 @@ const rawConfigSchema = z
       .prefault({}),
     telemetry: z
       .object({
-        // Append-only JSONL sink for per-job cost/outcome telemetry (M5-D,
-        // task_8a10 — see telemetry.ts). One line per job: repo/PR/head SHA,
+        // Append-only JSONL sink for per-job cost/outcome telemetry
+        // (see telemetry.ts). One line per job: repo/PR/head SHA,
         // outcome (success/diff-too-large/timeout-kill/budget-exhausted/...),
         // wall-clock duration, Pi's self-reported token usage, and the
         // gateway's own authoritative final spend when a gateway key was
@@ -277,7 +277,7 @@ export interface Config {
   llm: {
     baseUrl: string;
     model: string;
-    /** Server-side allowlist for a repo's `.magpie.toml` `[llm] model` override (M6-B). Empty means no repo-level model override is possible. See schema comment above. */
+    /** Server-side allowlist for a repo's `.magpie.toml` `[llm] model` override. Empty means no repo-level model override is possible. See schema comment above. */
     allowedModels: string[];
   };
   server: {
@@ -294,7 +294,7 @@ export interface Config {
     workDir: string;
   };
   container: {
-    /** Docker image tag the review container runs. See PLAN.md M3/M3-C. */
+    /** Docker image tag the review container runs. See ARCHITECTURE.md. */
     image: string;
     /** `docker run --memory` limit, e.g. "4g". */
     memory: string;
@@ -309,14 +309,14 @@ export interface Config {
     cpus: string;
     /** `docker run --pids-limit`. */
     pidsLimit: number;
-    /** Path to the review-container runtime CLI. Defaults to `podman` (rootless; M8-B2); any docker-compatible CLI works. See config schema above. */
+    /** Path to the review-container runtime CLI. Defaults to `podman` (rootless); any docker-compatible CLI works. See config schema above. */
     dockerBin: string;
-    /** Reviewer launch tier (M8-C3). `"crun"` (default) is today's docker/podman `docker run` path; `"microvm"` opts into the rootless-libkrun launcher (reviewer.ts's `buildMicrovmLaunchArgs`). This is the REQUESTED/configured tier — tier-ladder.ts's `resolveTier` is what decides the ACTUAL tier a job runs at (see that module's doc comment). */
+    /** Reviewer launch tier. `"crun"` (default) is today's docker/podman `docker run` path; `"microvm"` opts into the rootless-libkrun launcher (reviewer.ts's `buildMicrovmLaunchArgs`). This is the REQUESTED/configured tier — tier-ladder.ts's `resolveTier` is what decides the ACTUAL tier a job runs at (see that module's doc comment). */
     tier: "crun" | "microvm";
-    /** Path to the `magpie-tier-probe` binary (M8-D1) — see tier-ladder.ts. */
+    /** Path to the `magpie-tier-probe` binary — see tier-ladder.ts. */
     tierProbeBin: string;
   };
-  /** Micro-VM guest knobs (M8-C3), only load-bearing when `container.tier === "microvm"`. See config schema above. */
+  /** Micro-VM guest knobs, only load-bearing when `container.tier === "microvm"`. See config schema above. */
   microvm: {
     /** Guest RAM in MiB (`magpie-krun-launch --ram-mib`). */
     ramMib: number;
@@ -330,10 +330,10 @@ export interface Config {
     launcherBin: string;
   };
   gateway: {
-    /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see PLAN.md §5. */
+    /** Management (control) plane base URL for `packages/gateway` (see gateway.ts). Loopback-only by the gateway's own construction — see ARCHITECTURE.md §5. */
     baseUrl: string;
     /**
-     * Container-facing PROXY (data) plane base URL (M4-C) — passed into the
+     * Container-facing PROXY (data) plane base URL — passed into the
      * review container's env as `OPENAI_BASE_URL` (see reviewer.ts) and
      * translated by docker/reviewer/entrypoint.sh into a `~/.pi/agent/
      * models.json` `openrouter` provider `baseUrl` override, which is the
@@ -341,8 +341,8 @@ export interface Config {
      * generic env-var base-URL override — see reviewer.ts's module doc
      * comment). Deliberately a SEPARATE value from `baseUrl` above: that one
      * is this orchestrator's loopback-only mgmt-plane address; this one is
-     * an address inside the review container's OWN network namespace (M7-1:
-     * the container runs `--network none`, so this resolves to the
+     * an address inside the review container's OWN network namespace (under
+     * Design D, the container runs `--network none`, so this resolves to the
      * container's own loopback, served by the in-container forwarder that
      * relays to the mounted gateway unix socket — see DISTRIBUTION.md §2.2).
      */
@@ -353,7 +353,7 @@ export interface Config {
     ttlMarginSeconds: number;
   };
   telemetry: {
-    /** Append-only JSONL path for per-job cost/outcome telemetry (M5-D — see telemetry.ts). */
+    /** Append-only JSONL path for per-job cost/outcome telemetry — see telemetry.ts. */
     path: string;
   };
   /** Secrets resolved from the environment (never sourced from the TOML file). */
@@ -527,7 +527,7 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
-  // NOTE: there is deliberately no MAGPIE_LLM_API_KEY here (M4-C — CTO
+  // NOTE: there is deliberately no MAGPIE_LLM_API_KEY here (CTO
   // decision). The real OpenRouter key now lives ONLY in the gateway
   // process's own env (MAGPIE_GATEWAY_OPENROUTER_KEY, see
   // packages/gateway/README.md); this orchestrator never holds it, so it
@@ -578,7 +578,7 @@ export function loadConfig(configPath?: string): Config {
     );
   }
 
-  // M8-C3 (task_39ff): fail closed at load time if the "microvm" tier is
+  // Fail closed at load time if the "microvm" tier is
   // selected without a usable rootfs — better than discovering it per-job,
   // deep inside reviewer.ts, the first time a review actually runs. Checked
   // on `parsed.data` (not the raw TOML) so this only runs once the rest of
@@ -667,7 +667,7 @@ export function loadConfig(configPath?: string): Config {
  * `"crun"` tier (default): unchanged — `config.limits.concurrency`, exactly
  * as before this field existed.
  *
- * `"microvm"` tier (M8-C3, brief §6.4): `floor(host_ram_budget_mib /
+ * `"microvm"` tier (brief §6.4): `floor(host_ram_budget_mib /
  * ram_mib)`, clamped to a minimum of 1 — a host that's only budgeted for
  * (say) 3.5 concurrent 1 GiB guests should run 3 at a time, never 0, and
  * never more than its own configured RAM budget allows regardless of what

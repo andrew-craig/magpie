@@ -1,5 +1,5 @@
-// Per-job virtual-key lifecycle against the host-side LLM gateway (M4-B; see
-// packages/gateway and PLAN.md §5).
+// Per-job virtual-key lifecycle against the host-side LLM gateway (see
+// packages/gateway and ARCHITECTURE.md §5).
 //
 // The gateway (a separate process, `packages/gateway`) holds the one real
 // OpenRouter key and exposes a small, loopback-only management API — see
@@ -9,7 +9,7 @@
 // virtual key (`201 { id, key, socketDir }`); `DELETE /admin/keys/:id`
 // revokes one, idempotently (`200 { id, revoked, spentUsd?, budgetUsd? }`,
 // even for an unknown/already-revoked id — `revoked: false` and no spend
-// fields in that case; see the M5-D final-spend snapshot on `revokeGatewayKey`).
+// fields in that case; see the final-spend snapshot on `revokeGatewayKey`).
 // This module is the orchestrator-side half of that contract: mint one fresh
 // virtual key per review job (mirrors github.ts's "mint fresh per job, no
 // cross-job cache" principle) and revoke it during the pipeline's cleanup, on
@@ -17,8 +17,8 @@
 // pipeline.ts, which wires the calls below into its existing per-job
 // try/finally).
 //
-// SOCKET DIR (M7-1, Design D — see DISTRIBUTION.md §2.2/§2.6): as of M7-1 the
-// mint response also carries `socketDir`, an absolute HOST path to a per-job
+// SOCKET DIR (Design D — see DISTRIBUTION.md §2.2/§2.6): the mint response
+// also carries `socketDir`, an absolute HOST path to a per-job
 // directory the gateway has already created and bound its per-job unix
 // socket inside (always named `gw.sock`, so the full path is
 // `<socketDir>/gw.sock`). This module treats `socketDir` as an opaque,
@@ -38,7 +38,7 @@
 //    ever puts it in the `Authorization` request header, never in a URL,
 //    argv, or a log/error payload.
 //  - The minted virtual key (`GatewayKey.key`) is likewise never logged here.
-//    As of M4-C, pipeline.ts threads it into reviewer.ts's `runReview` as
+//    pipeline.ts threads it into reviewer.ts's `runReview` as
 //    `gatewayApiKey`, which sets it as the review container's
 //    `-e OPENROUTER_API_KEY` — the orchestrator no longer loads a real
 //    provider key at all (see config.ts: `secrets.llmApiKey` was removed),
@@ -73,7 +73,7 @@ export interface GatewayKey {
   key: string;
   /**
    * Absolute HOST path to the per-job directory the gateway created and
-   * bound its per-job unix socket inside (M7-1 — see this module's doc
+   * bound its per-job unix socket inside (see this module's doc
    * comment). Always contains a `gw.sock` file once the gateway has finished
    * binding. Not a secret (it's a filesystem path, not a credential) — safe
    * to log if useful, unlike `key`. pipeline.ts threads this straight into
@@ -92,8 +92,8 @@ export interface MintGatewayKeyOptions {
   /** Key lifetime in seconds, starting from mint time. */
   ttlSeconds: number;
   /**
-   * The queue's per-job id (see queue.ts's `JobDescriptor.id`). REQUIRED as
-   * of M7-1: the gateway uses it to create/name the per-job socket directory
+   * The queue's per-job id (see queue.ts's `JobDescriptor.id`). REQUIRED:
+   * the gateway uses it to create/name the per-job socket directory
    * it returns as `socketDir` (see this module's doc comment) before it ever
    * responds, so the orchestrator can bind-mount a directory that already
    * exists at `docker run` time (DISTRIBUTION.md §2.6's launch-ordering
@@ -120,7 +120,7 @@ const mintResponseSchema = z
   .strict();
 
 /**
- * Validates the gateway's `DELETE /admin/keys/:id` response shape (M5-D — see
+ * Validates the gateway's `DELETE /admin/keys/:id` response shape (see
  * admin-server.ts's doc comment and packages/gateway/README.md's management-
  * plane section). Same defensive-parse rationale as {@link mintResponseSchema}.
  */
@@ -134,8 +134,8 @@ const revokeResponseSchema = z
   .strict();
 
 /**
- * The gateway's authoritative final-spend snapshot for a just-revoked key
- * (M5-D). Threaded into pipeline.ts's telemetry record as the COST figure of
+ * The gateway's authoritative final-spend snapshot for a just-revoked key.
+ * Threaded into pipeline.ts's telemetry record as the COST figure of
  * record, ahead of Pi's own self-reported usage (see reviewer.ts's
  * `ReviewUsage`) — Pi's number is what the model claims it used; this is what
  * the gateway actually debited against the key's budget from OpenRouter's own
@@ -246,7 +246,7 @@ export async function mintGatewayKey(
  * revoke endpoint is itself idempotent) and safe to call for an id that never
  * existed or has already expired.
  *
- * Resolves the key's final spend snapshot (M5-D — see admin-server.ts's
+ * Resolves the key's final spend snapshot (see admin-server.ts's
  * `DELETE` response shape and {@link GatewayKeyRevocation}) on a well-formed
  * `200 { revoked: true, ... }` response, or `undefined` on EVERY other
  * outcome: an unknown/already-revoked id (`revoked: false`, no spend to
@@ -312,7 +312,7 @@ export async function revokeGatewayKey(
  * queue's own backstop timeout, see queue.ts's `QUEUE_TIMEOUT_GRACE_MS`) and
  * is always cleaned up by an explicit revoke on cleanup rather than expiring
  * mid-run. `jobId` (the queue's own per-job id — see queue.ts's
- * `JobDescriptor.id`) is REQUIRED as of M7-1 and passed straight through to
+ * `JobDescriptor.id`) is REQUIRED and passed straight through to
  * {@link mintGatewayKey}'s request body — see `MintGatewayKeyOptions.jobId`'s
  * doc comment for why the gateway needs it.
  */

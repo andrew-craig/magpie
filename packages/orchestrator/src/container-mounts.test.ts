@@ -91,7 +91,7 @@ describe("prepareReviewMount", () => {
     );
   });
 
-  // Mount-prep posture (task_bfaf): the argv golden pins the `:/work:ro`
+  // Mount-prep posture: the argv golden pins the `:/work:ro`
   // FLAG, but not the fact that the prepared directory actually has NO `.git`
   // — pin that posture here so a strip that silently stops working can't slip
   // a live `.git` into the read-only /work mount.
@@ -106,7 +106,7 @@ describe("prepareReviewMount", () => {
   });
 });
 
-describe("assertGitStripped (task_bfaf fail-closed mount-prep preflight)", () => {
+describe("assertGitStripped (fail-closed mount-prep preflight)", () => {
   it("resolves silently for a prepared (.git-stripped) mount", async () => {
     const dir = await makeFakeWorkspace();
     await prepareReviewMount(dir);
@@ -199,7 +199,7 @@ describe("createOutputDir", () => {
     }
   });
 
-  // Regression (M5): under systemd `PrivateTmp=true` the OS tmpdir is private
+  // Regression guard: under systemd `PrivateTmp=true` the OS tmpdir is private
   // to the orchestrator process and invisible to the Docker daemon, so the
   // `/out` bind-mount source must be created under a host-visible base
   // (config.workspace.workDir). Callers pass that base explicitly.

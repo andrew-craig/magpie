@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Lightweight, self-contained test of entrypoint.sh's M8-E3 (task_2541)
-# tier-detection-before-memory-check reordering and its two branches.
+# Lightweight, self-contained test of entrypoint.sh's tier-detection-before-
+# memory-check ordering and its two branches.
 #
 # WHY NOT A FULL bats/image-build TEST: entrypoint.sh's later sections need a
 # real container/micro-VM runtime (network namespaces, virtiofs mounts, an
@@ -12,8 +12,8 @@
 #
 # WHAT THIS DOES INSTEAD: runs the REAL entrypoint.sh source (not a
 # reimplementation) up through the memory-ceiling check only -- truncated
-# right before the M4-E confinement assertions, which need real network/
-# vsock state this harness can't provide -- with exactly three literal
+# right before the fail-closed confinement assertions, which need real
+# network/vsock state this harness can't provide -- with exactly three literal
 # lines made override-able for the test:
 #   - `[ -c /dev/vsock ]`            -> driven by MAGPIE_TEST_FORCE_MICROVM
 #   - `/proc/meminfo` reads          -> driven by MAGPIE_TEST_MEMINFO
@@ -36,13 +36,13 @@ trap 'rm -rf "${MAGPIE_TEST_WORKDIR}"' EXIT
 
 EXCERPT="${MAGPIE_TEST_WORKDIR}/entrypoint-excerpt.sh"
 
-truncate_marker="# M4-E: fail-closed startup confinement assertions. The threat model's"
+truncate_marker="# Fail-closed startup confinement assertions. The threat model's"
 truncate_line="$(grep -nF -- "${truncate_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
 if [ -z "${truncate_line}" ]; then
-  echo "FAIL: could not find the M4-E section marker in entrypoint.sh -- has it moved? Update truncate_marker above." >&2
+  echo "FAIL: could not find the confinement-assertions section marker in entrypoint.sh -- has it moved? Update truncate_marker above." >&2
   exit 1
 fi
-# The marker line is the SECOND line of a two-line "# ---" / "# M4-E: ..."
+# The marker line is the SECOND line of a two-line "# ---" / comment-text
 # banner; keep everything strictly before the banner.
 keep_lines=$(( truncate_line - 2 ))
 head -n "${keep_lines}" "${ENTRYPOINT}" > "${EXCERPT}"
@@ -97,11 +97,11 @@ for marker in MAGPIE_TEST_FORCE_MICROVM MAGPIE_TEST_MEMINFO MAGPIE_TEST_CGROUP_M
 done
 
 {
-  # Surfaced so the task_4c37 PATH cases below can assert on the value the
+  # Surfaced so the PATH cases below can assert on the value the
   # excerpt actually ended up with. Bracketed so an EMPTY PATH is
   # distinguishable from an absent line.
   echo 'echo "MAGPIE_TEST_PATH=[${PATH:-}]"'
-  # Same idea for the M8-E7 (task_80a4) findings-path cases below.
+  # Same idea for the findings-path cases below.
   # shellcheck disable=SC2016  # literal: expands when the GENERATED excerpt runs, not here
   echo 'echo "MAGPIE_TEST_FINDINGS_PATH=[${MAGPIE_FINDINGS_PATH:-}]"'
   echo 'echo "MAGPIE_TEST_REACHED_END"'
@@ -138,15 +138,15 @@ run_case() {
 #
 # Like run_case, but runs the excerpt with PATH genuinely ABSENT from the
 # environment -- `env -i` with no PATH= assignment, invoking bash by absolute
-# path. That is the exact condition a micro-VM guest boots in (task_4c37: a
+# path. That is the exact condition a micro-VM guest boots in (a
 # bare exported rootfs carries no OCI config, and the launcher's env vec
 # starts empty), and it is the one thing run_case CANNOT reproduce, since it
 # deliberately injects PATH so the fixtures can find coreutils.
 #
 # NOTE: the excerpt still runs fine without PATH because `bash` resolves bare
 # command names via its own compiled-in fallback -- which is precisely the
-# phenomenon that kept this bug hidden until the M8-E2/E3 fixes cleared the
-# earlier blockers (that fallback is internal to bash and is NOT exported to
+# phenomenon that kept this bug hidden until other startup issues were fixed
+# first (that fallback is internal to bash and is NOT exported to
 # the processes it starts, e.g. setpriv's execvp of `pi`).
 #
 # Asserts on stdout rather than just the exit code.
@@ -172,7 +172,7 @@ run_case_no_path() {
 # The negative counterpart of run_case_no_path. Deliberately asserts ABSENCE
 # rather than an exact expected PATH: with PATH absent from the environment,
 # bash assigns its own COMPILED-IN default to the shell variable (see
-# entrypoint.sh's task_4c37 comment), and that value varies by bash build --
+# entrypoint.sh's PATH-manufacturing comment), and that value varies by bash build --
 # so pinning it would make this test a hostage to the base image's bash.
 # The property that actually matters is that the crun tier did NOT get the
 # micro-VM branch's manufactured PATH.
@@ -236,14 +236,14 @@ run_case "microvm tier, MAGPIE_MICROVM_RAM_MIB non-numeric -> fails closed" 1 \
 run_case "microvm tier, MAGPIE_MICROVM_RAM_MIB=0 -> fails closed" 1 \
   "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=0 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND}"
 
-# The CORE regression case for task_2541: under the micro-VM tier, an
+# The CORE regression case: under the micro-VM tier, an
 # UNENFORCED-looking cgroup fixture must be completely ignored -- proving
 # the crun-only cgroup branch is genuinely skipped (not just coincidentally
 # passing), i.e. that the reordering fix actually took effect.
 run_case "microvm tier ignores an unenforced cgroup fixture entirely (proves the crun branch is skipped)" 0 \
   "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_UNENFORCED} MAGPIE_REQUIRE_MEMORY_LIMIT=true"
 
-# --- task_4c37 (M8-E4): PATH in a guest that boots without one -------------
+# --- PATH in a guest that boots without one ---------------------------------
 #
 # The regression pair for the `setpriv: failed to execute pi: No such file or
 # directory` blocker found during the 2026-07-31 live micro-VM run. The
@@ -251,7 +251,7 @@ run_case "microvm tier ignores an unenforced cgroup fixture entirely (proves the
 # Dockerfile symlinks `pi`); the crun tier must be left exactly as it was,
 # inheriting whatever the image's OCI config gave it -- including nothing.
 
-run_case_no_path "microvm tier, PATH absent -> manufactures one containing /usr/local/bin (task_4c37)" \
+run_case_no_path "microvm tier, PATH absent -> manufactures one containing /usr/local/bin" \
   "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
   "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND}"
 
@@ -262,7 +262,7 @@ run_case_no_path_refute "crun tier, PATH absent -> does NOT get the micro-VM PAT
   "MAGPIE_TEST_PATH=[/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]" \
   "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
 
-# --- task_80a4 (M8-E7): MAGPIE_FINDINGS_PATH in a bare-rootfs guest --------
+# --- MAGPIE_FINDINGS_PATH in a bare-rootfs guest ----------------------------
 #
 # Same defect class as the PATH pair above: the Dockerfile's
 # `ENV MAGPIE_FINDINGS_PATH=/out/findings.json` reaches the process only
@@ -281,7 +281,7 @@ if [ -z "${dockerfile_findings_path}" ]; then
   exit 1
 fi
 
-run_case_no_path "microvm tier -> re-declares MAGPIE_FINDINGS_PATH matching the Dockerfile ENV (task_80a4)" \
+run_case_no_path "microvm tier -> re-declares MAGPIE_FINDINGS_PATH matching the Dockerfile ENV" \
   "MAGPIE_TEST_FINDINGS_PATH=[${dockerfile_findings_path}]" \
   "${COMMON_ENV} MAGPIE_TEST_FORCE_MICROVM=1 MAGPIE_MICROVM_RAM_MIB=1024 MAGPIE_TEST_MEMINFO=${MEMINFO_IN_BOUND}"
 
@@ -292,9 +292,9 @@ run_case_no_path "crun tier -> does NOT manufacture MAGPIE_FINDINGS_PATH (image 
   "MAGPIE_TEST_FINDINGS_PATH=[]" \
   "${COMMON_ENV} MAGPIE_TEST_CGROUP_MEM_MAX=${CGROUP_ENFORCED}"
 
-# --- task_a749 (M8-E5): the guest privilege-drop uid/gid -------------------
+# --- The guest privilege-drop uid/gid ---------------------------------------
 #
-# WHY A SECOND EXCERPT: the excerpt above is truncated at the M4-E confinement
+# WHY A SECOND EXCERPT: the excerpt above is truncated at the confinement
 # banner, which sits ~400 lines ABOVE the privilege-drop block -- so the
 # setpriv block is simply unreachable from it, and extending the truncation
 # point is not an option (everything in between needs real network/vsock/
@@ -316,7 +316,7 @@ drop_end_marker='exec setpriv --reuid='
 drop_start_line="$(grep -nF -- "${drop_start_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
 drop_end_line="$(grep -nF -- "${drop_end_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
 if [ -z "${drop_start_line}" ] || [ -z "${drop_end_line}" ]; then
-  echo "FAIL: could not locate the M8-E5 privilege-drop block in entrypoint.sh -- has it moved? Update drop_start_marker/drop_end_marker above." >&2
+  echo "FAIL: could not locate the privilege-drop block in entrypoint.sh -- has it moved? Update drop_start_marker/drop_end_marker above." >&2
   exit 1
 fi
 # One line back for the `if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then` that opens
@@ -363,7 +363,7 @@ run_drop_case() {
   fi
 }
 
-# The positive case, and the whole point of task_a749: the uid/gid the
+# The positive case: the uid/gid the
 # orchestrator supplies is what BOTH the chown and the setpriv drop use. The
 # live bug was that these were hardcoded to 10001 while `/out` was owned by the
 # host uid, so Pi could never write findings.json.

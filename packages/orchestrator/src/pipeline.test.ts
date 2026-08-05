@@ -23,7 +23,7 @@ import type { CreateWorkspaceParams, Workspace } from "./workspace.js";
 
 const FAKE_TOKEN = "ghs_super-secret-installation-token-fixture-should-never-leak";
 
-// Default fake gateway lifecycle deps (M4-B) for the tests that aren't
+// Default fake gateway lifecycle deps for the tests that aren't
 // specifically about the key lifecycle: mint returns a fixed fake virtual key
 // and revoke is a no-op, so the pipeline never reaches for the real gateway
 // mgmt API over the network. The dedicated "gateway virtual-key lifecycle"
@@ -31,7 +31,7 @@ const FAKE_TOKEN = "ghs_super-secret-installation-token-fixture-should-never-lea
 const FAKE_GATEWAY_KEY = {
   id: "gw-key-fixture",
   key: "sk-magpie-fixture-should-never-leak",
-  // M7-1 (Design D): opaque mount-source path for the `-v <socketDir>:/run/gw:ro`
+  // Design D: opaque mount-source path for the `-v <socketDir>:/run/gw:ro`
   // bind mount reviewer.ts now adds — the fake docker below never actually
   // connects through it, so any non-empty string is fine here.
   socketDir: "/run/magpie-gateway/jobs/gw-key-fixture",
@@ -41,12 +41,12 @@ async function fakeMintGatewayKey(): Promise<{ id: string; key: string; socketDi
 }
 async function fakeRevokeGatewayKey(): Promise<void> {}
 
-// Default fake bot-login resolver (M5-C hardening / task_948f): a fixed
+// Default fake bot-login resolver: a fixed
 // value so `readReviewState` (rereview.ts) always sees a real, non-empty
 // `botLogin` to author-match against, and so runJob never reaches for the
 // real GitHub App JWT auth flow / network (see github.ts's `getAppBotLogin`)
 // during a test run — every `createReviewPipeline` call in this file injects
-// this in place of the real default (`getAppBotLoginFromConfig`). The M5-C
+// this in place of the real default (`getAppBotLoginFromConfig`). The
 // dedup/minimize fixtures below (`magpieIssueComment`/`magpieReview`) default
 // their `user.login` to this exact value so they're recognized as Magpie's
 // own by the new author-identity check.
@@ -77,12 +77,12 @@ function writeFakePi(body: string): string {
  * NDJSON script body for a fake "docker" that emits one assistant review turn
  * AND "calls" the report_findings tool by writing a findings file into the
  * mounted `/out` dir — parsed from its own `-v <hostOut>:/out` argv, the same
- * channel M3's real container writes through (see reviewer.ts's M3 docker
+ * channel the real container writes through (see reviewer.ts's docker
  * invocation and reviewer.test.ts's `writeFakeDockerWithFindings`, which this
  * mirrors). The child never receives the real Pi extension since these are all
  * fake binaries, so simulating the file write is the only way an ok:true
- * `ReviewResult` (requiring `findings`/`verdict`) is reachable here. NOTE: in
- * M3 the pipeline's `piBinary` seam is spawned as `<dockerBin> run ...`, so
+ * `ReviewResult` (requiring `findings`/`verdict`) is reachable here. NOTE: the
+ * pipeline's `piBinary` seam is spawned as `<dockerBin> run ...`, so
  * these scripts see the docker argv (not the old `MAGPIE_FINDINGS_PATH` env,
  * which reviewer.ts no longer sets — that path is baked into the image now).
  */
@@ -133,7 +133,7 @@ function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): st
 }
 
 /**
- * M8-C3: fake `magpie-krun-launch` for the micro-VM tier. Like
+ * Fake `magpie-krun-launch` for the micro-VM tier. Like
  * {@link fakePiScriptEmittingFindings} but parses `--out-mount
  * <hostOut>:<tag>` (the writable virtiofs device — not `-v <hostOut>:/out`)
  * to find where to write findings.json, and records its argv + observed
@@ -293,19 +293,19 @@ interface FakeFile {
   deletions: number;
 }
 
-/** Author fields the M5-C author-identity check reads (task_948f). */
+/** Author fields the re-review author-identity check reads. */
 interface FakeAuthor {
   login?: string | null;
   type?: string | null;
 }
-/** Fixture shape for M5-C's `rest.issues.listComments` surface. */
+/** Fixture shape for `rest.issues.listComments` surface. */
 interface FakeIssueComment {
   node_id: string;
   body?: string | null;
   created_at: string;
   user?: FakeAuthor | null;
 }
-/** Fixture shape for M5-C's `rest.pulls.listReviews` surface. */
+/** Fixture shape for `rest.pulls.listReviews` surface. */
 interface FakeReview {
   id: number;
   node_id: string;
@@ -313,7 +313,7 @@ interface FakeReview {
   submitted_at?: string | null;
   user?: FakeAuthor | null;
 }
-/** Fixture shape for M5-C's `rest.pulls.listReviewComments` surface. */
+/** Fixture shape for `rest.pulls.listReviewComments` surface. */
 interface FakeReviewComment {
   node_id: string;
   pull_request_review_id?: number | null;
@@ -326,7 +326,7 @@ interface FakeReviewComment {
  * (now also carrying `head.sha`, used by the HEAD VERIFY race check — see
  * pipeline.ts), once by diff.ts with `mediaType: { format: "diff" }`),
  * `rest.pulls.listFiles` + `paginate` (diff.ts's file listing),
- * `issues.createComment` (publisher.ts), and — for M5-C's `readReviewState`/
+ * `issues.createComment` (publisher.ts), and — for the re-review `readReviewState`/
  * `minimizeOutdated` (rereview.ts) — `rest.issues.listComments`,
  * `rest.pulls.listReviews`, `rest.pulls.listReviewComments`, and `graphql`.
  * Mirrors diff.test.ts's / publisher.test.ts's fake-Octokit pattern.
@@ -347,14 +347,14 @@ function fakeOctokit(opts: {
   diffText: string;
   head?: { sha: string };
   /**
-   * Optional compare-API surface for incremental-review tests (M5-B). When set,
+   * Optional compare-API surface for incremental-review tests. When set,
    * `rest.repos.compareCommitsWithBasehead` resolves to `{ status, files }` for
    * metadata calls and `compareDiffText` for the `format: "diff"` call, or
    * throws `compareError` to simulate a 404/API failure.
    */
   compare?: { status?: string; files?: FakeFile[]; compareDiffText?: string; compareError?: unknown };
   /**
-   * Optional prior-review-state fixture for M5-C's dedup/minimize tests.
+   * Optional prior-review-state fixture for the re-review dedup/minimize tests.
    * Defaults to no prior magpie activity at all (empty everything).
    */
   reviewState?: {
@@ -368,7 +368,7 @@ function fakeOctokit(opts: {
    */
   graphqlImpl?: (query: string, vars?: Record<string, unknown>) => Promise<unknown>;
   /**
-   * M6-B (task_220f): the base repo's default branch, as `rest.repos.get`
+   * The base repo's default branch, as `rest.repos.get`
    * resolves it. Defaults to `"main"` — pipeline.ts is supposed to fetch
    * `.magpie.toml` from EXACTLY this ref, never `job.headSha`/`head.sha`
    * above, which is what the "same file on the PR head has no effect" test
@@ -376,13 +376,13 @@ function fakeOctokit(opts: {
    */
   defaultBranch?: string;
   /**
-   * M6-B: raw `.magpie.toml` content served by `rest.repos.getContent`,
+   * Raw `.magpie.toml` content served by `rest.repos.getContent`,
    * keyed by the `ref` it was requested at (so a test can serve DIFFERENT
    * content for the default branch vs. some other ref, e.g. the PR head, to
    * prove pipeline.ts never reads the latter). `undefined` for a given ref
    * (the default when this whole option is omitted) simulates "no
    * `.magpie.toml` on this repo" — a 404, exactly like every existing test
-   * in this file that doesn't care about M6-B at all.
+   * in this file that doesn't care about per-repo config at all.
    */
   magpieTomlByRef?: Record<string, string>;
 }) {
@@ -545,7 +545,7 @@ describe("createReviewPipeline / runJob", () => {
   });
 
   it("threads the queue's job id into the reviewer's container name (--name magpie-<jobId>)", async () => {
-    // M3-D: pipeline.ts must pass `jobId: job.id` through to runReview so
+    // pipeline.ts must pass `jobId: job.id` through to runReview so
     // reviewer.ts's `buildContainerName` derives `magpie-<jobId>` (see
     // reviewer.ts) rather than a fresh random id per run — otherwise the
     // queue's `AbortController` -> reviewer.ts's `docker kill` path (already
@@ -583,9 +583,9 @@ describe("createReviewPipeline / runJob", () => {
     expect(argv![nameIdx + 1]).toBe("magpie-job-e2e-42");
   });
 
-  it("threads the minted gateway key's socketDir into the reviewer's --network none /run/gw mount (M7-1, Design D)", async () => {
-    // gateway.ts's mintGatewayKeyFromConfig now returns `socketDir` alongside
-    // `id`/`key` (M7-1 — see gateway.ts's `GatewayKey` doc comment), and
+  it("threads the minted gateway key's socketDir into the reviewer's --network none /run/gw mount (Design D)", async () => {
+    // gateway.ts's mintGatewayKeyFromConfig returns `socketDir` alongside
+    // `id`/`key` (see gateway.ts's `GatewayKey` doc comment), and
     // pipeline.ts must thread it into reviewer.ts's `runReview` as
     // `gatewaySocketDir`, which reviewer.ts bind-mounts read-only at
     // `/run/gw` on a container that now runs `--network none` instead of the
@@ -629,7 +629,7 @@ describe("createReviewPipeline / runJob", () => {
     // publishReviewWithFindings. The other finding is on a path the diff
     // never touches at all, so it can't anchor and must instead show up as
     // text under the review body's "Other observations" section instead of
-    // being silently dropped (PLAN.md's diff-anchoring constraint).
+    // being silently dropped (see anchor.ts's diff-anchoring constraint).
     const diffText =
       "diff --git a/src/a.ts b/src/a.ts\n" +
       "--- a/src/a.ts\n" +
@@ -968,7 +968,7 @@ describe("createReviewPipeline / runJob", () => {
       // skip publishing entirely.
       const piBinary = writeFakePi(
         [
-          // In M3 this seam is spawned as `<dockerBin> run ...`, and on abort
+          // This seam is spawned as `<dockerBin> run ...`, and on abort
           // reviewer.ts additionally spawns `<dockerBin> kill <name>` — handle
           // that subcommand by exiting immediately so no fake process lingers.
           `if (process.argv[2] === "kill") process.exit(0);`,
@@ -1175,11 +1175,11 @@ describe("createReviewPipeline / runJob", () => {
   });
 });
 
-// M4-B: the per-job gateway virtual-key lifecycle. These inject spy
+// The per-job gateway virtual-key lifecycle. These inject spy
 // mint/revoke deps (rather than the default fakes above) to assert the
 // pipeline mints one key per job and revokes it — by the id mint returned —
 // on every exit path, best-effort.
-describe("gateway virtual-key lifecycle (M4-B)", () => {
+describe("gateway virtual-key lifecycle", () => {
   /** Spy mint/revoke deps that record the minted key and every revoke id. */
   function gatewaySpies() {
     const minted = {
@@ -1224,7 +1224,7 @@ describe("gateway virtual-key lifecycle (M4-B)", () => {
     expect(revokedIds).toEqual([minted.id]);
   });
 
-  it("threads the minted virtual key into the container's OPENROUTER_API_KEY env (M4-C)", async () => {
+  it("threads the minted virtual key into the container's OPENROUTER_API_KEY env", async () => {
     // Not just "a key" flows through: the SPECIFIC minted virtual key from
     // step 2a (gatewaySpies()'s `minted.key`) must reach the container's env
     // verbatim — see reviewer.ts's `RunReviewParams.gatewayApiKey` wiring and
@@ -1412,14 +1412,14 @@ function capturingLogger() {
   return { logger, events };
 }
 
-// M5-D (task_8a10): per-job cost/outcome telemetry. These drive the whole
+// Per-job cost/outcome telemetry. These drive the whole
 // pipeline (as elsewhere in this file) and assert that EXACTLY ONE
 // `event: "job-telemetry"` record is emitted per job, on both success and
 // failure/kill paths, carrying the outcome, duration, Pi's usage, and the
 // gateway's authoritative final spend (when a key was minted). The telemetry
 // path is pointed at a temp file under `root` so the durable JSONL sink is
 // also exercised without touching a real /var/lib/magpie.
-describe("per-job cost telemetry (M5-D)", () => {
+describe("per-job cost telemetry", () => {
   /** testConfig() with the telemetry JSONL sink redirected under `root`. */
   function telemetryConfig(): Config {
     const config = testConfig();
@@ -1433,7 +1433,7 @@ describe("per-job cost telemetry (M5-D)", () => {
     return records[0];
   }
 
-  /** Spy mint/revoke deps where revoke resolves a caller-chosen final spend (M5-D). */
+  /** Spy mint/revoke deps where revoke resolves a caller-chosen final spend. */
   function gatewaySpiesWithSpend(revocation: GatewayKeyRevocation | undefined) {
     const minted = {
       id: "gw-live-key-id",
@@ -1555,7 +1555,7 @@ describe("per-job cost telemetry (M5-D)", () => {
     expect(record.costUsd).toBe(0.5);
   });
 
-  it("emits an 'already-reviewed' record (no gateway key minted) on the M5-C dedup no-op", async () => {
+  it("emits an 'already-reviewed' record (no gateway key minted) on the re-review dedup no-op", async () => {
     const { octokit } = fakeOctokit({
       title: "x",
       body: "",
@@ -1664,7 +1664,7 @@ describe("per-job cost telemetry (M5-D)", () => {
 
 // classifyJobOutcome is pure/exported — cover every distinct outcome class
 // directly (the pipeline tests above prove the wiring; these prove the mapping).
-describe("classifyJobOutcome (M5-D)", () => {
+describe("classifyJobOutcome", () => {
   const okResult = { ok: true as const, summary: "s", findings: [], verdict: "comment" as const };
   const fail = (reason: string) => ({ ok: false as const, reason });
 
@@ -1719,7 +1719,7 @@ describe("classifyJobOutcome (M5-D)", () => {
   });
 });
 
-describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () => {
+describe("createReviewPipeline / runJob — incremental re-review", () => {
   const AFTER = "deadbeef"; // matches testJob().headSha, so HEAD VERIFY passes
   const BEFORE = "b".repeat(40);
 
@@ -1879,7 +1879,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
     expect(compareCommitsWithBasehead).toHaveBeenCalledTimes(1);
     // Efficiency: the whole-PR file list (paginated listFiles) is skipped when
     // the range is tooLarge — reviewChangedFiles is never read on that branch.
-    // (`paginate` itself IS still called for M5-C's readReviewState — see the
+    // (`paginate` itself IS still called for the re-review readReviewState — see the
     // dedicated dedup/minimize describe block below — so assert on the
     // specific `listFiles` fetcher, not on `paginate` having never run at all.)
     expect(listFiles).not.toHaveBeenCalled();
@@ -1891,7 +1891,7 @@ describe("createReviewPipeline / runJob — incremental re-review (M5-B)", () =>
   });
 });
 
-/** Fixture builder for a magpie-authored `issues.listComments` entry (M5-C). */
+/** Fixture builder for a magpie-authored `issues.listComments` entry. */
 function magpieIssueComment(overrides: Partial<{
   node_id: string;
   body: string;
@@ -1903,13 +1903,13 @@ function magpieIssueComment(overrides: Partial<{
     body: `${MAGPIE_REVIEW_MARKER}\nMagpie could not complete a review of this PR.`,
     created_at: "2026-01-01T00:00:00Z",
     // Matches fakeGetBotLogin()'s FAKE_BOT_LOGIN — this fixture represents a
-    // GENUINE Magpie comment (see task_948f's author-identity check).
+    // GENUINE Magpie comment (see the author-identity check).
     user: { login: FAKE_BOT_LOGIN, type: "Bot" },
     ...overrides,
   };
 }
 
-/** Fixture builder for a magpie-authored `pulls.listReviews` entry (M5-C). */
+/** Fixture builder for a magpie-authored `pulls.listReviews` entry. */
 function magpieReview(overrides: Partial<{
   id: number;
   node_id: string;
@@ -1927,7 +1927,7 @@ function magpieReview(overrides: Partial<{
   };
 }
 
-describe("createReviewPipeline / runJob — re-review dedup + comment minimization (M5-C)", () => {
+describe("createReviewPipeline / runJob — re-review dedup + comment minimization", () => {
   it("dedup skip: a redelivered webhook for an already-reviewed head SHA is a complete no-op (no gateway key, no clone, no publish)", async () => {
     // testJob()'s headSha defaults to "deadbeef" — the prior magpie review's
     // reviewed-sha marker matches it exactly, so this delivery must be a
@@ -1975,11 +1975,11 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     );
   });
 
-  it("forceFullReview (M6-A): a job for an already-reviewed head SHA still runs a full review instead of early-outing", async () => {
+  it("forceFullReview: a job for an already-reviewed head SHA still runs a full review instead of early-outing", async () => {
     // Same fixture shape as the dedup-skip test above (testJob()'s headSha
     // "deadbeef" matches the prior magpie review's reviewed-sha marker
     // exactly), but with `forceFullReview: true` set — comment-command.ts's
-    // `@magpie review` trigger sets this. The M5-C dedup skip must NOT fire.
+    // `@magpie review` trigger sets this. The re-review dedup skip must NOT fire.
     const { octokit, createReview } = fakeOctokit({
       title: "Add feature",
       body: "Some PR body",
@@ -2394,7 +2394,7 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
   });
 });
 
-describe("createReviewPipeline / runJob — micro-VM tier (M8-C3)", () => {
+describe("createReviewPipeline / runJob — micro-VM tier", () => {
   /** testConfig with the micro-VM tier selected and a fake launcher rootfs/bin. */
   function microvmTestConfig(): Config {
     const base = testConfig();
@@ -2518,14 +2518,14 @@ describe("createReviewPipeline / runJob — micro-VM tier (M8-C3)", () => {
   });
 });
 
-// M6-B (task_220f): per-repo config overrides via `.magpie.toml`, read ONLY
+// Per-repo config overrides via `.magpie.toml`, read ONLY
 // from the base repo's default branch (see repo-config.ts's module doc
-// comment). `fakeOctokit`'s `defaultBranch`/`magpieTomlByRef` options (added
-// for this milestone) let these tests control exactly what `rest.repos.get`
+// comment). `fakeOctokit`'s `defaultBranch`/`magpieTomlByRef` options
+// let these tests control exactly what `rest.repos.get`
 // and `rest.repos.getContent` return without touching any other existing
 // test in this file (every prior call site simply never sets these options,
-// so `getContent` 404s and every job behaves exactly as before M6-B).
-describe("createReviewPipeline / runJob — per-repo config (.magpie.toml, M6-B)", () => {
+// so `getContent` 404s and every job behaves exactly as before per-repo config existed).
+describe("createReviewPipeline / runJob — per-repo config (.magpie.toml)", () => {
   /** Spy mint deps that record the `Config` passed to `mintGatewayKey` (in particular `llm.model`). */
   function gatewayModelSpy() {
     const mintGatewayKey = vi.fn(async (_config: Config, _jobId: string) => FAKE_GATEWAY_KEY);

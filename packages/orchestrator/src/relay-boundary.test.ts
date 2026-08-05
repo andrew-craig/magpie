@@ -10,7 +10,7 @@
 // "Why not the vsock-framing crate" doc section), so the only thing worth
 // pinning here is byte-stream RELAY BEHAVIOR, not a frame format.
 //
-// THIS FILE IS A BOUNDARY CONTRACT TEST (RUST-3 / task_9d2b). Per
+// THIS FILE IS A BOUNDARY CONTRACT TEST. Per
 // docs/design/rust-adoption.md's migration rule: a future swap PR may add
 // Rust unit tests, but must NOT edit this file. If a swap changes the
 // relay's observable TCP-facing behavior, that is a red flag to raise, not a
