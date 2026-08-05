@@ -42,9 +42,10 @@
 # provider credential itself. See [gateway] below.
 # ---------------------------------------------------------------------------
 #
-# The Milestone 4 credential-injecting LLM gateway (PLAN.md §5) is a SEPARATE
-# service — packages/gateway (@magpie/gateway) — with its OWN env vars, read
-# by its OWN process (never this orchestrator config or process):
+# The credential-injecting LLM gateway (ARCHITECTURE.md's "Gateway" section)
+# is a SEPARATE service — packages/gateway (@magpie/gateway) — with its OWN
+# env vars, read by its OWN process (never this orchestrator config or
+# process):
 # MAGPIE_GATEWAY_OPENROUTER_KEY (the real provider key), the shared
 # MAGPIE_GATEWAY_MASTER_KEY above, and non-secret GATEWAY_* settings. See
 # packages/gateway/README.md for the full list and the security rationale for
@@ -147,7 +148,8 @@ image = "ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:6c84639bde2879043188e
 
 # Memory limit passed to `docker run --memory` for the review container.
 # Bounds how much host memory a single (possibly prompt-injected) review job
-# can consume. See PLAN.md §4 for the container hardening rationale.
+# can consume. See ARCHITECTURE.md's "Isolation tiers" section for the
+# container hardening rationale.
 # Default: "4g"
 memory = "4g"
 
@@ -254,7 +256,8 @@ launcher_bin = "magpie-krun-launch"
 # confinement is now a kernel network-namespace property, not a config toggle.
 
 [gateway]
-# Credential-injecting LLM gateway (M4, PLAN.md §5; packages/gateway). The
+# Credential-injecting LLM gateway (ARCHITECTURE.md's "Gateway" section;
+# packages/gateway). The
 # orchestrator mints a fresh, budget-capped, short-lived virtual key on this
 # gateway before every review run and revokes it on cleanup (see gateway.ts) —
 # the review container authenticates to the gateway's PROXY plane with that
@@ -299,7 +302,8 @@ per_job_budget_usd = 0.5
 ttl_margin_seconds = 120
 
 [telemetry]
-# Per-job cost/outcome telemetry (M5-D, PLAN.md §6). After EVERY review
+# Per-job cost/outcome telemetry (ARCHITECTURE.md's "Operability" section).
+# After EVERY review
 # (success or failure), Magpie emits exactly one structured, greppable record
 # per job — repo, PR number, head SHA, outcome, wall-clock duration, Pi's
 # self-reported token usage, and the AUTHORITATIVE cost (the gateway's own

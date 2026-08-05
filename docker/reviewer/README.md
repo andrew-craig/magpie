@@ -9,7 +9,7 @@ no secrets and no per-repo/per-job config; those are supplied by the orchestrato
 
 ## Published image (GHCR)
 
-As of M7-2 (see `DISTRIBUTION.md` §3.1) this image is **published to GHCR** so
+This image is **published to GHCR** (see `DISTRIBUTION.md` §2.1) so
 adopters `pull` it instead of building and re-pinning Pi to their host — it is
 the *only* container in the product (the orchestrator and gateway are host
 services):
@@ -116,9 +116,9 @@ args the caller passes (`"$@"`). So the runtime inputs are:
   directly. As of M4-C this is always a short-lived, budget-capped **gateway virtual
   key** (packages/gateway), never a real OpenRouter key — the orchestrator no longer
   holds one at all. The entrypoint fails fast if it's unset.
-- **`OPENAI_BASE_URL` — via `-e OPENAI_BASE_URL=...`, required as of M4-C.** The
-  container-facing proxy/data plane. As of M7-1 (Design D — see
-  `DISTRIBUTION.md` §2) this is always `http://127.0.0.1:4000/v1`: an address
+- **`OPENAI_BASE_URL` — via `-e OPENAI_BASE_URL=...`, required.** The
+  container-facing proxy/data plane (Design D — see `DISTRIBUTION.md` §1).
+  This is always `http://127.0.0.1:4000/v1`: an address
   inside the container's OWN `--network none` network namespace, served by
   the in-container forwarder (`forwarder.mjs`, baked into the image) that
   relays to the gateway's real unix socket bind-mounted read-only at
@@ -134,33 +134,30 @@ The prompt payload (PR title/body/diff) is read from Pi's **stdin**, so the cont
 must be run attached (`docker run -i ...`). See `entrypoint.sh`'s own doc comment for
 the full flag list.
 
-### Gateway wiring (M4-C)
+### Gateway wiring
 
-As of M4-C, the review container **never holds a real OpenRouter key**. It
+The review container **never holds a real OpenRouter key**. It
 authenticates to the host-side gateway (`packages/gateway`) with a per-job,
 budget-capped, short-lived virtual key minted by the orchestrator
-(`packages/orchestrator/src/gateway.ts`) and revoked on cleanup. As of M7-1
-(Design D — `DISTRIBUTION.md` §2) it reaches the gateway's proxy plane through
+(`packages/orchestrator/src/gateway.ts`) and revoked on cleanup. Per Design D
+(`DISTRIBUTION.md` §1), it reaches the gateway's proxy plane through
 a per-job **unix domain socket** bind-mounted read-only at `/run/gw`
 (`/run/gw/gw.sock`), via an in-container TCP→unix forwarder (`forwarder.mjs`)
 — the container itself runs `--network none` and has no network interfaces
-except its own loopback, so that socket is its only channel out at all. (The
-pre-M7-1 design routed this over a dedicated `magpie-net` docker bridge +
-host iptables; that apparatus — `scripts/setup-network.sh`,
-`magpie-firewall.service` — is deleted, since `--network none` makes the
-isolation a property of the container's network namespace instead of a
-daemon-config-dependent firewall rule — see `DISTRIBUTION.md` §2.3.) The real
-OpenRouter key lives only in the gateway process's own environment
-(`MAGPIE_GATEWAY_OPENROUTER_KEY`). Containerizing Pi (M3) bought process/filesystem
-isolation and a read-only, `.git`-free worktree; M4 removed the long-lived
-provider credential; M7-1 made the egress lockdown provable and
-config-independent on top of that.
+except its own loopback, so that socket is its only channel out at all.
+(`--network none` makes the isolation a property of the container's network
+namespace instead of a daemon-config-dependent firewall rule — see
+`DISTRIBUTION.md` §1.3.) The real OpenRouter key lives only in the gateway
+process's own environment (`MAGPIE_GATEWAY_OPENROUTER_KEY`). Containerizing Pi
+provides process/filesystem isolation and a read-only, `.git`-free worktree,
+with no long-lived provider credential ever reaching the container and a
+provably egress-locked-down network namespace on top of that.
 
-### Fail-closed startup confinement assertions (M4-E)
+### Fail-closed startup confinement assertions
 
-Before `exec`ing Pi, `entrypoint.sh` now verifies its OWN confinement and aborts
+Before `exec`ing Pi, `entrypoint.sh` verifies its OWN confinement and aborts
 non-zero (surfaced by the orchestrator as a review-failure comment) if either
-invariant below is violated — PLAN.md milestone 4's explicit acceptance check:
+invariant below is violated — the threat model's explicit acceptance check:
 
 1. **`OPENROUTER_API_KEY` must be a magpie gateway virtual key** (`sk-magpie-`
    prefix, per `packages/gateway/src/keystore.ts`'s `KEY_PREFIX`), never a real

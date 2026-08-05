@@ -2,9 +2,9 @@
 
 This diagram traces the actual code path for a single PR review, end to end,
 as implemented today. It was built by reading the source directly
-(`packages/orchestrator/src/*.ts`) rather than from `PLAN.md` or the top-level
-`CLAUDE.md`, which describe intent/status but can drift from what's actually
-wired up.
+(`packages/orchestrator/src/*.ts`) rather than from `ARCHITECTURE.md` or the
+top-level `CLAUDE.md`, which describe intent/status but can drift from what's
+actually wired up.
 
 Two things worth flagging up front because they're easy to miss in the code:
 
@@ -33,14 +33,23 @@ flowchart TD
     end
 
     GH(["GitHub"]) -->|"pull_request webhook,<br/>X-Hub-Signature-256"| WH["POST /webhook — server.ts"]
+    GH -->|"issue_comment webhook<br/>(any PR comment),<br/>X-Hub-Signature-256"| WH
     S7 -.->|listening| WH
     WH --> SIG{"HMAC-SHA256 signature valid<br/>against MAGPIE_WEBHOOK_SECRET?<br/>(raw body, before any parsing)"}
     SIG -->|no| REJECT(["400 — dropped,<br/>payload never parsed"])
-    SIG -->|yes| FILT["filter.ts"]
+    SIG -->|"yes, pull_request"| FILT["filter.ts"]
+    SIG -->|"yes, issue_comment"| CMD["comment-command.ts"]
 
     FILT --> ACT{"action ∈ opened / ready_for_review /<br/>reopened / synchronize?<br/>not a draft? base repo on<br/>config.repoAllowlist?"}
     ACT -->|no| DROP(["Dropped, logged"])
     ACT -->|yes| ENQ["queue.ts: enqueue JobDescriptor<br/>(bounded concurrency, per-PR<br/>dedup, hard wall-clock timeout)"]
+
+    CMD --> CMDBODY{"comment body matches<br/>'@magpie review'? on a PR?<br/>repo on config.repoAllowlist?"}
+    CMDBODY -->|no| CDROP(["Dropped, logged"])
+    CMDBODY -->|yes| CMDAUTH["Mint an installation token,<br/>live-check commenter's login<br/>via repos.getCollaboratorPermissionLevel<br/>— NEVER trust comment body content"]
+    CMDAUTH --> CMDPERM{"permission ∈<br/>write / admin?"}
+    CMDPERM -->|"no, or API error"| CDROP
+    CMDPERM -->|yes| ENQ
 
     ENQ --> P1
 
@@ -48,11 +57,12 @@ flowchart TD
         direction TB
         P1["runJob starts"] --> P2["Mint ONE fresh GitHub App<br/>installation token — github.ts"]
         P2 --> P3["Read Magpie's own prior review<br/>state straight from GitHub — no<br/>local DB (rereview.ts): resolve<br/>bot login, find lastReviewedSha<br/>+ minimizable comment ids"]
-        P3 --> DEDUP{"lastReviewedSha ==<br/>this job's headSha?"}
+        P3 --> DEDUP{"lastReviewedSha ==<br/>this job's headSha?<br/>(an @magpie review comment<br/>forces a review regardless)"}
         DEDUP -->|yes| SKIP1(["No-op: already reviewed.<br/>No key minted, no clone."])
-        DEDUP -->|no| P4["Mint per-job gateway virtual key<br/>— gateway.ts (budget + TTL capped,<br/>scoped to config.llm.model)"]
+        DEDUP -->|no| P3B["Resolve .magpie.toml from the<br/>BASE repo's DEFAULT branch only<br/>— repo-config.ts (never job.headSha,<br/>never a PR-supplied ref; fail-soft:<br/>falls back to the server's own config)"]
+        P3B --> P4["Mint per-job gateway virtual key<br/>— gateway.ts (budget + TTL capped,<br/>scoped to the effective config's<br/>llm.model, which a repo override<br/>may have changed)"]
         P4 --> P5["Clone PR head into a credential-free<br/>workspace — workspace.ts (token reaches<br/>git only via an env-backed credential<br/>helper, never argv/disk)"]
-        P5 --> P6["Compute the PR diff — diff.ts:<br/>incremental before...after range on a<br/>synchronize push when it's a clean<br/>fast-forward, else the full PR diff —<br/>size-capped before the body is fetched"]
+        P5 --> P6["Compute the PR diff — diff.ts:<br/>incremental before...after range on a<br/>synchronize push when it's a clean<br/>fast-forward, else the full PR diff —<br/>size-capped, with the repo's<br/>ignore_paths globs applied, before<br/>the body is fetched"]
         P6 --> P7["Fetch PR title / body / head sha"]
         P7 --> HV{"fetched head sha ==<br/>job.headSha?"}
         HV -->|"no — force-pushed<br/>mid-job"| SKIP2(["Drop without publishing.<br/>A fresh webhook for the new<br/>head re-triggers a review."])
@@ -107,15 +117,23 @@ flowchart TD
 - **Startup** runs once per process boot and can refuse to start at all
   (`TierSelectionError`, a bad config, no usable container runtime, no cgroup
   memory controller) — these are fail-closed preflights, not per-job checks.
-- **`server.ts` → `filter.ts` → `queue.ts`** is the unauthenticated-to-queued
-  path: signature verification happens before any payload parsing, then a
-  narrow action/draft/allowlist filter, then a bounded-concurrency queue with
-  per-PR dedup and a hard timeout backstop.
+- **`server.ts` → `filter.ts`/`comment-command.ts` → `queue.ts`** is the
+  unauthenticated-to-queued path: signature verification happens before any
+  payload parsing, then either a narrow action/draft/allowlist filter
+  (`pull_request`) or a live collaborator-permission check
+  (`issue_comment`'s `@magpie review`), then a bounded-concurrency queue with
+  per-PR dedup and a hard timeout backstop. `comment-command.ts` never trusts
+  the comment body for authorization — only the commenter's GitHub-asserted
+  login, checked live.
 - **`pipeline.ts`** is the single `JobRunner` the queue drives. It mints
   exactly one GitHub App token per job and reuses it for every GitHub API
   call that job makes (PR metadata, diff, publishing). The re-review dedup
   check runs *before* any spend (no gateway key, no clone) so a redelivered
-  webhook for an already-reviewed head SHA is a true no-op.
+  webhook for an already-reviewed head SHA is a true no-op — an `@magpie
+  review` command bypasses this dedup deliberately, since re-review on
+  request is the point. The per-repo `.magpie.toml` resolve (`repo-config.ts`)
+  runs right after dedup and before the gateway key mint, since a repo
+  override can change the effective model the key is scoped to.
 - **The sandbox lane** is where the untrusted PR diff actually gets processed
   by an LLM. Whichever isolation tier was resolved at startup, the reviewer
   has no network egress except a single per-job channel to the gateway, and
@@ -131,8 +149,9 @@ flowchart TD
 ## Deliberately not shown
 
 Config loading details, the systemd unit layout, `scripts/install.sh`
-provisioning, and the exact telemetry record schema. See `PLAN.md` and
+provisioning, and the exact telemetry record schema. See `ARCHITECTURE.md` and
 `docs/design/cto-decision-brief.md` for those.
 
-_Diagram reflects `packages/orchestrator/src` as of 2026-07-29 — regenerate
-if `pipeline.ts`, `reviewer.ts`, or `tier-ladder.ts` change shape._
+_Diagram reflects `packages/orchestrator/src` as of 2026-08-05 — regenerate
+if `pipeline.ts`, `reviewer.ts`, `tier-ladder.ts`, `comment-command.ts`, or
+`repo-config.ts` change shape._

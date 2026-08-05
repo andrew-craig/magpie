@@ -8,10 +8,10 @@
 # re-run: it never overwrites an existing secret, env file, or config.toml,
 # and never duplicates a user or a directory.
 #
-# As of M7-1 (Design D — DISTRIBUTION.md §2) there is no network-lockdown
-# unit/script to install any more: each review container runs `--network
+# Per Design D (DISTRIBUTION.md §1) there is no network-lockdown
+# unit/script to install: each review container runs `--network
 # none`, so there is no bridge/iptables apparatus to provision at boot
-# (magpie-firewall.service and scripts/setup-network.sh are deleted).
+# (magpie-firewall.service and scripts/setup-network.sh do not exist).
 #
 # As of M8-D3 (task_67aa) the reviewer runs under ROOTLESS podman — no root
 # daemon, no `docker` group. This installer therefore provisions the rootless
@@ -328,8 +328,8 @@ else
   install -o root -g magpie -m 0640 "$REPO_ROOT/config.example.toml" "$ETC_MAGPIE/config.toml"
   log "seeded $ETC_MAGPIE/config.toml from config.example.toml (0640) — EDIT it:"
   log "  repo_allowlist, github.app_id, github.private_key_path, [llm].model."
-  log "  (Egress lockdown needs no config as of M7-1: every review container"
-  log "  runs --network none unconditionally — see DISTRIBUTION.md §2.)"
+  log "  (Egress lockdown needs no config: every review container"
+  log "  runs --network none unconditionally — see DISTRIBUTION.md §1.)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -468,7 +468,7 @@ cat <<NOTES
 
   2. Edit $ETC_MAGPIE/config.toml (app id, private_key_path, repo_allowlist,
      model). No network/firewall config needed — every review container runs
-     --network none unconditionally (M7-1, DISTRIBUTION.md §2).
+     --network none unconditionally (DISTRIBUTION.md §1).
 
   3. Place the GitHub App private key where config.toml's private_key_path
      points (default /etc/magpie/github-app.private-key.pem); make it readable

@@ -85,9 +85,9 @@
 
 [Unit]
 Description=magpie orchestrator (GitHub PR review bot)
-Documentation=file:/opt/magpie/PLAN.md
-# No Requires=/After=docker.service any more: the reviewer runs under ROOTLESS
-# podman, which has no root daemon to depend on (M8-B2/M8-D3).
+Documentation=file:/opt/magpie/INSTALL.md
+# No Requires=/After=docker.service: the reviewer runs under ROOTLESS
+# podman, which has no root daemon to depend on.
 After=network-online.target magpie-gateway.service
 Wants=network-online.target magpie-gateway.service
 

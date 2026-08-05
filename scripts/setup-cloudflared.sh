@@ -4,8 +4,9 @@
 # named tunnel that exposes the magpie orchestrator's webhook endpoint to
 # GitHub, without opening any inbound port on this host.
 #
-# This is the production ingress path (PLAN.md Milestone 5), replacing the
-# smee.io dev relay. See docs/cloudflared.md for the full runbook and the
+# This is one production ingress path (see docs/ingress.md for the full
+# options matrix), separate from the smee.io dev relay. See
+# docs/cloudflared.md for the full runbook and the
 # security rationale (HMAC-verified webhook, no Cloudflare Access in front of
 # it, orchestrator stays bound to 127.0.0.1).
 #

@@ -1,12 +1,13 @@
 # magpie-gateway.service — the credential-injecting LLM gateway
-# (Milestone 5, task_56ad; runs @magpie/gateway from packages/gateway, M4-A;
-# per-job unix-socket proxy plane added M7-1, Design D — DISTRIBUTION.md §2).
+# (runs @magpie/gateway from packages/gateway; per-job unix-socket proxy
+# plane per Design D — DISTRIBUTION.md §1).
 #
 # This is the ONLY process that holds the real OpenRouter key
 # (MAGPIE_GATEWAY_OPENROUTER_KEY). It runs as its OWN unprivileged user,
 # `magpie-gateway`, separate from the orchestrator's `magpie` user, so a
 # compromise of the orchestrator's filesystem access never yields the provider
-# key (see packages/gateway/README.md "Provisioning" and PLAN.md §5). It has
+# key (see packages/gateway/README.md "Provisioning" and ARCHITECTURE.md's
+# threat model). It has
 # NO docker access — the virtual-key store is in-memory by design (keys are
 # per-job ephemeral; losing them on restart just fails any in-flight job
 # closed), so there is no persistent state directory to protect. It DOES now

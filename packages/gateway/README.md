@@ -1,20 +1,18 @@
 # @magpie/gateway
 
-Host-side, credential-injecting LLM gateway for magpie (Milestone 4, `task_eb22`/M4-A — see
-`PLAN.md` §5). This is the **only** place the real OpenRouter API key lives once M4 is fully
-wired up: the review container and the orchestrator never see it, only a short-lived,
-budget-capped **virtual key** minted per job.
+Host-side, credential-injecting LLM gateway for magpie. This is the **only** place the real
+OpenRouter API key lives: the review container and the orchestrator never see it, only a
+short-lived, budget-capped **virtual key** minted per job.
 
-**Implementation note:** `PLAN.md` §5 originally specified LiteLLM. The CTO decided against
-LiteLLM and against running Postgres/any database for this; this package is a small, purpose-
-built TypeScript proxy instead — OpenRouter-only, in-memory key store, no DB. See `PLAN.md` §5's
-deviation note for the full rationale. This package intentionally mirrors
+**Implementation note:** this package is a small, purpose-built TypeScript proxy — OpenRouter-
+only, in-memory key store, no DB — rather than an existing gateway like LiteLLM; see
+[HISTORY.md](../../HISTORY.md) for the rationale. It intentionally mirrors
 `packages/orchestrator`'s conventions: plain `node:http` (no framework), `zod` for validation,
 `vitest` for tests.
 
 ## What it is
 
-One process, two independent planes (M7-1 / DISTRIBUTION.md §2.6 "Design D"):
+One process, two independent planes (DISTRIBUTION.md §1.6 "Design D"):
 
 1. **Proxy (data) plane** — the OpenAI-compatible surface the review container's Pi process
    talks to, via an in-container TCP->unix forwarder. Unlike the management plane, this is
@@ -142,9 +140,9 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   at most its remaining budget for at most its remaining TTL, then nothing.
 - The management plane (mint/revoke) is loopback-only by construction (separate `http.Server`,
   bound to `127.0.0.1`) plus a per-request remote-address check — a compromised review container
-  (which has **no network at all**, per `--network none` — see DISTRIBUTION.md §2) categorically
+  (which has **no network at all**, per `--network none` — see DISTRIBUTION.md §1) categorically
   cannot mint or revoke keys.
-- **Per-job proxy socket isolation (M7-1, DISTRIBUTION.md §2.6 "Design D"):** each job's proxy
+- **Per-job proxy socket isolation (DISTRIBUTION.md §1.6 "Design D"):** each job's proxy
   plane is its own unix socket, bound only for that job's lifetime and reachable only via the
   read-only bind mount the orchestrator gives that one `--network none` container. There is no
   shared listener a second job — or anything else with host access to a *different* job's mount —

@@ -8,7 +8,7 @@
 # (packages/review-extension + its @earendil-works/* dependencies) is NOT a
 # host service and is deliberately EXCLUDED from this artifact — it ships
 # separately as a published container image (see release-reviewer.yml /
-# DISTRIBUTION.md §2/§3.1).
+# DISTRIBUTION.md §1/§2.1).
 #
 # This is the SINGLE code path for producing the release tarball: both local
 # dev and CI (.github/workflows/release-host.yml) call this script. The

@@ -1,12 +1,12 @@
 # Installing Magpie (host services)
 
 This is the operator install guide for the **host-service release tarball** —
-the packaged `@magpie/orchestrator` and `@magpie/gateway` (M7-3,
+the packaged `@magpie/orchestrator` and `@magpie/gateway` (built by
 `scripts/pack-host.sh`). It targets a systemd Linux host (the project runs on
 a Raspberry Pi in production; any systemd distro works).
 
 For the design behind this split (host services vs. the one container) see
-[`DISTRIBUTION.md`](DISTRIBUTION.md) §2. The reviewer itself is **not** part
+[`DISTRIBUTION.md`](DISTRIBUTION.md) §1. The reviewer itself is **not** part
 of this bundle — it's a published container image; see
 [`docker/reviewer/README.md`](docker/reviewer/README.md).
 
@@ -172,7 +172,7 @@ sudo systemctl status magpie-gateway magpie
 ```
 
 You'll also need a public HTTPS endpoint forwarding to the orchestrator's
-webhook port — see `DISTRIBUTION.md` §3.3 for the supported ingress options
+webhook port — see `DISTRIBUTION.md` §2.3 for the supported ingress options
 (reverse proxy, Cloudflare Tunnel, other tunnels). The existing Cloudflare
 Tunnel path is documented separately in `docs/cloudflared.md`.
 
@@ -180,7 +180,7 @@ Tunnel path is documented separately in `docs/cloudflared.md`.
 
 Magpie runs review jobs at the strongest isolation tier this host can
 actually deliver (micro-VM > the hardened crun floor — see
-`PLAN.md`'s isolation-ladder milestone). You can see which tier is active,
+[`ARCHITECTURE.md`](ARCHITECTURE.md)'s "Isolation tiers" section). You can see which tier is active,
 and why, in two operator-only places:
 
 - **`GET /healthz`** — returns JSON including the resolved tier, whether it's

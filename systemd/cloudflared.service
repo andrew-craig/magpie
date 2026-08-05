@@ -1,5 +1,5 @@
 # cloudflared.service — outbound-only Cloudflare Tunnel for magpie's webhook
-# ingress (PLAN.md Milestone 5). Runs `cloudflared tunnel run`, which reads
+# ingress (see docs/ingress.md). Runs `cloudflared tunnel run`, which reads
 # /etc/cloudflared/config.yml (rendered by scripts/setup-cloudflared.sh from
 # cloudflared/config.example.yml) for the tunnel name/UUID, credentials-file
 # path, and ingress rules (hostname -> http://localhost:8787).

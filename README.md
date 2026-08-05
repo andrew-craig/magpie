@@ -2,16 +2,16 @@
 
 Self-hosted GitHub code-review bot — any organisation can stand up its own instance on its
 own Linux host (single-host, single-tenant per deployment; see the platform matrix below).
-See [PLAN.md](PLAN.md) for the full design, [DISTRIBUTION.md](DISTRIBUTION.md) for the
-distribution/self-hosting architecture, and [CLAUDE.md](CLAUDE.md) for project/task-tracking
-conventions.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design, [DISTRIBUTION.md](DISTRIBUTION.md)
+for the distribution/self-hosting architecture, and [CLAUDE.md](CLAUDE.md) for project/
+task-tracking conventions.
 
 ## Supported platforms
 
 | Requirement | Detail |
 |---|---|
 | OS | Any Linux host with **systemd** |
-| Container runtime | **Rootless Podman** (default; any docker-compatible CLI works) — runs the reviewer at the hardened **crun floor** tier by default, with an opt-in **micro-VM (KVM)** tier for stronger isolation; see PLAN.md's isolation-tier ladder |
+| Container runtime | **Rootless Podman** (default; any docker-compatible CLI works) — runs the reviewer at the hardened **crun floor** tier by default, with an opt-in **micro-VM (KVM)** tier for stronger isolation; see ARCHITECTURE.md's isolation-tier ladder |
 | Architecture | **amd64 and arm64** — the reviewer image is published multi-arch; the host services are pure JS and arch-independent (the micro-VM tier's native `magpie-tier-probe` preflight binary is per-arch, bundled in the release tarball) |
 | Host | A **cloud VM or a Raspberry Pi** alike — this project runs on a Pi in production |
 | Ingress | Pluggable — reverse proxy, Cloudflare Tunnel, or another outbound tunnel; see [docs/ingress.md](docs/ingress.md) |
@@ -22,12 +22,12 @@ New to Magpie? Start with [QUICKSTART.md](QUICKSTART.md) for the end-to-end inst
 ## Prerequisites
 
 - **Node.js 22+** and npm (workspaces are used, so a recent npm is required)
-- **Podman** — the review agent runs in a container/micro-VM launched by rootless Podman
-  (M8-B2/D3): no root daemon, no `docker`/root group membership needed, just the `magpie`
-  user's own subuid/subgid ranges and a lingering session (see `INSTALL.md`). Any
-  docker-compatible CLI can be substituted via `config.toml`'s `container.docker_bin`. The
-  isolation tier actually launching reviews (hardened crun floor by default, or an opt-in
-  micro-VM) is resolved at startup — see PLAN.md's isolation-tier ladder.
+- **Podman** — the review agent runs in a container/micro-VM launched by rootless Podman:
+  no root daemon, no `docker`/root group membership needed, just the `magpie` user's own
+  subuid/subgid ranges and a lingering session (see `INSTALL.md`). Any docker-compatible CLI
+  can be substituted via `config.toml`'s `container.docker_bin`. The isolation tier actually
+  launching reviews (hardened crun floor by default, or an opt-in micro-VM) is resolved at
+  startup — see ARCHITECTURE.md's isolation-tier ladder.
 - **git**
 
 ## Setup
@@ -54,9 +54,8 @@ Secrets are kept **out** of `config.toml` and read from the environment. Copy
 - `MAGPIE_WEBHOOK_SECRET` — the GitHub App webhook secret
 - `MAGPIE_GATEWAY_MASTER_KEY` — bearer token authenticating this orchestrator to the
   LLM gateway's (`packages/gateway`) management plane when minting/revoking each job's
-  short-lived virtual key. As of M4-C there is no separate LLM provider API key here —
-  the real key lives only in the gateway process's own environment; see
-  `packages/gateway/README.md`.
+  short-lived virtual key. There is no separate LLM provider API key here — the real key
+  lives only in the gateway process's own environment; see `packages/gateway/README.md`.
 
 The GitHub App private key stays a `.pem` file on disk; point
 `github.private_key_path` in `config.toml` at it (don't put it in `.env`).
@@ -70,6 +69,14 @@ An individual allowlisted repo can additionally tune a small, pre-approved
 slice of review behaviour (model, diff-size cap, reviewer guidance, ignored
 paths) by committing a `.magpie.toml` file to its own default branch — see
 [`docs/repo-config.md`](docs/repo-config.md).
+
+### On-demand review
+
+Besides the automatic triggers (`opened`/`ready_for_review`/`reopened`/`synchronize`), any PR
+collaborator with write access can request a fresh review at any time by commenting
+`@magpie review` on the PR. Authorization is checked live against the commenter's GitHub
+permissions — never inferred from the comment text — so a PR author can't grant themselves a
+review by posting the command from an unauthorized account.
 
 ## Running
 
@@ -85,7 +92,7 @@ through the review pipeline (`pipeline.ts`) — mint a GitHub App installation t
 PR head credential-free (`workspace.ts`), fetch the diff (`diff.ts`), mint a per-job gateway
 virtual key (`gateway.ts`), run the Pi reviewer (`reviewer.ts`) at the isolation tier resolved
 for this host — the hardened, `--network none`, rootless-Podman crun floor by default, or an
-opt-in micro-VM tier where configured (see PLAN.md's isolation-tier ladder) — parse its
+opt-in micro-VM tier where configured (see ARCHITECTURE.md's isolation-tier ladder) — parse its
 structured `report_findings` output (`findings.ts`,
 `anchor.ts`), and publish exactly one `COMMENT` review with diff-anchored inline comments back
 to the PR (`publisher.ts`) — incremental and deduped on re-push (`rereview.ts`). The process

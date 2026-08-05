@@ -158,7 +158,7 @@ or personal account both work):
    - **Contents: Read-only**
    - **Pull requests: Read and write**
    - **Issues: Read and write** — needed for the `@magpie review` on-demand
-     comment command (M6-A): posting the acknowledgement reaction on the
+     comment command: posting the acknowledgement reaction on the
      triggering comment is an `issues`-scoped API call even on a PR (GitHub
      models PR conversation comments as issue comments). The authorization
      check (is the commenter a write/admin collaborator?) does *not* need

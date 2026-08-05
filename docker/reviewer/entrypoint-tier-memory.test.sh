@@ -36,7 +36,7 @@ trap 'rm -rf "${MAGPIE_TEST_WORKDIR}"' EXIT
 
 EXCERPT="${MAGPIE_TEST_WORKDIR}/entrypoint-excerpt.sh"
 
-truncate_marker="# M4-E: fail-closed startup confinement assertions. PLAN.md milestone 4's"
+truncate_marker="# M4-E: fail-closed startup confinement assertions. The threat model's"
 truncate_line="$(grep -nF -- "${truncate_marker}" "${ENTRYPOINT}" | head -n1 | cut -d: -f1)"
 if [ -z "${truncate_line}" ]; then
   echo "FAIL: could not find the M4-E section marker in entrypoint.sh -- has it moved? Update truncate_marker above." >&2

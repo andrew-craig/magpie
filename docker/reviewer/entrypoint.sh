@@ -329,7 +329,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# M4-E: fail-closed startup confinement assertions. PLAN.md milestone 4's
+# M4-E: fail-closed startup confinement assertions. The threat model's
 # explicit acceptance check requires this script to verify its OWN
 # confinement before `exec pi` below, and abort non-zero (surfaced by
 # reviewer.ts/pipeline.ts as a review-failure comment, never a silent hang)
