@@ -4,7 +4,7 @@ set -euo pipefail
 # magpie-reviewer entrypoint: fail-closed startup confinement assertions,
 # gateway relay wiring, and privilege drop, run before Pi ever sees the PR
 # diff (Design D `--network none` + in-container forwarder -- see
-# DISTRIBUTION.md §2).
+# DISTRIBUTION.md §1).
 #
 # Runs Pi headless over the mounted /work worktree using the extension +
 # system prompt baked into the image at /opt/magpie (see
@@ -48,7 +48,7 @@ set -euo pipefail
 #     forwarder started below, which relays to the gateway's real unix socket
 #     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP --
 #     the earlier magpie-net design that pointed this at a fixed bridge
-#     address instead has been deleted (see DISTRIBUTION.md §2.4). Required --
+#     address instead has been deleted (see DISTRIBUTION.md §1.6). Required --
 #     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 0.80.3 does NOT
 #     read this env var itself (verified empirically against a stub HTTP
 #     server: a plain OPENAI_BASE_URL was silently ignored and Pi's request
@@ -395,7 +395,7 @@ esac
 # new env var (see docker/reviewer/Dockerfile's "Relay to the gateway"
 # comment for why both binaries still ship):
 #
-#   - docker/crun, `--network none` (Design D -- DISTRIBUTION.md §2.2/§2.3):
+#   - docker/crun, `--network none` (Design D -- DISTRIBUTION.md §1.2/§1.7):
 #     no `/dev/vsock` device, no shared filesystem with the host other than
 #     the bind-mounted `/run/gw/gw.sock` -- `forwarder.mjs` relays TCP -> that
 #     unix socket.
@@ -548,7 +548,7 @@ echo "magpie-reviewer: relay is up" >&2
 # interfaces except its own loopback -- no veth, no bridge, no route to the
 # host, to other containers, to the internet, to DNS, or to the cloud-
 # metadata IP. That is a property of the network namespace itself, not of any
-# iptables/nftables rule (see DISTRIBUTION.md §2.3), so unlike the deleted
+# iptables/nftables rule (see DISTRIBUTION.md §1.3), so unlike the deleted
 # magpie-net/setup-network.sh bridge model it does not depend on the host's
 # daemon.json, Docker version, or IPv6 settings. The canaries below therefore
 # MUST be unreachable unconditionally; this probe is a cheap belt-and-
@@ -559,7 +559,7 @@ echo "magpie-reviewer: relay is up" >&2
 # The gateway reachability probe, in contrast, now transits the forwarder
 # started above -> the mounted `/run/gw/gw.sock` -> the real gateway process,
 # so it doubles as confirmation that BOTH the forwarder came up AND the
-# gateway's per-job socket is present and bound (DISTRIBUTION.md §2.6 point
+# gateway's per-job socket is present and bound (DISTRIBUTION.md §1.6 point
 # 3's "the gateway socket is present" half of the fail-closed assertion).
 #
 # Implementation notes:
