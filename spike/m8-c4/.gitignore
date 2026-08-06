@@ -1,4 +1,0 @@
-# Compiled TEST-ONLY harness binary -- run-negative-test.sh rebuilds it from
-# tsi-hijack-launch.c every run; nothing depends on the binary being
-# committed.
-tsi-hijack-launch
