@@ -258,7 +258,7 @@ magpie/
 │   └── vsock-client/, vsock-framing/  # micro-VM guest-side gateway channel
 ├── docker/reviewer/                 # magpie-reviewer image: Dockerfile, entrypoint, forwarder
 ├── scripts/                         # install.sh, pack-host.sh, dev/test helpers
-├── systemd/                         # magpie.service, magpie-gateway.service, cloudflared.service
+├── systemd/                         # magpie.service, magpie-gateway.service
 ├── docs/                            # ingress, repo-config, review-flow, design decision records
 └── config.example.toml              # app id, key path, gateway URL, provider/model, limits
 ```

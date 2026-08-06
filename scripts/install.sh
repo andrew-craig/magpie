@@ -494,9 +494,9 @@ cat <<NOTES
          HOME=$STATE_DIR podman pull \\
          \$(grep -E '^image *=' $ETC_MAGPIE/config.toml | cut -d'"' -f2)
 
-  6. Cloudflare Tunnel ingress is a separate unit:
-     systemd/cloudflared.service + scripts/setup-cloudflared.sh. Install/enable
-     it per docs/cloudflared.md if you haven't already.
+  6. Cloudflare Tunnel ingress (if you use it) is set up entirely from the
+     Cloudflare dashboard — no unit or config shipped by this repo. See
+     docs/ingress.md's Option 2 if you haven't already.
 
   7. (Micro-VM tier only) build + install the host launcher and set the rootfs —
      see INSTALL.md "Opt into the micro-VM tier". The crun floor (default) needs

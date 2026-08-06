@@ -107,11 +107,11 @@ install use the release tarball instead (see [QUICKSTART.md](QUICKSTART.md) /
    `config.toml` (add the test repo to `repo_allowlist`) as described above, and start
    `packages/gateway` (see its README) with the real provider key.
 2. Expose the webhook endpoint and point the GitHub App's webhook URL at it, using
-   whichever ingress you run: a `cloudflared` tunnel for the real/production path
-   (see [docs/cloudflared.md](docs/cloudflared.md)) or a smee.io channel for local dev
+   whichever ingress you run: a dashboard-managed Cloudflare Tunnel for the real/production
+   path (see [docs/ingress.md](docs/ingress.md)) or a smee.io channel for local dev
    (set `MAGPIE_SMEE_URL` in `.env`; see [docs/smee.md](docs/smee.md)).
 3. Start the orchestrator with `npm run dev`. For the smee path, also run `npm run dev:smee`
-   in a second shell; the `cloudflared` tunnel needs no local relay process.
+   in a second shell; a Cloudflare Tunnel needs no local relay process.
 4. Open a non-draft pull request on the allowlisted repo (or push a commit to an existing
    one).
 5. Magpie mints an installation token, clones the PR head, mints a per-job gateway virtual
@@ -123,8 +123,8 @@ install use the release tarball instead (see [QUICKSTART.md](QUICKSTART.md) /
 ## Webhook ingress (production)
 
 For exposing the orchestrator's webhook endpoint to GitHub via an
-outbound-only Cloudflare Tunnel (no inbound ports), see
-[docs/cloudflared.md](docs/cloudflared.md) and `scripts/setup-cloudflared.sh`.
+outbound-only, dashboard-managed Cloudflare Tunnel (no inbound ports, no
+ingress config committed to this repo), see [docs/ingress.md](docs/ingress.md).
 
 ## Webhook ingress (development)
 
