@@ -161,7 +161,7 @@ describe("createAdminServer", () => {
     expect(keyStore.findByKey(key)).toBeUndefined();
   });
 
-  it("DELETE /admin/keys/:id responds with the key's final spend (M5-D)", async () => {
+  it("DELETE /admin/keys/:id responds with the key's final spend", async () => {
     const { baseUrl, keyStore } = await start();
     const { id } = keyStore.mint({ budgetUsd: 1.5, ttlSeconds: 60 });
     keyStore.recordSpend(id, 0.42);

@@ -1,10 +1,10 @@
 // Entrypoint for the magpie orchestrator.
 //
-// Wires the modules built across the earlier milestone tasks into one running
+// Wires all of the orchestrator's modules into one running
 // service: load config -> build the job queue -> build the review pipeline
 // (auth -> clone -> diff -> review -> publish, see pipeline.ts) -> filter
 // webhook deliveries down to review jobs (filter.ts) -> accept webhook
-// deliveries (server.ts). See PLAN.md for the full design.
+// deliveries (server.ts). See ARCHITECTURE.md for the full design.
 //
 // This module intentionally contains no pipeline logic of its own — every
 // stage it wires already validates/tests its own behavior in isolation
@@ -90,7 +90,7 @@ export function logJobOutcome(outcome: JobOutcome, logger: JobOutcomeLogger = co
  * gets the `fatal startup error:` prefix (the caller still logs it; a stack is
  * available on the Error itself). Pure and exported so index.test.ts can assert
  * the classification — in particular that a `MemoryControllerUnavailableError`
- * (bug_df2d) is treated as a clean, actionable message, not an internal fault.
+ * is treated as a clean, actionable message, not an internal fault.
  */
 export function formatStartupError(err: unknown): string {
   if (
@@ -108,19 +108,19 @@ export function formatStartupError(err: unknown): string {
 async function main(): Promise<void> {
   const config = loadConfig();
 
-  // Fail fast if docker isn't usable: M3 containerizes every review job (see
-  // PLAN.md Milestone 3, docker.ts), so a broken/missing docker install
+  // Fail fast if docker isn't usable: every review job runs containerized
+  // (see docker.ts), so a broken/missing docker install
   // would otherwise only surface once the first webhook triggers a job,
   // failing every subsequent job the same way. Refusing to start at all is
   // strictly better for a self-hosted, unattended service.
   await assertDockerAvailable(config);
 
-  // Fail fast (bug_df2d) if the review container's `--memory` limit would be
+  // Fail fast if the review container's `--memory` limit would be
   // silently unenforced: some hosts (notably Raspberry Pi firmware defaults)
   // boot with the kernel's cgroup v2 `memory` controller disabled, which
   // makes Docker accept `--memory` and discard it with only a stderr warning
   // — a hardening flag that quietly becomes a no-op is exactly the class of
-  // gap M7 "Design D"'s asserted-confinement posture exists to catch. Fails
+  // gap "Design D"'s asserted-confinement posture exists to catch. Fails
   // closed by default (`container.requireMemoryLimit`, see config.ts); an
   // operator who understands the risk can set that to `false` to start
   // anyway. See cgroup-preflight.ts's module doc comment for the full
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
   // in-container backstop over this startup-time check.
   await assertMemoryControllerAvailable(config);
 
-  // Isolation-tier ladder preflight (M8-D1 / task_2f46): probe the host
+  // Isolation-tier ladder preflight: probe the host
   // (KVM_CREATE_VM via rust/magpie-tier-probe, the crun runtime CLI, the
   // micro-VM launcher binary — see tier-ladder.ts) and resolve which tier
   // will actually launch review jobs, RIGHT NOW, on THIS boot of the
@@ -160,8 +160,8 @@ async function main(): Promise<void> {
     }),
   );
 
-  // Defence-in-depth (M3-D, extended M8-C5 for the micro-VM substrate — see
-  // orphan-cleanup.ts): remove any `magpie-*` review containers, orphaned
+  // Defence-in-depth (see orphan-cleanup.ts, which also covers the micro-VM
+  // substrate): remove any `magpie-*` review containers, orphaned
   // `magpie-krun-launch` micro-VM processes, and orphaned per-job scratch
   // directories left behind by a previous crash of this process (normal
   // exits, including the graceful-shutdown path below, never leave any of
@@ -170,14 +170,14 @@ async function main(): Promise<void> {
   // Each call is independently best-effort and non-fatal (never blocks
   // startup, and one failing must not skip the others) — see each
   // function's own doc comment in orphan-cleanup.ts, including the
-  // deliberate gateway-virtual-key design-fork writeup (task_df53 §4).
+  // deliberate gateway-virtual-key design-fork writeup.
   await cleanupOrphanContainers(config);
   await cleanupOrphanLauncherProcesses(config);
   await cleanupOrphanScratchDirs(config);
 
   const queue = new JobQueue(jobQueueOptionsFromConfig(config));
   const { runJob, cleanupJob } = createReviewPipeline(config, { resolvedTier: tierResult.resolvedTier });
-  // M8-D2 (task_92d7): the ONLY place `tierResult` is projected onto an HTTP
+  // The ONLY place `tierResult` is projected onto an HTTP
   // surface, and it goes to `/healthz` — an operator-facing liveness probe,
   // never the PR review (publisher.ts never receives `tierResult` or any
   // derivative of it at all — see that module's FORBIDDEN_TIER_STRINGS
@@ -197,7 +197,7 @@ async function main(): Promise<void> {
       logJobOutcome(outcome);
     });
   });
-  // M6-A: `@magpie review` on-demand trigger. Same `queue.enqueue` seam as
+  // `@magpie review` on-demand trigger. Same `queue.enqueue` seam as
   // the pull_request filter above, so a comment-triggered job gets the same
   // dedup-by-PR-key and outcome logging.
   const onIssueComment = createIssueCommentHandler(config, (job) => {
@@ -216,8 +216,8 @@ async function main(): Promise<void> {
       port: config.server.port,
       concurrency: config.limits.concurrency,
       repoAllowlist: config.repoAllowlist,
-      // Surface which container runtime is active at startup. As of M8-B2 the
-      // default flipped `docker`→`podman` (rootless crun floor), so an operator
+      // Surface which container runtime is active at startup. The default is
+      // `podman` (rootless crun floor), so an operator
       // upgrading with a config.toml that omits `docker_bin` silently switches
       // runtimes; logging it here makes that visible in the boot line rather
       // than only surfacing on the first failed review.

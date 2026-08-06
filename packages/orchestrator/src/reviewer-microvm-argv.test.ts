@@ -1,4 +1,4 @@
-// M8-C3 (task_39ff) micro-VM tier argv builder tests — the counterpart to
+// Micro-VM tier argv builder tests — the counterpart to
 // reviewer-crun-floor-argv.test.ts/reviewer-podman-argv.test.ts, but for
 // `buildMicrovmLaunchArgs` (the `magpie-krun-launch` argv builder) rather
 // than `buildReviewDockerArgs`.
@@ -34,7 +34,7 @@ const GOLDEN_INPUT = {
     OPENAI_BASE_URL: "http://127.0.0.1:4000/v1",
     MAGPIE_REQUIRE_MEMORY_LIMIT: "true",
     MAGPIE_MICROVM_RAM_MIB: "1024",
-    // M8-E5 (task_a749): the uid/gid entrypoint.sh drops to in the guest.
+    // The uid/gid entrypoint.sh drops to in the guest.
     // Deliberately equal to `uid`/`gid` above — that equality IS the fix (see
     // the dedicated test below and reviewer.ts's call site).
     MAGPIE_MICROVM_REVIEWER_UID: "10001",
@@ -118,7 +118,7 @@ describe("buildMicrovmLaunchArgs", () => {
     expect(argv[argv.indexOf("--out-mount") + 1]).toBe("/var/lib/magpie/work/job-1-out:findings");
   });
 
-  // M8-E3 (task_2541): entrypoint.sh cross-checks this inline env var against
+  // entrypoint.sh cross-checks this inline env var against
   // the guest's own /proc/meminfo MemTotal as its positive proof that
   // libkrun's --ram-mib ceiling (the SAME ramMib value, passed a few flags
   // earlier) actually applied — see reviewer.ts's runReview call site and
@@ -132,7 +132,7 @@ describe("buildMicrovmLaunchArgs", () => {
     expect(argv[idx - 1]).toBe("--env");
   });
 
-  // M8-E5 (task_a749): pinned separately from the golden array so a rename or
+  // Pinned separately from the golden array so a rename or
   // drop of either key gets a targeted failure. The value equality with
   // --uid/--gid is what matters — see reviewer.ts's call site, which binds both
   // from the same `hostUid`/`hostGid` locals, and reviewer.test.ts's
@@ -239,7 +239,7 @@ describe("findMissingMicrovmFlags", () => {
   });
 });
 
-// M8-C4 (task_3b48) Layer 2 — install/launch preflight: the argv this
+// Layer 2 — install/launch preflight: the argv this
 // module produces must never enable a network transport (no TSI/passt, no
 // virtio-net device — see rust/magpie-microvm-launcher/src/krun.rs's
 // "LAYER 1 PIN"). This launcher's CLI has no such flag today, so these

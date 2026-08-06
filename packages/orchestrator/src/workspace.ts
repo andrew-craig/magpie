@@ -1,11 +1,12 @@
 // Per-job workspace: check out a PR head onto the host filesystem, then
 // strip every trace of the credential that was used to fetch it.
 //
-// This is host-side git plumbing, not container plumbing (that's a later
-// milestone — see PLAN.md M3). But per the project's capability-separation
-// principle, the checkout handed off to the reviewer must already be
-// credential-free even in M1, so the invariant this module establishes
-// ("the workspace holds no secret worth stealing") doesn't change later.
+// This is host-side git plumbing, not container plumbing (see docker.ts for
+// how the checkout is bind-mounted into the review container). Per the
+// project's capability-separation principle, the checkout handed off to the
+// reviewer must already be credential-free, so the invariant this module
+// establishes ("the workspace holds no secret worth stealing") holds
+// regardless of which isolation tier runs the review.
 //
 // SECURITY: the installation token is a real, live GitHub credential. This
 // module never lets it touch the git command line or the on-disk repo at

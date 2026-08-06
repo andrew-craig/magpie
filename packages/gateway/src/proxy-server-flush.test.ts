@@ -1,25 +1,24 @@
-// bug_73b2 acceptance test (M8-C3 / task_39ff) — the gateway never drops a
-// reply by closing promptly after a partial write.
+// Flush-before-close acceptance test — the gateway must never drop a reply
+// by closing promptly after a partial write.
 //
-// BACKGROUND (see .chalk/tasks/closed/bug_73b2.md). The M8-C2 spike found a
-// timing race in libkrun's own `--vsock-uds` bridge — the exact transport the
-// micro-VM tier (C3) carries live Pi<->gateway traffic over: when the HOST
-// peer calls `shutdown(SHUT_WR)` in the SAME TICK as `sendall()`-ing its
-// reply, the bridge can propagate the teardown to the guest before it finishes
-// flushing the just-sent bytes, so the guest's blocking read sees a bare EOF
-// instead of the reply. The bug is in the (external) bridge, so C3 "MUST NOT
-// assume immunity" — the mitigation this repo controls is that the GATEWAY
-// (the host peer over that bridge) must never close/`destroy()` promptly after
-// writing its final bytes; it must let the bytes flush first.
+// BACKGROUND: an earlier investigation found a timing race in libkrun's own
+// `--vsock-uds` bridge — the exact transport the micro-VM tier carries live
+// Pi<->gateway traffic over: when the HOST peer calls `shutdown(SHUT_WR)` in
+// the SAME TICK as `sendall()`-ing its reply, the bridge can propagate the
+// teardown to the guest before it finishes flushing the just-sent bytes, so
+// the guest's blocking read sees a bare EOF instead of the reply. The bug is
+// in the (external) bridge, so the micro-VM tier must not assume immunity —
+// the mitigation this repo controls is that the GATEWAY (the host peer over
+// that bridge) must never close/`destroy()` promptly after writing its final
+// bytes; it must let the bytes flush first.
 //
 // The real gateway (packages/gateway/src/proxy-server.ts) replies exclusively
 // via Node `http.ServerResponse.write()`/`end()` (never `res.destroy()`, never
 // a synchronous `socket.shutdown()` in the last-write tick), which schedules
 // the FIN through libuv AFTER the write buffer drains rather than racing it —
-// structurally the SAFE shape (unlike the spike's Python stub, which
-// `shutdown()`-ed synchronously after `sendall()`). This test VERIFIES that
-// property empirically rather than trusting the code read, per bug_73b2's
-// binding C3 acceptance criterion:
+// structurally the SAFE shape (unlike the original investigation's Python
+// stub, which `shutdown()`-ed synchronously after `sendall()`). This test
+// VERIFIES that property empirically rather than trusting the code read:
 //
 //   - It binds the REAL proxy server on a UNIX SOCKET (the production
 //     `job-sockets.ts` transport — the same kind of socket libkrun's
@@ -29,18 +28,17 @@
 //     LARGE multi-segment body (so flush-before-FIN is actually exercised
 //     across kernel socket buffers, not a single tiny packet), an
 //     error-before-headers (502), a budget rejection (402), and — the case
-//     bug_73b2 flags as most likely to hide a prompt close-after-partial-write
-//     — an upstream failure AFTER headers were already sent (the `headersSent`
-//     branch that could, in a bad future refactor, `res.destroy()` and drop
-//     the bytes already written).
+//     most likely to hide a prompt close-after-partial-write — an upstream
+//     failure AFTER headers were already sent (the `headersSent` branch that
+//     could, in a bad future refactor, `res.destroy()` and drop the bytes
+//     already written).
 //   - It also exercises the client-abort / `res.on("close")` -> upstream
 //     `AbortController.abort()` teardown path.
 //
-// The libkrun vsock hop itself is validated on real hardware by C3's live
-// `sg kvm` micro-VM run (see task_39ff's proven-vs-deferred section) — an
-// automated test can't boot a VM. What THIS test locks down is the half that
-// lives in this repo and could regress silently: the gateway's own
-// write/close ordering.
+// The libkrun vsock hop itself is validated on real hardware by a live
+// micro-VM run under KVM — an automated test can't boot a VM. What THIS test
+// locks down is the half that lives in this repo and could regress silently:
+// the gateway's own write/close ordering.
 
 import * as http from "node:http";
 import { connect as netConnect } from "node:net";
@@ -153,16 +151,17 @@ function requestOverSocket(socketPath: string, key: string | undefined): Promise
 }
 
 /**
- * The MOST FAITHFUL reproduction of bug_73b2's failing consumer: a RAW socket
- * that writes one HTTP/1.0 request (which forces Node into close-delimited
- * framing — no chunked-transfer layer to unwrap, the body IS every byte after
- * the header block up to the connection close) and then does the guest relay's
- * exact move: read every byte until the server closes the connection, a single
- * EOF-terminated read of the whole reply. Returns the raw response bytes
- * (status line + headers + body). HTTP/1.0 (not 1.1 + `Connection: close`) is
- * required because Node STILL chunk-encodes a no-Content-Length 1.1 response
- * even when the connection will close; only a 1.0 request makes it
- * close-delimit, which is the framing bug_73b2's EOF-read consumer assumes.
+ * The MOST FAITHFUL reproduction of the guest relay's failing consumer: a RAW
+ * socket that writes one HTTP/1.0 request (which forces Node into
+ * close-delimited framing — no chunked-transfer layer to unwrap, the body IS
+ * every byte after the header block up to the connection close) and then does
+ * the guest relay's exact move: read every byte until the server closes the
+ * connection, a single EOF-terminated read of the whole reply. Returns the
+ * raw response bytes (status line + headers + body). HTTP/1.0 (not 1.1 +
+ * `Connection: close`) is required because Node STILL chunk-encodes a
+ * no-Content-Length 1.1 response even when the connection will close; only a
+ * 1.0 request makes it close-delimit, which is the framing the guest relay's
+ * EOF-read consumer assumes.
  */
 function rawRequestReadToEof(socketPath: string, key: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -197,7 +196,7 @@ function mintKey(keyStore: KeyStore): string {
   return keyStore.mint({ budgetUsd: 100, ttlSeconds: 3600 }).key;
 }
 
-describe("gateway reply flush safety (bug_73b2 C3 acceptance)", () => {
+describe("gateway reply flush safety (no truncation on close)", () => {
   it("delivers a normal streamed success body with zero byte loss", async () => {
     const payload = Buffer.from(JSON.stringify({ id: "x", choices: [{ message: { content: "hi" } }] }));
     const { socketPath, keyStore } = await startOnUnixSocket({
@@ -213,9 +212,9 @@ describe("gateway reply flush safety (bug_73b2 C3 acceptance)", () => {
   it("delivers a LARGE multi-segment body with zero byte loss (flush-before-FIN across socket buffers)", async () => {
     // Many chunks totalling far more than a single socket buffer, so the
     // gateway's res.write()/res.end() genuinely has to flush across multiple
-    // kernel segments before the FIN — the exact condition bug_73b2's race
-    // needs to be able to manifest under. A same-tick close/destroy after the
-    // last write would truncate this; res.end() must not.
+    // kernel segments before the FIN — the exact condition the flush-before-
+    // close race needs to be able to manifest under. A same-tick close/destroy
+    // after the last write would truncate this; res.end() must not.
     const chunk = Buffer.alloc(64 * 1024, 0x61); // 64 KiB of 'a'
     const chunks = Array.from({ length: 16 }, () => chunk); // 1 MiB total
     const total = 16 * 64 * 1024;
@@ -283,7 +282,7 @@ describe("gateway reply flush safety (bug_73b2 C3 acceptance)", () => {
   });
 
   it("does not truncate the bytes already sent when the upstream fails AFTER headers (the res.destroy()-adjacent teardown)", async () => {
-    // The case bug_73b2 flags as most likely to hide a prompt
+    // The case most likely to hide a prompt
     // close-after-partial-write: headers + several chunks already went out,
     // THEN the upstream body errors mid-stream. proxy-server.ts's outer catch
     // sees headersSent === true and calls res.end() (NOT res.destroy()), so

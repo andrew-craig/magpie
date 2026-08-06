@@ -1,5 +1,5 @@
-// M8-E8 (task_0208): drift guard for the reviewer image's `ENV` surface
-// between the crun-floor tier and the micro-VM tier.
+// Drift guard for the reviewer image's `ENV` surface between the
+// crun-floor tier and the micro-VM tier.
 //
 // BACKGROUND: the crun tier runs the reviewer OCI *image*, so `docker`/
 // `podman run` applies the image config (`ENV`, `WORKDIR`, base-image
@@ -7,9 +7,9 @@
 // *exported bare rootfs* — libkrun reads no image config at all, so none of
 // that surface reaches the guest unless something re-declares it. This has
 // already caused two live production defects, found one Pi-host run at a
-// time: M8-E4 (`PATH`, task_4c37) and M8-E7 (`MAGPIE_FINDINGS_PATH`,
-// task_80a4), both fixed by re-exports in docker/reviewer/entrypoint.sh
-// under its `MAGPIE_IS_MICROVM` guard. Nothing previously stopped a THIRD
+// time: a missing `PATH` and a missing `MAGPIE_FINDINGS_PATH`, both fixed by
+// re-exports in docker/reviewer/entrypoint.sh under its `MAGPIE_IS_MICROVM`
+// guard. Nothing previously stopped a THIRD
 // such gap from being introduced silently — add a new `ENV` to the
 // Dockerfile and the micro-VM tier loses it with no test failing. That is
 // what this module exists to catch: it is exercised by a real `npm test`
@@ -53,9 +53,10 @@ export function parseDockerfileEnvVars(dockerfileText: string): string[] {
  * Extracts the bodies of every top-level
  * `if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then ... fi` block in
  * docker/reviewer/entrypoint.sh — the exact guard idiom that script uses to
- * re-declare image-config surface for the micro-VM tier (see its M8-E4/
- * M8-E7 sections). Each block's capture stops at either its OWN matching
- * `fi` or an `else` at the same nesting depth — so an if/else/fi's `else`
+ * re-declare image-config surface for the micro-VM tier (see the module doc
+ * comment's PATH/MAGPIE_FINDINGS_PATH history). Each block's capture stops
+ * at either its OWN matching `fi` or an `else` at the same nesting depth —
+ * so an if/else/fi's `else`
  * branch (e.g. the memory-ceiling check's crun-only half) is never mistaken
  * for micro-VM-guarded content — while correctly skipping over NESTED
  * if/then/fi inside the block (e.g. the privilege-drop block's own

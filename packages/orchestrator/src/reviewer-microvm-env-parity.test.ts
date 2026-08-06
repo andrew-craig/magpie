@@ -1,9 +1,9 @@
-// M8-E8 (task_0208): the drift test that makes docker-image-config-drift.ts's
+// The drift test that makes docker-image-config-drift.ts's
 // guard an ACTUAL merge gate — see that module's doc comment for the full
 // background.
 //
 // WHY A VITEST TEST AND NOT (ONLY) A SHELL SCRIPT: the existing one-variable
-// pin (docker/reviewer/entrypoint-tier-memory.test.sh's task_80a4 case)
+// pin (docker/reviewer/entrypoint-tier-memory.test.sh)
 // already asserts MAGPIE_FINDINGS_PATH's *value* matches between the
 // Dockerfile and entrypoint.sh, but that script is not run by any CI
 // workflow — .github/workflows/ci.yml only runs `npm run build` + `npm test`

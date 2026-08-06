@@ -19,7 +19,7 @@ function testConfig(socketDirRoot: string): GatewayConfig {
   };
 }
 
-/** Stub "OpenRouter" — never makes a real network call; mirrors the M7-0 spike's `stubFetch`. */
+/** Stub "OpenRouter" — never makes a real network call; mirrors the original prototype's `stubFetch`. */
 function stubFetch(): Promise<Response> {
   return Promise.resolve(
     new Response(

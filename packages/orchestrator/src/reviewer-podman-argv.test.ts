@@ -1,7 +1,7 @@
-// M8-B2 rootless-podman golden test (task_08ec) — the companion to the M8-B1
-// docker floor golden (reviewer-crun-floor-argv.test.ts).
+// Rootless-podman golden test — the companion to the docker
+// floor golden (reviewer-crun-floor-argv.test.ts).
 //
-// As of M8-B2 the DEFAULT review-container runtime is rootless podman (crun),
+// The DEFAULT review-container runtime is rootless podman (crun),
 // and the port adds exactly ONE argv difference vs the docker path:
 // `--userns=keep-id`, injected immediately after `--user <uid>:<gid>` (see
 // reviewer.ts's isPodmanBinary / buildReviewDockerArgs). That flag is a
@@ -11,8 +11,8 @@
 //
 // Two goldens are kept deliberately:
 //   - reviewer-crun-floor-argv.test.ts pins the DOCKER argv (dockerBin:"docker"
-//     config, no keep-id) — the CTO edit #3 floor invariant, UNCHANGED by
-//     M8-B2.
+//     config, no keep-id) — the CTO edit #3 floor invariant, unaffected by the
+//     podman default.
 //   - THIS test pins the PODMAN argv (the shipped default), so the rootless
 //     posture that actually runs is equally drift-protected: any hardened flag
 //     added/removed/reordered/renamed — OR keep-id silently dropped/moved —
@@ -37,7 +37,7 @@ const GOLDEN_INPUT = {
   gatewaySocketDir: "/golden/gw",
 } as const;
 
-/** Fixed Config — mirrors the floor golden's GOLDEN_CONFIG exactly EXCEPT dockerBin: "podman" (the M8-B2 default). */
+/** Fixed Config — mirrors the floor golden's GOLDEN_CONFIG exactly EXCEPT dockerBin: "podman" (the default). */
 const GOLDEN_CONFIG: Config = {
   github: { appId: "123", privateKeyPath: null },
   llm: { baseUrl: "https://example.com/v1", model: "some/model", allowedModels: [] },
@@ -78,7 +78,7 @@ function loadGoldenFixture(): GoldenFixture {
   return JSON.parse(readFileSync(path, "utf-8")) as GoldenFixture;
 }
 
-describe("buildReviewDockerArgs (M8-B2 rootless-podman default posture)", () => {
+describe("buildReviewDockerArgs (rootless-podman default posture)", () => {
   it("matches the committed podman golden argv byte-for-byte", () => {
     const golden = loadGoldenFixture();
     // config.container.dockerBin is "podman", so no explicit dockerBin param is

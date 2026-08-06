@@ -1,4 +1,4 @@
-// Canonical orchestrator-side "findings" contract for Milestone 2.
+// Canonical orchestrator-side "findings" contract.
 //
 // This is the trust boundary: `raw` below is the contents of the findings
 // file written by the Pi `report_findings` tool — a file produced by an
@@ -8,11 +8,11 @@
 // schema before anything downstream (anchor.ts, the publisher, the reviewer
 // wiring) is allowed to touch it as a typed `ReviewFindings`.
 //
-// The schema below must match the CANONICAL FINDINGS CONTRACT in
-// epic_e6e6 EXACTLY — the Pi extension's Typebox schema (task_A, a sibling
-// task on the extension side) mirrors this shape independently, since the
-// two packages don't share types across the process boundary (the extension
-// writes a file, the orchestrator reads it).
+// The schema below must match the CANONICAL FINDINGS CONTRACT EXACTLY — the
+// Pi extension's Typebox schema (a sibling implementation on the extension
+// side) mirrors this shape independently, since the two packages don't share
+// types across the process boundary (the extension writes a file, the
+// orchestrator reads it).
 //
 // Deliberately NOT validated here: `end_line >= line`. That's an anchoring
 // concern, not a shape concern — anchorFindings() (see anchor.ts) decides
@@ -46,7 +46,8 @@ const reviewFindingsSchema = z
     findings: z.array(findingSchema),
     /** Overall review summary (markdown). */
     summary: z.string(),
-    /** Advisory only — Magpie always posts as COMMENT regardless (see PLAN.md). */
+    /** Advisory only — Magpie always posts as COMMENT regardless (see
+     *  ARCHITECTURE.md's "Findings and publishing" section). */
     verdict: z.enum(["approve", "comment"]),
   })
   .strict();

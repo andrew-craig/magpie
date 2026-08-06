@@ -1,11 +1,11 @@
 // Best-effort orphan-container/process/scratch-dir cleanup for the magpie
-// orchestrator (M3-D containers; M8-C5 extends this to the micro-VM
-// substrate — task_df53).
+// orchestrator, covering both the crun-floor container tier and the
+// micro-VM substrate.
 //
 // Runtime-neutral: the container reap uses the same `config.container.dockerBin`
 // seam the launcher uses, and the four verbs it needs — `version`,
 // `ps -aq --filter name=magpie-`, `kill`, `rm -f` — are byte-identical under
-// rootless podman (the M8-B2 default) and docker, so the docker→podman port
+// rootless podman (the default) and docker, so the docker→podman port
 // needs NO change here (empirically confirmed against podman 4.3.1).
 //
 // Every review job's container is normally removed by `docker run --rm`
@@ -24,11 +24,10 @@
 // no quoting/injection surface at all. Instead it's two plain `execFile`
 // calls — list, then (if the list is non-empty) remove — composed in TS.
 //
-// M8-C5 ORPHAN-POPULATION AUDIT (task_df53) — what changed under the
-// micro-VM tier and what didn't, verified against the actual code (the task
-// brief that seeded this work was written under a stale "podman+krun OCI
-// runtime" plan; the real substrate is the direct-libkrun launcher,
-// rust/magpie-microvm-launcher, task_39ff):
+// ORPHAN-POPULATION AUDIT — what differs under the micro-VM tier vs. the
+// crun tier, verified against the actual code. The real substrate is the
+// direct-libkrun launcher, rust/magpie-microvm-launcher (not a
+// podman+krun OCI runtime):
 //
 //   - NO separate virtiofsd daemon exists. The launcher attaches `/work`/
 //     `/out` via `krun_add_virtiofs3`, an in-process libkrun FFI call (see
@@ -65,7 +64,7 @@
 //
 // GATEWAY VIRTUAL KEYS — deliberately NOT reaped here. See
 // `cleanupOrphanLauncherProcesses`'s doc comment for the full design-fork
-// writeup (task_df53 §4): the short version is that the gateway is a
+// writeup: the short version is that the gateway is a
 // separate long-running process whose in-memory key/socket state is
 // unaffected by THIS process crashing, killing the orphaned launcher above
 // already removes the only thing that could ever spend an orphaned key, and
@@ -152,7 +151,7 @@ export async function cleanupOrphanContainers(
   }
 }
 
-// --- Micro-VM tier: orphaned launcher process reap (M8-C5) -----------------
+// --- Micro-VM tier: orphaned launcher process reap --------------------------
 
 /** One row of `ps -eo pid=,args=` output. */
 export interface ProcessInfo {
@@ -200,8 +199,8 @@ export type KillProcessFn = (pid: number, signal: NodeJS.Signals) => void;
  * Kills every orphaned `magpie-krun-launch` process left running by a
  * previous crash of this orchestrator (`kill -9`, OOM, host crash/reboot —
  * the exact same scenario {@link cleanupOrphanContainers} backstops for the
- * crun tier's containers). See this module's doc comment's "M8-C5
- * ORPHAN-POPULATION AUDIT" section for why this is the real new orphan
+ * crun tier's containers). See this module's doc comment's
+ * "ORPHAN-POPULATION AUDIT" section for why this is the real new orphan
  * surface under the micro-VM tier: `krun_start_enter` never returns once a
  * guest boots, so the launcher process IS the VM for its whole life, and
  * killing that one process is both necessary and sufficient to tear the
@@ -221,8 +220,8 @@ export type KillProcessFn = (pid: number, signal: NodeJS.Signals) => void;
  * sidesteps a host that has never installed `ps` but never uses the
  * micro-VM tier either).
  *
- * GATEWAY VIRTUAL KEYS — deliberately NOT revoked here. Design fork
- * (task_df53 §4): the admin plane exposes mint and revoke-by-id but no
+ * GATEWAY VIRTUAL KEYS — deliberately NOT revoked here. Design fork: the
+ * admin plane exposes mint and revoke-by-id but no
  * list-all/bulk-revoke endpoint, and after a `kill -9` this orchestrator has
  * no in-memory record of which job ids were live to revoke even if one
  * existed. Decision: do NOT add a new gateway management-plane endpoint for
@@ -300,7 +299,7 @@ export async function cleanupOrphanLauncherProcesses(
   }
 }
 
-// --- Orphaned per-job scratch-directory reap (M8-C5) ------------------------
+// --- Orphaned per-job scratch-directory reap ---------------------------------
 
 /** TEST SEAM: lists directory entry names directly under a path. Defaults to `fs.readdir`. */
 export type ListDirFn = (dir: string) => Promise<string[]>;

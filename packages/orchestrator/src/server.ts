@@ -6,7 +6,7 @@
 // (filtering, queueing, reviewing) subscribe to. It deliberately does NOT
 // filter, queue, or otherwise act on payloads — it is only the receiver.
 //
-// Security note (see PLAN.md threat model / CLAUDE.md capability separation):
+// Security note (see ARCHITECTURE.md threat model / CLAUDE.md capability separation):
 // signature verification MUST happen before any payload parsing or handler
 // dispatch. We delegate that to `@octokit/webhooks`, which reads the RAW
 // request body and performs a constant-time comparison of the
@@ -17,7 +17,7 @@
 // `createNodeMiddleware` directly on a `node:http` server and never place a
 // JSON body parser in front of it.
 //
-// M8-D2 (task_92d7) note on `/healthz`'s tier field: the CTO's hard
+// Note on `/healthz`'s tier field: the CTO's hard
 // constraint is that the ACTIVE ISOLATION TIER is operator-facing
 // information ONLY — a prospective attacker crafting a malicious PR must
 // never be able to learn, pre-submission, whether the target runs the
@@ -28,8 +28,8 @@
 // whatever address `config.server.host` binds (loopback/private network per
 // the deployment model — see DISTRIBUTION.md), is meant for the operator's
 // own monitoring/`curl`, and is never shown to a PR author or embedded in
-// GitHub in any form. Surfacing the tier there is exactly what task_92d7
-// asks for ("operator logs and /healthz, never the PR").
+// GitHub in any form. Surfacing the tier there is exactly the
+// "operator logs and /healthz, never the PR" split this design requires.
 
 import * as http from "node:http";
 import {
@@ -64,7 +64,7 @@ export type OnPullRequest = (event: PullRequestEvent) => void;
  * A verified `issue_comment` webhook delivery, exactly as surfaced by
  * `@octokit/webhooks`. Only deliveries whose signature verified against the
  * configured webhook secret are ever emitted with this type. Fires for
- * comments on both issues and PRs — comment-command.ts (M6-A) is responsible
+ * comments on both issues and PRs — comment-command.ts is responsible
  * for filtering down to PR comments carrying the `@magpie review` command.
  */
 export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">;
@@ -160,7 +160,7 @@ export interface WebhookServer {
  * Routes:
  *  - `POST {WEBHOOK_PATH}`  — GitHub webhook sink (signature-verified).
  *  - `GET  {HEALTHZ_PATH}`  — liveness probe, always `200`. Unauthenticated
- *    and unconditionally `200` DELIBERATELY (M8-D2 / task_92d7) — this is a
+ *    and unconditionally `200` DELIBERATELY — this is a
  *    liveness probe, not a health gate: a degraded isolation tier is still a
  *    running, job-processing service (see tier-ladder.ts — a degradation
  *    that shouldn't even start already fails closed at startup via
@@ -183,7 +183,7 @@ export interface WebhookServer {
  *                     at startup, not re-probed per request — see
  *                     tier-ladder.ts's module doc comment).
  * @param onIssueComment Seam invoked with every verified `issue_comment`
- *                     event (M6-A, comment-command.ts's `@magpie review`
+ *                     event (comment-command.ts's `@magpie review`
  *                     trigger). Optional and defaults to a no-op so existing
  *                     callers/tests that only care about `pull_request` need
  *                     no change.
@@ -204,7 +204,7 @@ export function createWebhookServer(
     onPullRequest(event);
   });
 
-  // Re-emit verified issue_comment deliveries onto the caller's seam (M6-A).
+  // Re-emit verified issue_comment deliveries onto the caller's seam.
   // Fires for comments on both issues and PRs; comment-command.ts is
   // responsible for filtering down to PR comments carrying the command.
   webhooks.on("issue_comment", (event) => {
@@ -223,7 +223,7 @@ export function createWebhookServer(
 
   const server = http.createServer((req, res) => {
     // Liveness probe: answered directly, never touches the verifier. Surfaces
-    // the active isolation tier + probe evidence (M8-D2 / task_92d7) for
+    // the active isolation tier + probe evidence for
     // operator monitoring ONLY — see this module's doc comment and
     // HealthzTierSnapshot's doc comment for why this is deliberately a
     // narrow projection, and why `/healthz` is a categorically different,

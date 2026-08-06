@@ -113,4 +113,4 @@ matters). Pick based on what you already operate:
 | An existing Tailscale/ngrok setup, or quick evaluation | Option 3 |
 
 See also: `INSTALL.md` (host service install), `docs/cloudflared.md`
-(Cloudflare Tunnel runbook), `DISTRIBUTION.md` §3.3 (design rationale).
+(Cloudflare Tunnel runbook), `DISTRIBUTION.md` §2.3 (design rationale).

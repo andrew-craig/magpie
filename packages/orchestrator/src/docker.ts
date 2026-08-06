@@ -1,8 +1,8 @@
 // Docker preflight check for the magpie orchestrator.
 //
-// Milestone 3 containerizes each review job as an ephemeral `docker run`
-// (see PLAN.md §4; the runner itself is task_4ed4/M3-C, not this module).
-// Rather than discover a missing/broken docker installation only when the
+// Each review job runs as an ephemeral `docker run` (the runner itself is
+// reviewer.ts, not this module). Rather than discover a missing/broken
+// docker installation only when the
 // first review job tries to use it — failing every job thereafter with the
 // same root cause — this module runs one `<docker_bin> version` invocation
 // once at startup and fails fast with a clear, actionable error (mirroring
@@ -12,8 +12,8 @@
 // rather than accepting webhooks it can never successfully review.
 //
 // This module does NOT build or run the `docker run` invocation itself, and
-// does not know anything about `docker run` flags/mounts — that's M3-C
-// (reviewer.ts). It only answers "is docker usable right now?".
+// does not know anything about `docker run` flags/mounts — that's
+// reviewer.ts. It only answers "is docker usable right now?".
 
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -76,17 +76,17 @@ function formatError(dockerBin: string, err: unknown): string {
   if (code === "ENOENT") {
     return (
       `container-runtime preflight failed: "${dockerBin}" was not found on PATH. Magpie ` +
-      `containerizes every review job (see PLAN.md Milestone 3) and refuses to ` +
+      `containerizes every review job and refuses to ` +
       `start without a working container runtime CLI. The default runtime is rootless ` +
-      `podman (M8-B2); install podman (or docker), or set [container] docker_bin in ` +
+      `podman; install podman (or docker), or set [container] docker_bin in ` +
       `config.toml to the runtime's full path.`
     );
   }
   const reason = err instanceof Error ? err.message : String(err);
   return (
     `container-runtime preflight failed: "${dockerBin} version" did not succeed (${reason}). ` +
-    `For rootless podman (the M8-B2 default) check the service user's subuid/subgid + linger ` +
+    `For rootless podman (the default) check the service user's subuid/subgid + linger ` +
     `provisioning; for docker check the daemon is running and this user can reach it. Magpie ` +
-    `refuses to start without a working container runtime (see PLAN.md Milestone 3).`
+    `refuses to start without a working container runtime.`
   );
 }

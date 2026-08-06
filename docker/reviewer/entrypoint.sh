@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# magpie-reviewer entrypoint (M3-A; gateway wiring added M4-C; fail-closed
-# startup confinement assertions added M4-E; Design D `--network none` +
-# in-container forwarder added M7-1 -- see DISTRIBUTION.md §2).
+# magpie-reviewer entrypoint: fail-closed startup confinement assertions,
+# gateway relay wiring, and privilege drop, run before Pi ever sees the PR
+# diff (Design D `--network none` + in-container forwarder -- see
+# DISTRIBUTION.md §1).
 #
 # Runs Pi headless over the mounted /work worktree using the extension +
 # system prompt baked into the image at /opt/magpie (see
 # docker/reviewer/Dockerfile). The `pi` FLAG SET (the `exec pi ...` invocation
 # below) MUST mirror packages/orchestrator/src/reviewer.ts's `pi` invocation
 # EXACTLY (flag-for-flag, same order) -- if reviewer.ts's args array changes,
-# update this script to match and vice versa. As of M3-A, reviewer.ts spawns:
+# update this script to match and vice versa. reviewer.ts spawns:
 #
 #   pi -p --mode json --no-session --tools read,grep,find,ls,report_findings
 #      --extension <review-extension> --no-extensions --provider openrouter
@@ -20,9 +21,8 @@ set -euo pipefail
 # (see reviewer.ts's buildPromptPayload) -- this container must be run
 # attached (`docker run -i`) so that reaches Pi.
 #
-# Runtime inputs (a container inherits NO ambient host env -- unlike the M1/M2
-# host subprocess, which inherited process.env and had MAGPIE_* stripped from
-# it -- so M3-C/M4-C pass ONLY what's needed, explicitly):
+# Runtime inputs (a container inherits NO ambient host env, so everything
+# needed is passed explicitly):
 #
 #   `--provider <name> --model <id>` etc. as trailing ARGV. The baked flags
 #     below are the fixed part of the invocation; everything the caller varies
@@ -34,7 +34,7 @@ set -euo pipefail
 #     credential; pi-ai reads it directly from the environment. Required --
 #     the one input that legitimately comes via env because it's a secret, so
 #     we fail-fast if it's missing (`:?` below) rather than letting Pi fail
-#     later with a confusing provider-auth error. As of M4-C this is ALWAYS a
+#     later with a confusing provider-auth error. This is always a
 #     short-lived, budget-capped GATEWAY VIRTUAL key minted per job
 #     (packages/gateway, via packages/orchestrator/src/gateway.ts) -- the
 #     orchestrator no longer holds a real, long-lived OpenRouter key to inject
@@ -42,19 +42,18 @@ set -euo pipefail
 #     logs/stdout/stderr here.
 #   OPENAI_BASE_URL (env, `-e OPENAI_BASE_URL=<url>`, inline since it's not a
 #     secret): the container-facing PROXY/data plane
-#     (config.gateway.containerBaseUrl). As of M7-1 (Design D) this is ALWAYS
+#     (config.gateway.containerBaseUrl). This is always
 #     `http://127.0.0.1:4000/v1` -- an address INSIDE this container's own
 #     `--network none` network namespace, served by the in-container
 #     forwarder started below, which relays to the gateway's real unix socket
-#     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP any
-#     more (the pre-M7-1 magpie-net design pointed this at a fixed bridge
-#     address instead; that apparatus is deleted -- see DISTRIBUTION.md §2.4).
-#     Required as of M4-C -- there is no direct-to-OpenRouter fallback any
-#     more. IMPORTANT: Pi 0.80.3 does NOT read this env var itself (verified
-#     empirically against a stub HTTP server during M4-C: a plain
-#     OPENAI_BASE_URL was silently ignored and Pi's request still went to the
-#     real api.openrouter.ai). The mechanism that actually redirects Pi's
-#     OpenRouter traffic is a `~/.pi/agent/models.json` provider `baseUrl`
+#     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP --
+#     the earlier magpie-net design that pointed this at a fixed bridge
+#     address instead has been deleted (see DISTRIBUTION.md §1.6). Required --
+#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 0.80.3 does NOT
+#     read this env var itself (verified empirically against a stub HTTP
+#     server: a plain OPENAI_BASE_URL was silently ignored and Pi's request
+#     still went to the real api.openrouter.ai). The mechanism that actually
+#     redirects Pi's OpenRouter traffic is a `~/.pi/agent/models.json` provider `baseUrl`
 #     override (see Pi's docs/models.md, "Overriding Built-in Providers") --
 #     so THIS SCRIPT translates OPENAI_BASE_URL into that file below, before
 #     exec'ing `pi`. `pi`'s own invocation is otherwise unaffected: the
@@ -68,10 +67,10 @@ set -euo pipefail
 # so the baked-in report_findings extension already sees it -- the caller
 # never passes it.
 #
-# ...UNDER THE CRUN TIER. M8-E7 (task_80a4): that ENV only reaches the process
-# because `podman run` applies the image's OCI config. A micro-VM guest boots a
-# bare exported rootfs with NO image config, so this script RE-DECLARES the
-# same constant for that tier further down (next to M8-E4's PATH export). Left
+# ...UNDER THE CRUN TIER, that is. That ENV only reaches the process because
+# `podman run` applies the image's OCI config. A micro-VM guest boots a bare
+# exported rootfs with NO image config, so this script RE-DECLARES the same
+# constant for that tier further down (next to the micro-VM PATH export). Left
 # unset there, the extension silently fell back to ./magpie-findings.json under
 # the READ-ONLY /work mount and every micro-VM review failed as "pi did not
 # call report_findings" despite Pi having called it.
@@ -80,13 +79,13 @@ set -euo pipefail
 : "${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set (-e OPENAI_BASE_URL=<gateway proxy URL>) -- see docker/reviewer/README.md}"
 # Non-secret operator config choice (see reviewer.ts's buildReviewDockerArgs
 # and packages/orchestrator/src/config.ts's container.require_memory_limit),
-# always set by reviewer.ts as of bug_df2d -- default to the fail-closed
+# always set by reviewer.ts -- default to the fail-closed
 # value if somehow unset (e.g. an older orchestrator, or this image run by
 # hand) so an *absent* env var can never accidentally mean "run unconfined".
 : "${MAGPIE_REQUIRE_MEMORY_LIMIT:=true}"
 
 # ---------------------------------------------------------------------------
-# M8-E3 (task_2541): early, cheap tier detection.
+# Early, cheap tier detection.
 #
 # MUST run before the memory-ceiling assertion just below, because that
 # check's correct MEANING differs by tier (see that section's comment for
@@ -97,7 +96,7 @@ set -euo pipefail
 # a structurally different (and equally valid) enforcement mechanism. Without
 # knowing the tier first, the memory check can't tell "cgroup absent because
 # this is a micro-VM guest" from "cgroup absent because a crun-tier host
-# misconfigured cgroups" (the real bug_df2d scenario it exists to catch).
+# misconfigured cgroups" (the scenario it exists to catch).
 #
 # This is the SAME `/dev/vsock` probe the relay-selection block further down
 # this script uses (a plain char-device present iff the launcher attached a
@@ -112,7 +111,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# M8-E4 (task_4c37): give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
+# Give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
 #
 # The crun tier inherits PATH for free from the image's OCI config: the
 # node:22.23.1-slim base sets it, `docker/reviewer/Dockerfile` symlinks
@@ -125,9 +124,9 @@ fi
 # config.rs are TEST FIXTURES, not runtime defaults). So the guest has
 # historically booted with PATH genuinely unset.
 #
-# WHY THAT STAYED HIDDEN until the M8-E2/E3 fixes cleared the earlier
-# blockers, and WHY `export` (not a value default) is the operative fix --
-# this is subtle, and getting it wrong yields a no-op:
+# WHY THIS STAYED HIDDEN until other startup issues were fixed first, and WHY
+# `export` (not a value default) is the operative fix -- this is subtle, and
+# getting it wrong yields a no-op:
 #
 #   When PATH is absent from its environment, `bash` does NOT run without one.
 #   It assigns its own compiled-in default to the PATH SHELL VARIABLE at
@@ -145,8 +144,8 @@ fi
 #
 #   Consequently a `PATH="${PATH:-...}"` style default would be DEAD CODE
 #   here (bash already made PATH non-empty); it is the `export` that actually
-#   fixes anything. `docker/reviewer/entrypoint-tier-memory.test.sh`'s
-#   task_4c37 cases pin exactly this, running the script with PATH genuinely
+#   fixes anything. `docker/reviewer/entrypoint-tier-memory.test.sh`'s PATH
+#   cases below pin exactly this, running the script with PATH genuinely
 #   absent from the environment.
 #
 # Set UNCONDITIONALLY (within the micro-VM branch) to an explicit literal
@@ -164,7 +163,7 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# M8-E7 (task_80a4): re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
+# Re-declare MAGPIE_FINDINGS_PATH -- MICRO-VM TIER ONLY.
 #
 # EXACTLY the same root cause as the PATH gap immediately above, in a second
 # variable: `docker/reviewer/Dockerfile` sets
@@ -180,14 +179,15 @@ fi
 # READ-ONLY PR mount) instead of the mounted output dir. The orchestrator then
 # found no `/out/findings.json` and reported the generic "pi did not call
 # report_findings" -- even though Pi had run and called the tool. Observed
-# live on 2026-07-31 (scratch PR #66), and only visible at all because M8-E6
-# (task_e5c4) had just started surfacing guest stderr on zero-exit failures:
+# live on 2026-07-31 (scratch PR #66), and only visible at all once guest
+# stderr started being surfaced on zero-exit failures:
 #
 #   [magpie/review-extension] MAGPIE_FINDINGS_PATH is not set; falling back to
 #   ./magpie-findings.json in the current working directory.
 #
 # Fixed HERE rather than in reviewer.ts's `--env` map, for the same reason
-# M8-E4 chose this file, and for one more specific to this variable: the
+# the PATH fix above lives here, and for one more specific to this variable:
+# the
 # Dockerfile documents the output path as "part of the image contract, not
 # per-job config", explicitly so the orchestrator does NOT have to pass it.
 # Re-declaring the image's own constant inside the image keeps that contract
@@ -205,7 +205,7 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# bug_df2d: fail-closed in-container memory-ceiling assertion. reviewer.ts
+# Fail-closed in-container memory-ceiling assertion. reviewer.ts
 # passes `--memory=<config.container.memory>` on every `docker/podman run` of
 # this image -- the hard cap bounding how much host RAM a single, possibly
 # prompt-injected review job can consume. That flag only does anything if the
@@ -240,7 +240,7 @@ fi
 # the host ROOT cgroup's memory.max ("max") and false-positive; don't add that
 # flag without revisiting this check.
 #
-# M8-E3 (task_2541): this whole cgroup-based check is CRUN-TIER ONLY --
+# This whole cgroup-based check is CRUN-TIER ONLY --
 # MAGPIE_IS_MICROVM was decided above, before this block, precisely so this
 # branch can be taken. The micro-VM tier's equivalent verification (a
 # positive check that libkrun's --ram-mib ceiling actually applied, since
@@ -249,17 +249,16 @@ fi
 # tolerance.
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   # ---------------------------------------------------------------------------
-  # M8-E3 (task_2541): micro-VM tier memory-ceiling verification.
+  # Micro-VM tier memory-ceiling verification.
   #
   # RAM here is enforced by libkrun's `--ram-mib` at the VMM level
   # (rust/magpie-microvm-launcher's krun_set_vm_config) -- the guest kernel
   # boots knowing only about that much memory in the first place, so there is
   # no cgroup memory.max to read inside the guest at all (a structural fact
-  # about this tier, not a misconfiguration -- see task_2541's background:
-  # this is exactly what made the crun-tier check above false-fail here,
-  # forcing operators to globally set require_memory_limit=false and thereby
-  # ALSO weaken the crun tier's real protection, which is the bug this task
-  # fixes).
+  # about this tier, not a misconfiguration: without this distinction, the
+  # crun-tier check above would false-fail here, forcing operators to
+  # globally set require_memory_limit=false and thereby ALSO weaken the crun
+  # tier's real protection).
   #
   # So instead of skipping verification, this proves SOME ceiling was really
   # applied: reviewer.ts injects the exact ram-mib value the launcher was
@@ -329,50 +328,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# M4-E: fail-closed startup confinement assertions. PLAN.md milestone 4's
+# Fail-closed startup confinement assertions. The threat model's
 # explicit acceptance check requires this script to verify its OWN
 # confinement before `exec pi` below, and abort non-zero (surfaced by
 # reviewer.ts/pipeline.ts as a review-failure comment, never a silent hang)
 # if either invariant is violated. Both checks are cheap and bounded so a
 # healthy run pays only a few seconds of extra startup latency.
 #
-# RECONCILING the two checks against how the M4-E task was originally
-# written (see chalk task_1ffd's description) vs. what M4-C actually built:
+# The two invariants checked below:
 #
-#   1. "no long-lived provider key in the container env" -- the task text
-#      says to fail if OPENROUTER_API_KEY (or any real-key variable) is
-#      PRESENT. That predates M4-C: as of M4-C this container legitimately
-#      ALWAYS holds OPENROUTER_API_KEY, because it's how Pi's OpenRouter
-#      provider resolves its credential (see the doc comment above) -- the
-#      var can no longer be "absent" as the bar for safety, the `:?` above
-#      already requires it to be set. What actually changed under M4 is
-#      *what kind of value* is allowed to be in it: a short-lived,
-#      budget-capped GATEWAY VIRTUAL key (packages/gateway/src/keystore.ts's
-#      `KeyStore.mint`), never a real, long-lived OpenRouter key. Virtual
-#      keys are minted with a fixed, unambiguous prefix (`KEY_PREFIX =
-#      "sk-magpie-"` in that file); real OpenRouter keys look like
-#      `sk-or-v1-...` and are never supposed to reach this container at all
-#      once the gateway is wired up. So the as-built, meaningful version of
-#      this check is: OPENROUTER_API_KEY must look like a magpie virtual
-#      key, not merely be non-empty. Keep this prefix in sync with
+#   1. "no long-lived provider key in the container env" -- this container
+#      legitimately ALWAYS holds OPENROUTER_API_KEY, because it's how Pi's
+#      OpenRouter provider resolves its credential (see the doc comment
+#      above; the `:?` above already requires it to be set), so the bar for
+#      safety isn't "absent" -- it's *what kind of value* is allowed to be in
+#      it: a short-lived, budget-capped GATEWAY VIRTUAL key
+#      (packages/gateway/src/keystore.ts's `KeyStore.mint`), never a real,
+#      long-lived OpenRouter key. Virtual keys are minted with a fixed,
+#      unambiguous prefix (`KEY_PREFIX = "sk-magpie-"` in that file); real
+#      OpenRouter keys look like `sk-or-v1-...` and are never supposed to
+#      reach this container at all once the gateway is wired up. So the
+#      check is: OPENROUTER_API_KEY must look like a magpie virtual key, not
+#      merely be non-empty. Keep this prefix in sync with
 #      packages/gateway/src/keystore.ts's KEY_PREFIX if that ever changes.
-#   2. "no host but the gateway is reachable" is unchanged from the task
-#      text (now sharpened by `--network none`, M7-1) and is implemented as
-#      a set of cheap reachability probes below.
+#   2. "no host but the gateway is reachable" -- sharpened by `--network
+#      none` -- is implemented as a set of cheap reachability probes below.
 #
-# M8-C4 (task_3b48) extends check 2 with an interface/route-table
-# enumeration (defense-in-depth, catches a plainly wrong launch) AND an
-# explicit micro-VM-tier vsock-channel/port assertion -- see "no network by
-# construction" as a THREE-layer invariant: this script's checks are Layer 3
-# (in-guest, fail-closed at startup); Layer 1 is
-# rust/magpie-microvm-launcher/src/krun.rs's construction-time TSI-off pin;
-# Layer 2 is packages/orchestrator/src/reviewer.ts's
-# findMicrovmNetworkTransportViolations launch-argv preflight. No single
-# layer is trusted alone -- libkrun's TSI backend can give a guest real
-# egress via syscall interception with NO virtio-net device ever attached,
-# which is exactly why the ACTIVE egress canary below (not just the
-# interface/route check) is retained as the thing that actually proves no
-# hijacked path exists.
+# Check 2 is extended with an interface/route-table enumeration (defense-in-
+# depth, catches a plainly wrong launch) AND an explicit micro-VM-tier
+# vsock-channel/port assertion -- "no network by construction" is a THREE-
+# layer invariant: this script's checks are Layer 3 (in-guest, fail-closed at
+# startup); Layer 1 is rust/magpie-microvm-launcher/src/krun.rs's
+# construction-time TSI-off pin; Layer 2 is
+# packages/orchestrator/src/reviewer.ts's findMicrovmNetworkTransportViolations
+# launch-argv preflight. No single layer is trusted alone -- libkrun's TSI
+# backend can give a guest real egress via syscall interception with NO
+# virtio-net device ever attached, which is exactly why the ACTIVE egress
+# canary below (not just the interface/route check) is retained as the thing
+# that actually proves no hijacked path exists.
 # ---------------------------------------------------------------------------
 
 # --- 1. Virtual-key-only assertion -----------------------------------------
@@ -392,37 +385,34 @@ case "${OPENROUTER_API_KEY}" in
 esac
 
 # ---------------------------------------------------------------------------
-# M7-1 / M8-C1: start the in-container relay to the gateway. Something must
-# make `http://127.0.0.1:4000/v1` (where `OPENAI_BASE_URL`, and transitively
-# the `~/.pi/agent/models.json` baseUrl override below, points Pi -- so Pi's
-# own invocation is unaffected by any of this) real, by listening on this
+# Start the in-container relay to the gateway. Something must make
+# `http://127.0.0.1:4000/v1` (where `OPENAI_BASE_URL`, and transitively the
+# `~/.pi/agent/models.json` baseUrl override below, points Pi -- so Pi's own
+# invocation is unaffected by any of this) real, by listening on this
 # container's/guest's OWN loopback and relaying each connection out to
 # wherever the gateway's per-job socket actually is. WHICH relay applies
 # depends on how this image is being run, detected here rather than via a
 # new env var (see docker/reviewer/Dockerfile's "Relay to the gateway"
 # comment for why both binaries still ship):
 #
-#   - docker/crun, `--network none` (Design D -- DISTRIBUTION.md §2.2/§2.3,
-#     the ONLY path live in production today -- see task_2d6c's task file
-#     for the investigation confirming this): no `/dev/vsock` device, no
-#     shared filesystem with the host other than the bind-mounted
-#     `/run/gw/gw.sock` -- `forwarder.mjs` relays TCP -> that unix socket.
-#   - libkrun micro-VM guest (M8-C0/C1/C2 -- task_76d6/task_2d6c/task_b3f7,
-#     not yet wired into the orchestrator): the launcher's `krun_add_vsock`
-#     call unconditionally attaches a `/dev/vsock` character device to every
-#     guest it boots, which a plain container never has -- a reliable,
-#     zero-config signal. `magpie-vsock-client` relays TCP -> `AF_VSOCK`
-#     toward the host per-job gateway socket instead.
+#   - docker/crun, `--network none` (Design D -- DISTRIBUTION.md §1.2/§1.7):
+#     no `/dev/vsock` device, no shared filesystem with the host other than
+#     the bind-mounted `/run/gw/gw.sock` -- `forwarder.mjs` relays TCP -> that
+#     unix socket.
+#   - libkrun micro-VM guest: the launcher's `krun_add_vsock` call
+#     unconditionally attaches a `/dev/vsock` character device to every guest
+#     it boots, which a plain container never has -- a reliable, zero-config
+#     signal. `magpie-vsock-client` relays TCP -> `AF_VSOCK` toward the host
+#     per-job gateway socket instead.
 #
 # Backgrounded, then bounded-waited-for below: nothing downstream (the
 # gateway /healthz probe just below, then Pi itself) may attempt
 # 127.0.0.1:4000 before the relay is actually listening. That wait loop is
 # transport-agnostic (a plain TCP connect probe), so it needs no change for
-# whichever relay was started. Mirrors the wait loop proven in the M7-0
-# feasibility spike (spike/m7-0/spike-entrypoint.sh).
+# whichever relay was started.
 # ---------------------------------------------------------------------------
 
-# M8-C4 (task_3b48) Layer 3, single-sourced: the fixed vsock port the guest
+# Layer 3, single-sourced: the fixed vsock port the guest
 # dials under the micro-VM tier -- MUST match
 # packages/orchestrator/src/microvm-vsock.ts's MICROVM_VSOCK_PORT and
 # rust/vsock-client's own DEFAULT_VSOCK_PORT (both 1234; see that crate's
@@ -434,12 +424,12 @@ esac
 # implicit fact about a binary it doesn't control the source of.
 readonly MAGPIE_EXPECTED_VSOCK_PORT=1234
 
-# MAGPIE_IS_MICROVM was already decided (M8-E3, task_2541) via a cheap `[ -c
-# /dev/vsock ]` probe near the top of this script, ahead of the memory-
-# ceiling check above (which needs the tier to pick its verification
-# strategy) -- REUSED here, not re-derived, and further reused below (the
-# virtiofs-mount and privilege-drop steps -- M8-C3/task_39ff) so there is
-# exactly one `[ -c /dev/vsock ]` probe in the whole script.
+# MAGPIE_IS_MICROVM was already decided via a cheap `[ -c /dev/vsock ]` probe
+# near the top of this script, ahead of the memory-ceiling check above (which
+# needs the tier to pick its verification strategy) -- REUSED here, not
+# re-derived, and further reused below (the virtiofs-mount and
+# privilege-drop steps) so there is exactly one `[ -c /dev/vsock ]` probe in
+# the whole script.
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   echo "magpie-reviewer: /dev/vsock present -- starting vsock-client (127.0.0.1:4000 -> AF_VSOCK host port ${MAGPIE_EXPECTED_VSOCK_PORT})" >&2
   # `export` (not a one-shot `VAR=value cmd` prefix) so MAGPIE_VSOCK_PORT is
@@ -458,7 +448,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# M8-C3 (task_39ff): in-guest virtiofs mounts -- MICRO-VM TIER ONLY.
+# In-guest virtiofs mounts -- MICRO-VM TIER ONLY.
 #
 # Under the docker/crun tier, `/work` (read-only) and `/out` (writable) are
 # already present as bind mounts the runtime set up before this entrypoint
@@ -483,7 +473,7 @@ fi
 # is never guest-writable" invariant the crun tier gets from its `:ro` bind
 # mount.
 #
-# M8-E2 (task_76b8): this block ALSO mounts a guest-LOCAL tmpfs at /tmp,
+# This block ALSO mounts a guest-LOCAL tmpfs at /tmp,
 # mirroring the crun tier's own `--tmpfs /tmp` (see reviewer.ts's
 # buildReviewDockerArgs). Without this, `/tmp` here resolves to whatever the
 # guest's ROOT filesystem is -- served over rootless virtiofs the same way
@@ -520,7 +510,7 @@ if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
     echo "magpie-reviewer: refusing to run: failed to mount the writable /out virtiofs device (tag 'out') -- the reviewer would have nowhere to write findings.json. Aborting before Pi starts." >&2
     exit 1
   fi
-  echo "magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp; see task_76b8)" >&2
+  echo "magpie-reviewer: micro-VM tier -- mounting guest-local tmpfs at /tmp (mirrors the crun tier's --tmpfs /tmp)" >&2
   mkdir -p /tmp
   if ! mount -t tmpfs tmpfs /tmp; then
     echo "magpie-reviewer: refusing to run: failed to mount a guest-local tmpfs at /tmp -- HOME=/tmp below would remain on the virtiofs-backed root, where guest-root's remapped uid cannot chown the state Pi writes there before the privilege drop. Aborting before Pi starts." >&2
@@ -554,11 +544,11 @@ echo "magpie-reviewer: relay is up" >&2
 
 # --- 2. Network confinement assertion ---------------------------------------
 #
-# This container runs `--network none` (M7-1, Design D): it has NO network
+# This container runs `--network none` (Design D): it has NO network
 # interfaces except its own loopback -- no veth, no bridge, no route to the
 # host, to other containers, to the internet, to DNS, or to the cloud-
 # metadata IP. That is a property of the network namespace itself, not of any
-# iptables/nftables rule (see DISTRIBUTION.md §2.3), so unlike the deleted
+# iptables/nftables rule (see DISTRIBUTION.md §1.3), so unlike the deleted
 # magpie-net/setup-network.sh bridge model it does not depend on the host's
 # daemon.json, Docker version, or IPv6 settings. The canaries below therefore
 # MUST be unreachable unconditionally; this probe is a cheap belt-and-
@@ -569,15 +559,15 @@ echo "magpie-reviewer: relay is up" >&2
 # The gateway reachability probe, in contrast, now transits the forwarder
 # started above -> the mounted `/run/gw/gw.sock` -> the real gateway process,
 # so it doubles as confirmation that BOTH the forwarder came up AND the
-# gateway's per-job socket is present and bound (DISTRIBUTION.md §2.6 point
+# gateway's per-job socket is present and bound (DISTRIBUTION.md §1.6 point
 # 3's "the gateway socket is present" half of the fail-closed assertion).
 #
 # Implementation notes:
 #   - Uses bash's built-in `/dev/tcp/<host>/<port>` pseudo-device for a raw
-#     TCP connect test -- no curl/wget/nc needed, so no new image
-#     dependency (see docker/reviewer/Dockerfile; deliberately unchanged by
-#     M4-E). `timeout` (coreutils, already in the base image) bounds each
-#     probe so a filtered/blackholed connection attempt can't hang the job.
+#     TCP connect test -- no curl/wget/nc needed, so no new image dependency
+#     (see docker/reviewer/Dockerfile). `timeout` (coreutils, already in the
+#     base image) bounds each probe so a filtered/blackholed connection
+#     attempt can't hang the job.
 #   - `/dev/tcp` name resolution failures (expected for the DNS-based canary
 #     below, since `--network none` has no resolver -- no interfaces at all,
 #     let alone a DNS one) exit non-zero from the inner bash, same as a
@@ -621,7 +611,7 @@ magpie_http_get_200() {
   esac
 }
 
-# --- 2a. Interface / route-table assertion (M8-C4, task_3b48) --------------
+# --- 2a. Interface / route-table assertion ---------------------------------
 #
 # Defense-in-depth AHEAD OF the active-egress canaries below, not a
 # replacement for them. `--network none` (crun tier) and TSI-off (micro-VM
@@ -644,7 +634,7 @@ magpie_http_get_200() {
 # micro-VM guest -- TSI on or off -- has a `dummy0` interface in addition to
 # `lo` (also documented, independently, by
 # rust/magpie-microvm-launcher/smoke-test.sh's own "dummy0 is administratively
-# down" assertion). task_3b48's own negative-test harness
+# down" assertion). A negative-test harness
 # (spike/m8-c4/run-negative-test.sh) proved the two states are DISTINGUISHABLE
 # by operstate, not by mere presence:
 #   - TSI OFF  (production posture): dummy0 operstate=`down`, carrier absent,
@@ -727,7 +717,7 @@ for canary in "${MAGPIE_NETWORK_CANARIES[@]}"; do
 done
 
 # The gateway itself MUST be reachable -- derive host/port from
-# OPENAI_BASE_URL (config.gateway.containerBaseUrl, as of M7-1 always
+# OPENAI_BASE_URL (config.gateway.containerBaseUrl, always
 # "http://127.0.0.1:4000/v1" -- this container's OWN loopback, served by the
 # forwarder started above) rather than hardcoding a second copy of the
 # address here, so this check can never silently drift from what Pi is
@@ -753,8 +743,8 @@ if ! magpie_http_get_200 "${magpie_gateway_host}" "${magpie_gateway_port}" "/hea
 fi
 
 # --- 3. Micro-VM tier: explicit allowed-egress-channel assertion ------------
-# (M8-C4, task_3b48 Layer 3's "assert the allowed port explicitly"
-# requirement.) Belt-and-suspenders alongside magpie-vsock-client's own
+# Layer 3's "assert the allowed port explicitly" requirement. Belt-and-
+# suspenders alongside magpie-vsock-client's own
 # `/dev/vsock` presence check (rust/vsock-client's
 # `assert_char_device_present`, which already ran before this script's wait
 # loop above ever observed the relay as up): re-assert, from THIS script's
@@ -786,8 +776,8 @@ echo "magpie-reviewer: network confinement verified -- no non-lo interface, empt
 # this container as an arbitrary HOST `--user <uid>:<gid>`, and the base image
 # (node:22-slim) happens to bake in its own `node` account at uid 1000 -- so
 # whenever the host uid this runs as collides with 1000 (a common first-
-# non-root-user uid on many Linux distros; confirmed empirically during M4-C
-# verification), the container runtime resolves THAT passwd entry and sets
+# non-root-user uid on many Linux distros; confirmed empirically), the
+# container runtime resolves THAT passwd entry and sets
 # HOME=/home/node for us even though no `-e HOME` was ever passed -- and
 # `/home/node` is on the read-only root filesystem, so writing there fails.
 # A plain `: "${HOME:=/tmp}"` (default-if-unset) does NOT fix this, because
@@ -838,7 +828,7 @@ set -- \
   "$@"
 
 # ---------------------------------------------------------------------------
-# M8-C3 (task_39ff): guest privilege drop -- MICRO-VM TIER ONLY.
+# Guest privilege drop -- MICRO-VM TIER ONLY.
 #
 # CRUN TIER: reviewer.ts's `docker run --user <uid>:<gid>` already runs this
 # whole entrypoint (and therefore Pi) as an unprivileged host uid -- nothing
@@ -851,8 +841,8 @@ set -- \
 # point, runs this script) as root (fully documented, source + empirically,
 # in rust/magpie-microvm-launcher/src/krun.rs's module doc comment). So the
 # equivalent of `--user` has to happen HERE, image-side: re-exec Pi as an
-# unprivileged uid, matching the crun tier's non-root posture. As of M8-E5
-# (task_a749) that uid is the one the ORCHESTRATOR passes in
+# unprivileged uid, matching the crun tier's non-root posture. That uid is
+# the one the ORCHESTRATOR passes in
 # (MAGPIE_MICROVM_REVIEWER_UID/_GID) -- the same host uid the crun tier's
 # `--user` uses -- NOT the image's baked-in `reviewer` account (uid 10001,
 # docker/reviewer/Dockerfile's groupadd/useradd, which the crun tier still
@@ -877,16 +867,16 @@ set -- \
 # key reaches Pi only via the OPENROUTER_API_KEY env var, which survives the
 # setpriv exec since setpriv does not scrub the environment).
 #
-# M8-E2 (task_76b8): this chown only works at all under the micro-VM tier
-# because HOME=/tmp is, by this point, the guest-local tmpfs mounted earlier
-# in this script (see the virtiofs-mount block above) rather than the
-# virtiofs-backed guest root -- guest-root cannot chown paths living on
-# rootless virtiofs (its uid is remapped back to the unprivileged HOST user
-# by the rootless krun setup), which is exactly the EPERM this task fixes.
+# This chown only works at all under the micro-VM tier because HOME=/tmp is,
+# by this point, the guest-local tmpfs mounted earlier in this script (see
+# the virtiofs-mount block above) rather than the virtiofs-backed guest root
+# -- guest-root cannot chown paths living on rootless virtiofs (its uid is
+# remapped back to the unprivileged HOST user by the rootless krun setup),
+# which is exactly the EPERM that mounting a local tmpfs here avoids.
 #
-# M8-E5 (task_a749): the uid/gid dropped TO is now supplied by the
-# orchestrator (MAGPIE_MICROVM_REVIEWER_UID/_GID -- see reviewer.ts's
-# buildMicrovmLaunchArgs `env` map) instead of being the image's baked-in
+# The uid/gid dropped TO is supplied by the orchestrator
+# (MAGPIE_MICROVM_REVIEWER_UID/_GID -- see reviewer.ts's
+# buildMicrovmLaunchArgs `env` map) rather than being the image's baked-in
 # `reviewer` account (uid 10001, still present in the Dockerfile and still
 # used by the crun tier's own non-root posture). It has to be, because of
 # who owns the OTHER side of the /out virtiofs:
@@ -904,10 +894,10 @@ set -- \
 # Fixing it by widening /out's mode host-side, or by chowning /out here, were
 # both rejected: the first loosens permissions on a host directory to paper
 # over an identity mismatch, and the second is the same rootless-virtiofs
-# chown that already produced M8-E2's EPERM (guest-root's uid is remapped back
-# to the unprivileged host user for virtiofs ownership purposes -- see the
-# tmpfs block above). Aligning the IDENTITY is the fix that removes the
-# mismatch instead of masking it.
+# chown that already produces an EPERM (guest-root's uid is remapped back to
+# the unprivileged host user for virtiofs ownership purposes -- see the tmpfs
+# block above). Aligning the IDENTITY is the fix that removes the mismatch
+# instead of masking it.
 #
 # POSTURE IS PRESERVED, AND NOW UNIFIED: this is still a drop from guest-root
 # to an unprivileged, non-root uid before Pi ever runs -- the same drop, to the
@@ -927,13 +917,13 @@ set -- \
 if [ "${MAGPIE_IS_MICROVM}" = "1" ]; then
   case "${MAGPIE_MICROVM_REVIEWER_UID:-}" in
     ''|*[!0-9]*)
-      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_UID:-unset}) -- cannot determine the unprivileged uid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_UID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_UID:-unset}) -- cannot determine the unprivileged uid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs). Aborting before Pi starts." >&2
       exit 1
       ;;
   esac
   case "${MAGPIE_MICROVM_REVIEWER_GID:-}" in
     ''|*[!0-9]*)
-      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_GID:-unset}) -- cannot determine the unprivileged gid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs -- see task_a749). Aborting before Pi starts." >&2
+      echo "magpie-reviewer: refusing to run: MAGPIE_MICROVM_REVIEWER_GID is unset or non-numeric (${MAGPIE_MICROVM_REVIEWER_GID:-unset}) -- cannot determine the unprivileged gid to drop to before running Pi, and must not fall back to the baked-in 10001 account (it cannot write the /out virtiofs). Aborting before Pi starts." >&2
       exit 1
       ;;
   esac
@@ -948,7 +938,7 @@ fi
 
 # exec: replace this script as PID 1 so Pi receives SIGTERM/SIGKILL directly
 # from `docker stop`/`docker kill` (the container-lifecycle timeout/abort
-# path -- see epic_a580) instead of a shell swallowing the signal. "$@" is
+# path) instead of a shell swallowing the signal. "$@" is
 # the baked review flags followed by the caller's trailing --provider/--model
 # (see the `set --` above). (Crun tier only -- the micro-VM tier exec'd above.)
 exec pi "$@"

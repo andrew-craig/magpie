@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# build-reviewer-image.sh — build the magpie-reviewer container image (M3-A).
+# build-reviewer-image.sh — build the magpie-reviewer container image.
 #
-# NOTE (M7-2): the reviewer image is now PUBLISHED to GHCR
+# NOTE: the reviewer image is PUBLISHED to GHCR
 # (ghcr.io/andrew-craig/magpie/reviewer) multi-arch + cosign-signed by release
 # CI (.github/workflows/release-reviewer.yml on `reviewer-v*` tags). This script
 # is for LOCAL DEVELOPMENT builds only; production pulls the published image.
@@ -21,8 +21,7 @@
 # Env vars (all optional):
 #   MAGPIE_REVIEWER_IMAGE_TAG   Image tag to build. Default: magpie-reviewer:0.1.0
 #                               (this default MUST match the `container.image`
-#                               default in packages/orchestrator/src/config.ts
-#                               -- see epic_a580 / task_037b).
+#                               default in packages/orchestrator/src/config.ts).
 #   MAGPIE_REVIEWER_TAG_LATEST  Set to "0" to skip also tagging :latest.
 #                               Default: "1" (also tag :latest).
 #   DOCKER_BIN                  docker CLI to use. Default: docker.

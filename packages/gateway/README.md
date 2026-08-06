@@ -1,20 +1,18 @@
 # @magpie/gateway
 
-Host-side, credential-injecting LLM gateway for magpie (Milestone 4, `task_eb22`/M4-A — see
-`PLAN.md` §5). This is the **only** place the real OpenRouter API key lives once M4 is fully
-wired up: the review container and the orchestrator never see it, only a short-lived,
-budget-capped **virtual key** minted per job.
+Host-side, credential-injecting LLM gateway for magpie. This is the **only** place the real
+OpenRouter API key lives: the review container and the orchestrator never see it, only a
+short-lived, budget-capped **virtual key** minted per job.
 
-**Implementation note:** `PLAN.md` §5 originally specified LiteLLM. The CTO decided against
-LiteLLM and against running Postgres/any database for this; this package is a small, purpose-
-built TypeScript proxy instead — OpenRouter-only, in-memory key store, no DB. See `PLAN.md` §5's
-deviation note for the full rationale. This package intentionally mirrors
+**Implementation note:** this package is a small, purpose-built TypeScript proxy — OpenRouter-
+only, in-memory key store, no DB — rather than an existing gateway like LiteLLM; see
+[HISTORY.md](../../HISTORY.md) for the rationale. It intentionally mirrors
 `packages/orchestrator`'s conventions: plain `node:http` (no framework), `zod` for validation,
 `vitest` for tests.
 
 ## What it is
 
-One process, two independent planes (M7-1 / DISTRIBUTION.md §2.6 "Design D"):
+One process, two independent planes (DISTRIBUTION.md §1.6 "Design D"):
 
 1. **Proxy (data) plane** — the OpenAI-compatible surface the review container's Pi process
    talks to, via an in-container TCP->unix forwarder. Unlike the management plane, this is
@@ -72,7 +70,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 ### Proxy plane (per-job unix socket — `<GATEWAY_SOCKET_DIR>/<sanitized-jobId>/gw.sock`)
 
-- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by M4-E's gateway-reachable probe —
+- `GET /healthz` — unauthenticated, always `200 "ok"`. Used by the gateway-reachable probe —
   the reviewer entrypoint health-probes this THROUGH the mounted socket before starting Pi.
 - `POST /v1/chat/completions` — OpenAI-compatible, streaming (SSE, `stream: true`) and
   non-streaming.
@@ -117,7 +115,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   (`server.close()`, unlink the socket, remove the now-empty job directory).
   - Auth: same as above.
   - Response: `200 { "id": string, "revoked": boolean, "spentUsd"?: number, "budgetUsd"?: number }`.
-    `spentUsd`/`budgetUsd` are the key's final spend snapshot (M5-D), taken immediately before
+    `spentUsd`/`budgetUsd` are the key's final spend snapshot, taken immediately before
     deletion — this is the gateway's own authoritative cost figure the orchestrator logs
     alongside Pi's self-reported usage (see `packages/orchestrator/src/telemetry.ts`). Present
     only when `revoked` is `true`.
@@ -133,7 +131,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
 
 ## Security model (summary)
 
-- The real OpenRouter key exists in exactly one place after M4: this process's environment
+- The real OpenRouter key exists in exactly one place: this process's environment
   (`MAGPIE_GATEWAY_OPENROUTER_KEY`). It's set on the *outbound* request to OpenRouter only,
   never logged, and never appears in any response this service sends (see
   `proxy-server.test.ts`'s "real key never leaks" assertions).
@@ -142,9 +140,9 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   at most its remaining budget for at most its remaining TTL, then nothing.
 - The management plane (mint/revoke) is loopback-only by construction (separate `http.Server`,
   bound to `127.0.0.1`) plus a per-request remote-address check — a compromised review container
-  (which has **no network at all**, per `--network none` — see DISTRIBUTION.md §2) categorically
+  (which has **no network at all**, per `--network none` — see DISTRIBUTION.md §1) categorically
   cannot mint or revoke keys.
-- **Per-job proxy socket isolation (M7-1, DISTRIBUTION.md §2.6 "Design D"):** each job's proxy
+- **Per-job proxy socket isolation (DISTRIBUTION.md §1.6 "Design D"):** each job's proxy
   plane is its own unix socket, bound only for that job's lifetime and reachable only via the
   read-only bind mount the orchestrator gives that one `--network none` container. There is no
   shared listener a second job — or anything else with host access to a *different* job's mount —
@@ -154,7 +152,7 @@ that user** — see "Provisioning" below. The orchestrator process must never be
   ever needs to reach `openrouter.ai`. An SNI/domain allowlist on the gateway process's own
   egress (e.g. host `iptables`/`ipset` scoped to the gateway user, or an actual SNI-filtering
   outbound proxy) would add defense-in-depth against the gateway process itself being
-  compromised, but is out of scope for M4-A.
+  compromised, but is out of scope for now.
 
 ## Provisioning as its own unprivileged user
 
@@ -184,5 +182,5 @@ sudo -u magpie-gateway env $(cat /etc/magpie-gateway/gateway.env | xargs) \
 In production the gateway runs as a **systemd unit** — `systemd/magpie-gateway.service`
 (`User=magpie-gateway`, `EnvironmentFile=/etc/magpie-gateway/gateway.env`, ordered before
 `magpie.service`, with a `RuntimeDirectory` for the per-job socket tree) — installed by
-`scripts/install.sh` (M5-A). The manual invocation above is only for iterating locally; see
+`scripts/install.sh`. The manual invocation above is only for iterating locally; see
 `INSTALL.md` / `QUICKSTART.md` for the packaged install.

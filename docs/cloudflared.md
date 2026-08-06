@@ -6,8 +6,9 @@ Cloudflare Tunnel, other tunnels) and the security rationale that applies to
 all of them.
 
 This is one production path for exposing the magpie orchestrator's webhook
-endpoint to GitHub (PLAN.md Milestone 5), replacing the `smee.io` dev relay
-used during the Milestone 1 walking skeleton. It uses a Cloudflare **named
+endpoint to GitHub — see [docs/ingress.md](ingress.md) for the full options
+matrix. It's separate from the `smee.io` relay used for local development
+(see [docs/smee.md](smee.md)). It uses a Cloudflare **named
 tunnel**: `cloudflared` makes an *outbound-only* connection from this host to
 Cloudflare's edge — there is no inbound port to open, no port-forward on your
 router, and your home IP is never exposed.
@@ -154,9 +155,8 @@ sudo systemctl status cloudflared.service
 Note: `cloudflared` also ships a `cloudflared service install` command that
 generates and installs a unit for you. We commit `systemd/cloudflared.service`
 instead so the unit is reviewable and reproducible from source control, like
-every other magpie systemd unit (`systemd/magpie.service`, etc. per
-`PLAN.md`) — install it by copying it into place, not by running that
-subcommand.
+every other magpie systemd unit (`systemd/magpie.service`, etc.) — install it
+by copying it into place, not by running that subcommand.
 
 ### 7. Point the GitHub App at the tunnel hostname
 

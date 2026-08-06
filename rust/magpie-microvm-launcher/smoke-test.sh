@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live boot smoke test for magpie-krun-launch (M8-C0 / task_76d6).
+# Live boot smoke test for magpie-krun-launch.
 #
 # NOT part of `cargo test` — this actually boots a real micro-VM via
 # /dev/kvm, so it needs real hardware virtualization and kvm-group access,
@@ -12,8 +12,7 @@
 # needs `sg kvm`/`newgrp kvm` or a re-login to take effect, per
 # spike/m8-a1/provision.sh step 3.)
 #
-# WHAT THIS PROVES (see task_76d6's task-review section for the pasted
-# output of an actual run):
+# WHAT THIS PROVES:
 #   1. TSI is OFF: the guest's only non-loopback interface (dummy0) is
 #      administratively down, the route table is empty, and an egress
 #      connect() attempt fails immediately rather than hanging or
@@ -51,7 +50,7 @@ if [ ! -x "$BIN" ]; then
 fi
 
 if [ ! -d "$ROOTFS" ]; then
-    echo "missing $ROOTFS -- this smoke test reuses the M8-A1 spike's already-exported" >&2
+    echo "missing $ROOTFS -- this smoke test reuses the spike's already-exported" >&2
     echo "reviewer rootfs rather than re-exporting it; see spike/m8-a1/provision.sh." >&2
     exit 1
 fi

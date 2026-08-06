@@ -1,5 +1,4 @@
-# rust.yml — build/lint gate + signing lane for the rust/ cargo workspace
-# (RUST-2 / task_2a18).
+# rust.yml — build/lint gate + signing lane for the rust/ cargo workspace.
 #
 # WHAT THIS DOES
 #   `lint` (every push/PR touching rust/**): cargo fmt --check, cargo clippy
@@ -21,7 +20,7 @@
 #   uses for the image, no long-lived signing keys) every binary this
 #   workflow produces, and uploads the signatures as a workflow artifact.
 #
-#   `boundary-contract` (RUST-3 / task_9d2b, needs `build`): runs
+#   `boundary-contract` (needs `build`): runs
 #   packages/orchestrator/src/relay-boundary.test.ts — the cross-language
 #   TCP-facing relay contract shared by docker/reviewer/forwarder.mjs and
 #   rust/vsock-client's magpie-vsock-client (see that test file's own doc
@@ -33,22 +32,20 @@
 #   zero test edits" an enforced CI property rather than an aspiration.
 #
 # SCOPE NOTE (read before wiring this into a real release)
-#   Today `rust/` holds the scaffolding crates (`vsock-framing`, the
-#   `magpie-vsock-client` placeholder) plus the production host-side libkrun
-#   launcher (`magpie-microvm-launcher`, task_76d6) plus the production
-#   install-time/runtime KVM preflight (`magpie-tier-probe`, M8-D1 /
-#   task_2f46) — see docs/design/rust-adoption.md. Per that doc, a binary
-#   BAKED INTO the reviewer image is already covered by the image's digest
-#   pin + cosign signature and does not need signing here again; this
-#   workflow's `sign` job is for binaries shipped OUTSIDE the image.
-#   `magpie-tier-probe` IS one of those — it's a real, shippable artifact
-#   (the M8-D3 installer runs it directly, with no Node in the loop; the
-#   orchestrator shells out to the same binary at startup — see
-#   packages/orchestrator/src/tier-ladder.ts), not merely a lane-proving
-#   placeholder like `magpie-vsock-client` still is today. Wiring the real
-#   guest-side client (task_2d6c) into docker/reviewer/Dockerfile, and both
-#   external binaries into scripts/pack-host.sh + release-host.yml, is
-#   future work (M8-D3 / task_67aa for `magpie-tier-probe` specifically).
+#   `rust/` holds the scaffolding crates (`vsock-framing`, the
+#   `magpie-vsock-client` guest-side relay) plus the production host-side
+#   libkrun launcher (`magpie-microvm-launcher`) plus the production
+#   install-time/runtime KVM preflight (`magpie-tier-probe`) — see
+#   docs/design/rust-adoption.md. Per that doc, a binary BAKED INTO the
+#   reviewer image is already covered by the image's digest pin + cosign
+#   signature and does not need signing here again; this workflow's `sign`
+#   job is for binaries shipped OUTSIDE the image. `magpie-tier-probe` IS one
+#   of those — it's a real, shippable artifact (the installer runs it
+#   directly, with no Node in the loop; the orchestrator shells out to the
+#   same binary at startup — see packages/orchestrator/src/tier-ladder.ts).
+#   Both `magpie-vsock-client` (wired into docker/reviewer/Dockerfile) and
+#   `magpie-tier-probe` (wired into scripts/pack-host.sh + release-host.yml)
+#   now ship as real production binaries, not lane-proving placeholders.
 #
 #   `magpie-microvm-launcher` is DELIBERATELY EXCLUDED from every job below
 #   (`lint`'s clippy/test, `build`'s static-musl matrix). Unlike every other
@@ -61,8 +58,7 @@
 #   covers it (rustfmt never links). Building/testing it for real needs a
 #   libkrun-equipped, `/dev/kvm`-capable host — see that crate's
 #   `smoke-test.sh` for the closest thing to a CI-shaped run today. Wiring a
-#   dedicated self-hosted runner for it is future work (tracked informally
-#   against whichever task next touches this launcher — e.g. task_39ff).
+#   dedicated self-hosted runner for it is future work.
 
 name: rust
 
@@ -151,8 +147,8 @@ jobs:
         # form, so it does not belong in this static-binary release matrix.
         run: cargo build --release --workspace --exclude magpie-microvm-launcher --target ${{ matrix.target }}
 
-      # Fail closed if a future dependency (e.g. once task_2d6c/task_76d6
-      # land) accidentally drags in a dynamically-linked libc — the whole
+      # Fail closed if a future dependency accidentally drags in a
+      # dynamically-linked libc — the whole
       # point of the musl targets is a fully static, portable binary.
       #
       # Keyed off `file`'s structural classification, NOT `ldd`'s exact
@@ -194,8 +190,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # boundary-contract (RUST-3 / task_9d2b) — see the top-of-file "WHAT THIS
-  # DOES" note. Runs on ubuntu-24.04 (linux/amd64, same arch `build`'s
+  # boundary-contract — see the top-of-file "WHAT THIS DOES" note. Runs on
+  # ubuntu-24.04 (linux/amd64, same arch `build`'s
   # x86_64-unknown-linux-musl leg targets) so the downloaded static binary
   # executes natively with no emulation. This job (not `lint`/`build`) is the
   # actual CI enforcement of docs/design/rust-adoption.md's migration rule:

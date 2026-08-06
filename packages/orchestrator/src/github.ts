@@ -14,8 +14,9 @@
 // Minting fresh means a compromised or leaked token has the smallest
 // possible blast radius and lifetime.
 //
-// SECURITY: per the project's core threat model (see PLAN.md /
-// AGENTS.md — capability separation, indirect prompt injection), this token
+// SECURITY: per the project's core threat model (see CLAUDE.md /
+// AGENTS.md, and ARCHITECTURE.md's "Threat model" section — capability
+// separation, indirect prompt injection), this token
 // is a real secret. It is never given to the reviewer container, and it must
 // never be written to disk or logged anywhere on the host either. Treat the
 // token itself as write-once, memory-only, host-side-git-use only.

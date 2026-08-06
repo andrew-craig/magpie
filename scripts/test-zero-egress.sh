@@ -2,12 +2,12 @@
 set -euo pipefail
 #
 # test-zero-egress.sh — runnable, self-contained proof that the magpie
-# reviewer container's `--network none` isolation (M7-1, Design D --
+# reviewer container's `--network none` isolation (Design D --
 # DISTRIBUTION.md §2) actually holds: the container reaches NOTHING except
 # the gateway's per-job unix socket, and that socket is a genuinely working
 # path (not just an unreachable one masquerading as fine).
 #
-# Builds on the M7-0 feasibility spike (spike/m7-0/run-spike.sh proved the
+# Builds on the feasibility spike (spike/m7-0/run-spike.sh proved the
 # transport works end-to-end; this script additionally proves everything
 # ELSE is unreachable, which the spike didn't need to check).
 #
@@ -27,7 +27,7 @@ set -euo pipefail
 #      request through forwarder -> socket -> gateway, not merely that
 #      everything else is blocked. Skipped with a clear note if the image
 #      doesn't yet contain forwarder.mjs (see docker/reviewer/Dockerfile --
-#      this lands across several M7-1 waves, so an older built image may
+#      this landed across several waves of work, so an older built image may
 #      predate it).
 #   4. Prints a table of every probe's result and a single VERDICT: PASS/FAIL
 #      line, and writes the full run to an evidence log (path printed at the
@@ -340,7 +340,7 @@ EOF
     log "entrypoint round-trip details: socket_hit=${SOCKET_HIT:-no} non_error_turn=${NON_ERROR_TURN:-no} exit=${ENTRYPOINT_EXIT}"
   fi
 else
-  log "image '${IMAGE}' does not (yet) contain /opt/magpie/forwarder.mjs -- SKIPPING the entrypoint round-trip. This is expected if the image predates the M7-1 forwarder wave; only the PROBE-container portion above ran. Rebuild with ./scripts/build-reviewer-image.sh once the forwarder lands to exercise this leg."
+  log "image '${IMAGE}' does not (yet) contain /opt/magpie/forwarder.mjs -- SKIPPING the entrypoint round-trip. This is expected if the image predates the forwarder; only the PROBE-container portion above ran. Rebuild with ./scripts/build-reviewer-image.sh once the forwarder lands to exercise this leg."
 fi
 
 # ---------------------------------------------------------------------------

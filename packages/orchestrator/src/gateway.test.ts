@@ -11,13 +11,12 @@ import {
 } from "./gateway.js";
 
 // NOTE: everything here runs fully offline against a throwaway `http.Server`
-// standing in for the real M4-A gateway management plane (see
+// standing in for the real gateway management plane (see
 // packages/gateway/src/admin-server.ts). We assert HOW gateway.ts drives that
 // API (auth header, method, path, body shape) and how it parses/handles the
-// responses — the real gateway is proven end-to-end separately (see the
-// task's live-verification evidence). This mirrors the fake-HTTP-endpoint
-// pattern the gateway's own admin-server.test.ts uses, just from the caller
-// side.
+// responses — the real gateway is proven end-to-end separately, via live
+// verification. This mirrors the fake-HTTP-endpoint pattern the gateway's
+// own admin-server.test.ts uses, just from the caller side.
 
 const MASTER_KEY = "test-master-key-should-never-leak";
 
@@ -244,7 +243,7 @@ describe("revokeGatewayKey", () => {
     expect(logger.errors).toHaveLength(0);
   });
 
-  it("resolves the key's final spend snapshot on a 200 { revoked: true, ... } response (M5-D)", async () => {
+  it("resolves the key's final spend snapshot on a 200 { revoked: true, ... } response", async () => {
     const fake = await startFakeGateway({
       status: 200,
       json: { id: "abc123", revoked: true, spentUsd: 0.1234, budgetUsd: 0.5 },

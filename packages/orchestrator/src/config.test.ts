@@ -79,19 +79,19 @@ describe("loadConfig", () => {
       "ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:6c84639bde2879043188eaeb3c72b7bcb032c4b803d5a3e79d32fc0b4de04a29",
     );
     expect(config.container.memory).toBe("4g");
-    // bug_df2d: fail-closed-by-default escape hatch for the cgroup
+    // Fail-closed-by-default escape hatch for the cgroup
     // memory-controller preflight (see cgroup-preflight.ts).
     expect(config.container.requireMemoryLimit).toBe(true);
     expect(config.container.cpus).toBe("2");
     expect(config.container.pidsLimit).toBe(256);
-    // M8-B2: the review-container runtime defaults to rootless podman.
+    // The review-container runtime defaults to rootless podman.
     expect(config.container.dockerBin).toBe("podman");
     expect(config.container).not.toHaveProperty("network");
-    // M8-C3: default reviewer tier is "crun" — an existing deployment's
-    // behavior (and the M8-B1 floor golden) must be unaffected by this
+    // Default reviewer tier is "crun" — an existing deployment's
+    // behavior (and the floor golden) must be unaffected by this
     // field's mere existence.
     expect(config.container.tier).toBe("crun");
-    // M8-D1 (task_2f46): default path for the KVM-preflight probe binary
+    // Default path for the KVM-preflight probe binary
     // tier-ladder.ts shells out to — a bare basename, resolved via PATH,
     // mirroring `microvm.launcher_bin`'s own default convention.
     expect(config.container.tierProbeBin).toBe("magpie-tier-probe");
@@ -107,7 +107,7 @@ describe("loadConfig", () => {
     expect(config.secrets.webhookSecret).toBe("test-webhook-secret");
     expect(config.secrets.githubPrivateKey).toContain("BEGIN PRIVATE KEY");
     expect(config.secrets.gatewayMasterKey).toBe("test-gateway-master-key");
-    // No config.secrets.llmApiKey field exists any more (M4-C — CTO
+    // No config.secrets.llmApiKey field exists any more (CTO
     // decision): the real provider key now lives only in the gateway
     // process's own env, never this orchestrator's.
     expect(config.secrets).not.toHaveProperty("llmApiKey");

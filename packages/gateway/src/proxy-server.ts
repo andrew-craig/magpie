@@ -80,7 +80,7 @@ function upstreamChatCompletionsUrl(baseUrl: string): string {
  * `ProxyServer`'s single-server lifecycle.
  *
  * Routes:
- *  - `GET  /healthz`             — unauthenticated, always 200 "ok" (M4-E's gateway-reachable probe; the reviewer entrypoint health-probes this THROUGH the per-job socket before starting Pi).
+ *  - `GET  /healthz`             — unauthenticated, always 200 "ok" (the gateway-reachable probe; the reviewer entrypoint health-probes this THROUGH the per-job socket before starting Pi).
  *  - `POST /v1/chat/completions` — OpenAI-compatible; requires `Authorization: Bearer <virtual key>`.
  *  - anything else               — 404.
  */
@@ -245,7 +245,8 @@ async function handleChatCompletions(
 
     // Stream the upstream body straight back to the client, chunk by chunk,
     // rather than buffering it all before writing anything — required for
-    // both a good streaming UX and per the M4-A task contract. We ALSO
+    // both a good streaming UX and to match the OpenAI-compatible streaming
+    // contract this proxy plane exposes. We ALSO
     // accumulate the decoded text alongside forwarding it (not instead of),
     // purely so determineCost() has something to parse once the body ends;
     // this does not delay a single byte reaching the client.

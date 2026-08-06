@@ -117,7 +117,7 @@ describe("computePrDiff", () => {
     expect(result.diff).toBe("");
   });
 
-  it("M6-B: ignorePaths excludes a vendored file from the size count AND the diff body, letting an otherwise-oversized PR through", async () => {
+  it("ignorePaths excludes a vendored file from the size count AND the diff body, letting an otherwise-oversized PR through", async () => {
     const files: FakeFile[] = [
       { filename: "src/a.ts", additions: 10, deletions: 2 },
       { filename: "vendor/huge.js", additions: 10000, deletions: 0 },
@@ -442,7 +442,7 @@ describe("computeIncrementalDiff", () => {
     expect(result.reason).toMatch(/may be truncated/);
   });
 
-  it("M6-B: ignorePaths excludes matching files from the range's size count and diff body", async () => {
+  it("ignorePaths excludes matching files from the range's size count and diff body", async () => {
     const files: FakeFile[] = [
       { filename: "src/new.ts", additions: 8, deletions: 2 },
       { filename: "vendor/generated.js", additions: 5000, deletions: 0 },
@@ -492,7 +492,7 @@ describe("listPrChangedFiles", () => {
     expect(paginate).toHaveBeenCalledTimes(1);
   });
 
-  it("M6-B: excludes files matching ignorePaths from both the file list and the line count", async () => {
+  it("excludes files matching ignorePaths from both the file list and the line count", async () => {
     const files: FakeFile[] = [
       { filename: "src/a.ts", additions: 4, deletions: 1 },
       { filename: "vendor/lib.js", additions: 1000, deletions: 1000 },
@@ -511,7 +511,7 @@ describe("listPrChangedFiles", () => {
     expect(result.changedLineCount).toBe(5);
   });
 
-  it("M6-B: an empty ignorePaths list changes nothing (no-op)", async () => {
+  it("an empty ignorePaths list changes nothing (no-op)", async () => {
     const files: FakeFile[] = [{ filename: "src/a.ts", additions: 4, deletions: 1 }];
     const { octokit } = fakeOctokit(files);
 

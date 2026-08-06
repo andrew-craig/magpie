@@ -1,4 +1,4 @@
-// Re-review dedup + comment minimization (M5-C).
+// Re-review dedup + comment minimization.
 //
 // Magpie tracks "have I already reviewed this head SHA?" and "which of my
 // prior comments are now stale?" ENTIRELY from GitHub's own state — no local
@@ -24,8 +24,9 @@
 // review summary is posted as a `PullRequestReview` body (publisher.ts's
 // `publishReviewWithFindings`, via `pulls.createReview`), so that summary can
 // never be minimized directly; only Magpie's plain issue comments (failure /
-// too-large notes, or the M1-style fallback comment) and inline review
-// comments are minimizable. Superseded review summary bodies simply stay
+// too-large notes, or the plain-comment fallback path — see publisher.ts's
+// `publishReview`) and inline review comments are minimizable. Superseded
+// review summary bodies simply stay
 // visible on the PR — an accepted trade-off, not a bug.
 //
 // Every "is this comment/review mine?" check below requires BOTH of:
@@ -35,8 +36,7 @@
 //      github.ts's `getAppBotLogin` (e.g. `"my-magpie-app[bot]"`), passed in
 //      by the caller (pipeline.ts).
 //   2. `MAGPIE_REVIEW_MARKER` (publisher.ts) present in the body — the same
-//      identity marker every Magpie-authored comment or review body has
-//      carried since M1.
+//      identity marker every Magpie-authored comment or review body carries.
 //
 // SECURITY: the marker alone is NOT sufficient — it's a public HTML-comment
 // literal (`<!-- magpie-review -->`) that appears verbatim in this repo's
@@ -268,8 +268,9 @@ export async function readReviewState(params: ReadReviewStateParams): Promise<Re
  * A comment/review counts as Magpie's own only when ALL of: it's authored by
  * a Bot account, that account's login is exactly Magpie's own `botLogin`, and
  * its body carries `MAGPIE_REVIEW_MARKER`. See the module doc comment's
- * SECURITY section for why the marker alone (the old M5-C behavior) is
- * forgeable by any PR commenter, and GRACEFUL DEGRADATION for why an
+ * SECURITY section for why the marker alone (marker-only, without the
+ * author-identity check) is forgeable by any PR commenter, and GRACEFUL
+ * DEGRADATION for why an
  * empty/falsy `botLogin` unconditionally returns `false` here (belt-and-braces
  * alongside `readReviewState`'s own early-return short-circuit above).
  */

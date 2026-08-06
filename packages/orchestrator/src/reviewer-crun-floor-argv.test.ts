@@ -1,10 +1,9 @@
-// M8-B1 floor-invariant regression test (task_89c4; CTO binding edit #3 in
+// Floor-invariant regression test (CTO binding edit #3 in
 // docs/design/cto-decision-brief.md: "CI or preflight must assert the
 // hardened 'crun floor' tier's flag set is byte-for-byte today's shipped
 // hardened posture, so the floor cannot silently erode while attention is on
 // the micro-VM path" — see also docs/design/rust-adoption.md's reference to
-// "the M8-B1 floor-invariant flag test" as the golden fixture that pins
-// behaviour across the future micro-VM swap).
+// this as the golden fixture that pins behaviour across the micro-VM tier).
 //
 // This is deliberately narrower and stricter than reviewer.test.ts's
 // "assembles a hardened docker run argv..." case (which asserts individual
@@ -105,7 +104,7 @@ function loadGoldenFixture(): GoldenFixture {
   return JSON.parse(readFileSync(path, "utf-8")) as GoldenFixture;
 }
 
-describe("buildReviewDockerArgs (M8-B1 crun-floor invariant)", () => {
+describe("buildReviewDockerArgs (crun-floor invariant)", () => {
   it("matches the committed golden argv byte-for-byte", () => {
     const golden = loadGoldenFixture();
     const actual = buildReviewDockerArgs({ ...GOLDEN_INPUT, config: GOLDEN_CONFIG });
@@ -116,7 +115,7 @@ describe("buildReviewDockerArgs (M8-B1 crun-floor invariant)", () => {
     // update `argv` in
     // src/__fixtures__/reviewer-crun-floor-argv.golden.json in the SAME PR —
     // that diff being visible in review is the entire point of this test
-    // (task_89c4 / CTO binding edit #3).
+    // (CTO binding edit #3).
     expect(actual).toEqual(golden.argv);
   });
 

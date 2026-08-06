@@ -1,5 +1,5 @@
 /**
- * Magpie report_findings extension (M2-A).
+ * Magpie report_findings extension.
  *
  * Pi (v0.80.3) has no JSON-schema structured-output mode, so Magpie uses the
  * "tool-call-as-structured-output" pattern documented in Pi's own
@@ -8,10 +8,10 @@
  * `terminate: true` on the tool result ends the turn without an extra
  * follow-up LLM call.
  *
- * This module is loaded into the Pi **host subprocess** that
- * `packages/orchestrator/src/reviewer.ts` spawns (no container, no gateway —
- * those are M3/M4). It has no access to any Magpie secret: the only channel
- * back to the orchestrator is the plain JSON file written to
+ * This module is baked into the `magpie-reviewer` container image (see
+ * docker/reviewer/) that `packages/orchestrator/src/reviewer.ts` launches.
+ * It has no access to any Magpie secret: the only channel back to the
+ * orchestrator is the plain JSON file written to
  * `MAGPIE_FINDINGS_PATH`, a path the orchestrator itself chooses and owns.
  *
  * SECURITY NOTE: `params` here originates from the LLM's tool-call arguments,

@@ -1,4 +1,4 @@
-// On-demand review trigger: `@magpie review` PR comment command (M6-A).
+// On-demand review trigger: `@magpie review` PR comment command.
 //
 // This module is the `issue_comment` counterpart to filter.ts's `pull_request`
 // filter: server.ts forwards every signature-verified `issue_comment`

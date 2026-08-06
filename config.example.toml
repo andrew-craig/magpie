@@ -34,7 +34,7 @@
 #                             SAME value for both env files.
 # ---------------------------------------------------------------------------
 #
-# NOTE (M4-C): there is deliberately no MAGPIE_LLM_API_KEY here. The real
+# NOTE: there is deliberately no MAGPIE_LLM_API_KEY here. The real
 # OpenRouter key now lives ONLY in the gateway process's own environment
 # (MAGPIE_GATEWAY_OPENROUTER_KEY, see packages/gateway/README.md) — this
 # orchestrator mints a short-lived, budget-capped per-job virtual key against
@@ -42,9 +42,10 @@
 # provider credential itself. See [gateway] below.
 # ---------------------------------------------------------------------------
 #
-# The Milestone 4 credential-injecting LLM gateway (PLAN.md §5) is a SEPARATE
-# service — packages/gateway (@magpie/gateway) — with its OWN env vars, read
-# by its OWN process (never this orchestrator config or process):
+# The credential-injecting LLM gateway (ARCHITECTURE.md's "Gateway" section)
+# is a SEPARATE service — packages/gateway (@magpie/gateway) — with its OWN
+# env vars, read by its OWN process (never this orchestrator config or
+# process):
 # MAGPIE_GATEWAY_OPENROUTER_KEY (the real provider key), the shared
 # MAGPIE_GATEWAY_MASTER_KEY above, and non-secret GATEWAY_* settings. See
 # packages/gateway/README.md for the full list and the security rationale for
@@ -80,7 +81,7 @@ base_url = "https://openrouter.ai/api/v1"
 # Example: "anthropic/claude-sonnet-4.5"
 model = "anthropic/claude-sonnet-4.5"
 
-# M6-B (task_220f): the ONLY models an allowlisted repo's own `.magpie.toml`
+# The ONLY models an allowlisted repo's own `.magpie.toml`
 # is permitted to switch the review to (see docs/repo-config.md). Default: []
 # (empty) — an empty/absent list means NO repo can override the model at all,
 # so this is opt-in per operator, not on by default. This model above (the
@@ -126,7 +127,7 @@ work_dir = "/var/lib/magpie/work"
 
 [container]
 # Reviewer image the review container runs (the ONLY container in the product;
-# orchestrator + gateway are host services). As of M7-2 this is PUBLISHED to
+# orchestrator + gateway are host services). This is PUBLISHED to
 # GHCR — built multi-arch (amd64+arm64) and cosign-signed with SLSA provenance
 # by .github/workflows/release-reviewer.yml on `reviewer-v*` tags — so adopters
 # `docker pull` it rather than building locally. The value below is PINNED BY
@@ -136,18 +137,19 @@ work_dir = "/var/lib/magpie/work"
 # before trusting a new digest (see docker/reviewer/README.md, "Published
 # image"). `scripts/build-reviewer-image.sh` is now for LOCAL DEVELOPMENT ONLY
 # (it builds a `magpie-reviewer:*` image you'd point this at instead).
-# `0.3.0` (M8-E1) was the first image built with micro-VM-tier support baked in —
+# `0.3.0` was the first image built with micro-VM-tier support baked in —
 # the `vsock-client` binary + the `MAGPIE_IS_MICROVM` vsock-egress entrypoint
 # path — so it works at both the crun floor and the opt-in micro-VM tier; `0.3.1`
-# folds in the M8-E2..E7 guest fixes found during live micro-VM validation
+# folds in guest fixes found during live micro-VM validation
 # (guest-local /tmp, explicit PATH, host-aligned reviewer uid, MAGPIE_FINDINGS_PATH,
-# gateway-key redaction on the stderr paths); `0.2.0` was M7-era (crun floor only).
+# gateway-key redaction on the stderr paths); `0.2.0` supported the crun floor only.
 # Default: "ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:6c84639bde2879043188eaeb3c72b7bcb032c4b803d5a3e79d32fc0b4de04a29"
 image = "ghcr.io/andrew-craig/magpie/reviewer:0.3.1@sha256:6c84639bde2879043188eaeb3c72b7bcb032c4b803d5a3e79d32fc0b4de04a29"
 
 # Memory limit passed to `docker run --memory` for the review container.
 # Bounds how much host memory a single (possibly prompt-injected) review job
-# can consume. See PLAN.md §4 for the container hardening rationale.
+# can consume. See ARCHITECTURE.md's "Isolation tiers" section for the
+# container hardening rationale.
 # Default: "4g"
 memory = "4g"
 
@@ -160,7 +162,7 @@ memory = "4g"
 #   - rootful docker FAILS OPEN: `--memory` is accepted, a warning is printed
 #     to stderr, and the review container runs completely UNCONFINED on
 #     memory — the exact silent gap this flag exists to catch.
-#   - rootless podman/crun (the M8-B2 default) FAILS CLOSED but cryptically:
+#   - rootless podman/crun (the default) FAILS CLOSED but cryptically:
 #     every review job errors at container-creation time.
 # With this `true` (the default), Magpie checks at startup and refuses to run
 # with an unenforceable memory limit, and the review container itself
@@ -182,8 +184,8 @@ cpus = "2"
 # Default: 256
 pids_limit = 256
 
-# Path (or PATH name) of the CLI used to run review containers. As of
-# Milestone 8 (M8-B2) this defaults to `podman`, run ROOTLESS: no root daemon
+# Path (or PATH name) of the CLI used to run review containers. This
+# defaults to `podman`, run ROOTLESS: no root daemon
 # and no `docker` group, so a compromised orchestrator can't reach a
 # root-privileged runtime. The one rootless-only difference — `--userns=keep-id`,
 # so the container can write findings back to the orchestrator's own uid — is
@@ -191,7 +193,7 @@ pids_limit = 256
 # flag (`--cap-drop=ALL`, `--read-only`, `--network none`, `--pids-limit`, …) is
 # identical to the docker path. Set this to `docker` (or a docker-compatible
 # CLI / full path) to use the rootful docker runtime instead.
-#   Rootless podman prerequisites (installer automation is M8-D3): the service
+#   Rootless podman prerequisites (handled by scripts/install.sh): the service
 #   user needs /etc/subuid + /etc/subgid ranges and `loginctl enable-linger`.
 #   Note also that `--memory` requires the `memory` cgroup v2 controller to be
 #   delegated to the user; where it is absent (e.g. some Raspberry Pi kernels
@@ -202,7 +204,7 @@ pids_limit = 256
 # Default: "podman"
 docker_bin = "podman"
 
-# Isolation tier the reviewer runs at (M8). "crun" (the default) is today's
+# Isolation tier the reviewer runs at. "crun" (the default) is today's
 # hardened rootless `podman run` floor — seccomp + --cap-drop=ALL +
 # no-new-privileges + read-only rootfs + --pids-limit + --network none. "microvm"
 # opts into the strongest tier: a rootless KVM micro-VM (libkrun via
@@ -242,19 +244,20 @@ host_ram_budget_mib = 4096
 # Default: "magpie-krun-launch"
 launcher_bin = "magpie-krun-launch"
 
-# NOTE: there is deliberately no `network` field. As of Milestone 7 (Design D,
-# DISTRIBUTION.md §2) the review container is ALWAYS launched with
+# NOTE: there is deliberately no `network` field. Under Design D (see
+# DISTRIBUTION.md §2), the review container is ALWAYS launched with
 # `--network none` — it has no network interfaces at all, only loopback. Its
 # one channel to the outside is a per-job unix domain socket the gateway binds
 # and the orchestrator bind-mounts read-only into the container (see
 # reviewer.ts and packages/gateway/src/job-sockets.ts). This replaces the
-# old M4 `magpie-net` bridge + iptables egress lockdown entirely: with no
+# old `magpie-net` bridge + iptables egress lockdown entirely: with no
 # network namespace there is no bridge, subnet, or firewall left to provision,
 # so scripts/setup-network.sh and magpie-firewall.service were deleted. Egress
 # confinement is now a kernel network-namespace property, not a config toggle.
 
 [gateway]
-# Credential-injecting LLM gateway (M4, PLAN.md §5; packages/gateway). The
+# Credential-injecting LLM gateway (ARCHITECTURE.md's "Gateway" section;
+# packages/gateway). The
 # orchestrator mints a fresh, budget-capped, short-lived virtual key on this
 # gateway before every review run and revokes it on cleanup (see gateway.ts) —
 # the review container authenticates to the gateway's PROXY plane with that
@@ -271,8 +274,8 @@ launcher_bin = "magpie-krun-launch"
 base_url = "http://127.0.0.1:4100"
 
 # Base URL the review CONTAINER points Pi at for chat-completions, via
-# `-e OPENAI_BASE_URL=...` on `docker run` (see reviewer.ts). Under Design D
-# (M7) the container has no network, so this is a LOOPBACK address inside the
+# `-e OPENAI_BASE_URL=...` on `docker run` (see reviewer.ts). Under Design D,
+# the container has no network, so this is a LOOPBACK address inside the
 # container: a tiny in-container TCP->unix forwarder listens on 127.0.0.1:4000
 # and relays every request to the gateway's per-job unix socket mounted at
 # /run/gw/gw.sock (see docker/reviewer/forwarder.mjs and entrypoint.sh). The
@@ -299,7 +302,8 @@ per_job_budget_usd = 0.5
 ttl_margin_seconds = 120
 
 [telemetry]
-# Per-job cost/outcome telemetry (M5-D, PLAN.md §6). After EVERY review
+# Per-job cost/outcome telemetry (ARCHITECTURE.md's "Operability" section).
+# After EVERY review
 # (success or failure), Magpie emits exactly one structured, greppable record
 # per job — repo, PR number, head SHA, outcome, wall-clock duration, Pi's
 # self-reported token usage, and the AUTHORITATIVE cost (the gateway's own

@@ -1,11 +1,9 @@
-// Derives the per-job hybrid-vsock channel for the micro-VM reviewer tier
-// (M8-C2, task_b3f7 — see that task file's "Implementation plan" section for
-// the full investigation this module is the output of).
+// Derives the per-job hybrid-vsock channel for the micro-VM reviewer tier.
 //
-// KEY FINDING (task_b3f7): the "forwarder" the brief originally called for
-// mostly dissolves once the direct-libkrun launcher (`rust/magpie-microvm-
-// launcher`) is the topology in play. `krun_add_vsock_port2(ctx, port,
-// uds_path, listen=false)` makes libkrun a CLIENT — on each guest `connect()`
+// KEY DESIGN POINT: no separate "forwarder" process is needed, because the
+// direct-libkrun launcher (`rust/magpie-microvm-launcher`) is the topology in
+// play. `krun_add_vsock_port2(ctx, port, uds_path, listen=false)` makes
+// libkrun a CLIENT — on each guest `connect()`
 // it dials OUT to `uds_path` itself (see that crate's `src/krun.rs`), and the
 // gateway ALREADY listens at exactly such a path: `<socketDir>/gw.sock` (see
 // gateway.ts's `GatewayKey.socketDir` doc comment and
@@ -13,11 +11,9 @@
 // the launcher's `--vsock-uds` can point straight at the gateway's per-job
 // socket — no separate relay process, no host-global vhost-vsock listener.
 //
-// This module is the small, standalone piece of that wiring that's safe to
-// build now, independent of the still-open spike/CTO decisions (direct
-// wiring vs. a Rust `magpie-vsock-host-relay` fallback — see the task file):
-// given a minted `GatewayKey`, derive the `{ udsPath, port }` pair the
-// launcher's `--vsock-uds`/`--vsock-port` CLI flags need (see
+// This module is the small, standalone piece of that wiring: given a minted
+// `GatewayKey`, derive the `{ udsPath, port }` pair the launcher's
+// `--vsock-uds`/`--vsock-port` CLI flags need (see
 // `rust/magpie-microvm-launcher/src/cli.rs`'s both-or-neither contract).
 //
 // PER-JOB ISOLATION INVARIANT: isolation is provided by `udsPath` — one path
@@ -28,12 +24,10 @@
 // only ever dials the one `uds_path` its own launcher instance was started
 // with.
 //
-// OUT OF SCOPE here (deliberately): actually wiring this into reviewer.ts/
-// pipeline.ts or the launcher process is C3 (`task_39ff`), a future task.
 // This module does not touch the filesystem, spawn anything, or change the
-// mint/revoke flow in gateway.ts at all — it is a pure path/port derivation
-// that both a direct-wiring C3 and a fallback Rust relay would consume
-// identically.
+// mint/revoke flow in gateway.ts at all — it is a pure path/port derivation.
+// reviewer.ts is the caller that wires the derived channel into the
+// launcher process.
 
 import { isAbsolute, join } from "node:path";
 import type { GatewayKey } from "./gateway.js";

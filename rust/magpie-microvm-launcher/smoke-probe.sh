@@ -1,5 +1,5 @@
 #!/bin/sh
-# Guest-side probe script for task_76d6's live smoke test
+# Guest-side probe script for the live smoke test
 # (rust/magpie-microvm-launcher/smoke-test.sh). Lives as a real multi-line
 # FILE in the rootfs (not packed onto libkrun's kernel cmdline), so none of
 # the ASCII/no-newline cmdline constraints src/config.rs enforces apply to

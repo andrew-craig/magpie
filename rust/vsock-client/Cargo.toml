@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Guest-side AF_VSOCK relay baked into the signed reviewer image (M8-C1 / task_2d6c). Relays Pi's loopback TCP traffic (127.0.0.1:4000) to the host per-job gateway over AF_VSOCK, replacing docker/reviewer/forwarder.mjs's TCP->unix relay for the libkrun micro-VM path. See src/main.rs's module doc comment."
+description = "Guest-side AF_VSOCK relay baked into the signed reviewer image. Relays Pi's loopback TCP traffic (127.0.0.1:4000) to the host per-job gateway over AF_VSOCK, replacing docker/reviewer/forwarder.mjs's TCP->unix relay for the libkrun micro-VM path. See src/main.rs's module doc comment."
 
 [[bin]]
 name = "magpie-vsock-client"
@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # Only dependency, matching magpie-microvm-launcher's posture (see that
 # crate's Cargo.toml doc comment): AF_VSOCK/sockaddr_vm/VMADDR_CID_HOST
-# primitives, proven sufficient by the M8-A1 spike prototype. Deliberately
+# primitives, proven sufficient by the spike prototype. Deliberately
 # does NOT depend on vsock-framing -- see src/main.rs's "Why not the
 # vsock-framing crate" doc section.
 libc = "0.2"

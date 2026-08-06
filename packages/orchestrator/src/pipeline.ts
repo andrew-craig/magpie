@@ -16,7 +16,7 @@
 //      (see github.ts): that helper re-derives its own token internally via
 //      `authStrategy`, which would mean two tokens minted per job instead of
 //      one.
-//   2z. RE-REVIEW DEDUP (M5-C, rereview.ts): read Magpie's own prior
+//   2z. RE-REVIEW DEDUP (rereview.ts): read Magpie's own prior
 //      comments/reviews on the PR via `readReviewState` — stateless, sourced
 //      entirely from GitHub (see rereview.ts's module doc comment; no local
 //      DB). Deliberately placed here, BEFORE minting the gateway virtual key
@@ -25,7 +25,7 @@
 //      `lastReviewedSha === job.headSha` AND `job.forceFullReview` is not
 //      set, log `event:"already-reviewed"` and return without doing anything
 //      else. `job.forceFullReview` (comment-command.ts's `@magpie review`
-//      trigger, M6-A) bypasses this skip on purpose — a maintainer's explicit
+//      trigger) bypasses this skip on purpose — a maintainer's explicit
 //      request should always run a fresh review even on an already-reviewed
 //      head SHA. Before calling `readReviewState`
 //      this step first resolves Magpie's own bot login (github.ts's
@@ -40,7 +40,7 @@
 //      reviewed" (best-effort, never fails the job, never wrongly skips a
 //      review) — see the try/catch below. The returned `minimizableNodeIds`
 //      snapshot is threaded through to step 7's post-publish minimize call.
-//   2y. PER-REPO CONFIG (M6-B, task_220f, repo-config.ts): resolve the base
+//   2y. PER-REPO CONFIG (repo-config.ts): resolve the base
 //      repo's default branch (`octokit.rest.repos.get`) and fetch/validate
 //      `.magpie.toml` from THAT ref only — never `job.headSha`, never a
 //      PR-supplied base ref (see repo-config.ts's module doc comment for the
@@ -53,7 +53,7 @@
 //      original binding is left untouched so it's always available as the
 //      "pure server truth" (used by, e.g., the outer `cleanupJob` below,
 //      which has no per-job effective config to draw from). Placed AFTER the
-//      M5-C dedup check (an already-reviewed job shouldn't pay for the extra
+//      re-review dedup check (an already-reviewed job shouldn't pay for the extra
 //      API round-trip) but BEFORE minting the gateway virtual key in step 2a,
 //      because that key is scoped to `config.llm.model` and must be scoped to
 //      whatever model this job actually ends up using. Fails soft: any error
@@ -61,7 +61,7 @@
 //      `effectiveConfig === config` (see the try/catch below) — a per-repo
 //      config problem must never fail or skip a review.
 //   2a. Mint ONE fresh gateway virtual key (gateway.ts's
-//      `mintGatewayKeyFromConfig`, M4-B) scoped to `effectiveConfig.llm.model`
+//      `mintGatewayKeyFromConfig`) scoped to `effectiveConfig.llm.model`
 //      (step 2y's possibly repo-overridden model), with a
 //      budget/TTL from `config.gateway`. From here on the rest of the job
 //      body runs inside a `try/finally` that revokes this key on every exit
@@ -71,11 +71,11 @@
 //      already wraps. Revocation is best-effort and never throws (see
 //      gateway.ts) — a revoke failure is logged but never changes the job's
 //      outcome. The minted key's `.key` is threaded straight into
-//      `runReview` below as `gatewayApiKey` (M4-C), which sets it as the
+//      `runReview` below as `gatewayApiKey`, which sets it as the
 //      review container's `OPENROUTER_API_KEY` — the orchestrator never
-//      holds (and, since M4-C, no longer even loads — see config.ts) a real
-//      provider key to substitute instead. As of M7-1 (Design D —
-//      DISTRIBUTION.md §2) the mint call also passes `job.id` and the
+//      holds (and no longer even loads — see config.ts) a real
+//      provider key to substitute instead. Per Design D (DISTRIBUTION.md §2)
+//      the mint call also passes `job.id` and the
 //      response's `.socketDir` is threaded into `runReview` as
 //      `gatewaySocketDir`, which reviewer.ts bind-mounts read-only at
 //      `/run/gw` in the review container — now the container's ONLY path to
@@ -86,7 +86,7 @@
 //      exit path (success, a thrown error, or a "review failed" result — the
 //      last of those is not an error at all, see step 6).
 //   4. Compute the PR diff via the GitHub API (diff.ts), capped by
-//      `effectiveConfig.limits.maxDiffLines` (step 2y) and, per M6-B, with any
+//      `effectiveConfig.limits.maxDiffLines` (step 2y) and with any
 //      `ignorePaths` glob matches dropped from both the changed-file list and
 //      the diff body before that cap is even applied.
 //   5. Fetch PR title/body/head sha (needed by the reviewer prompt; the
@@ -104,7 +104,7 @@
 //      a review built from them could describe the wrong commit. Log and
 //      return WITHOUT publishing; a fresh webhook delivery for the new head
 //      will re-trigger a review of the current state (same benign-loss
-//      rationale as a crash mid-job — see PLAN.md §3).
+//      rationale as a crash mid-job).
 //   6. Turn the diff into a `ReviewResult`: an oversized diff never reaches
 //      `runReview` at all (diff.ts never even fetches the body — see its
 //      module doc comment) and instead gets a synthesized "skipped" summary;
@@ -113,10 +113,10 @@
 //      not an exception, and is published just like a successful one.
 //   7. Publish exactly one review/comment (publisher.ts), branching on the
 //      shape of `result`:
-//        - `{ ok: false }` (review failed) -> `publishReview` (M1's single
+//        - `{ ok: false }` (review failed) -> `publishReview` (the single
 //          `issues.createComment` failure-note path, unchanged).
 //        - `{ ok: true }` but `prDiff.tooLarge` (the synthesized skipped-review
-//          summary from step 6) -> `publishReview` too (M1's single summary
+//          summary from step 6) -> `publishReview` too (the single summary
 //          comment, unchanged) — there are no real findings to anchor.
 //        - `{ ok: true }` from a real `runReview` call -> anchor its findings
 //          against the diff (anchor.ts's `anchorFindings`) and publish the
@@ -124,10 +124,10 @@
 //          (`publishReviewWithFindings`), so diff-anchored findings surface as
 //          inline comments instead of being flattened into plain text.
 //      Whichever branch runs, `result.ok ? job.headSha : undefined` is passed
-//      as `reviewedSha` (publisher.ts, M5-C) so a definitive outcome (real
+//      as `reviewedSha` (publisher.ts) so a definitive outcome (real
 //      success or tooLarge skip) — but never a failure — embeds the hidden
 //      "reviewed" marker `readReviewState` looks for on the next delivery.
-//   7a. MINIMIZE OUTDATED (M5-C, rereview.ts): when `result.ok`, call
+//   7a. MINIMIZE OUTDATED (rereview.ts): when `result.ok`, call
 //      `minimizeOutdated` on the `minimizableNodeIds` snapshot captured in
 //      step 2z — BEFORE this publish, not after — so the comment/review just
 //      posted in step 7 is never in that list and can't self-minimize.
@@ -206,7 +206,7 @@ function jobLogFields(job: JobDescriptor): Record<string, unknown> {
  * itself for what each value means.
  */
 export interface JobOutcomeClassificationInputs {
-  /** Set inline at any pre-review-result exit point (an aborted signal check, the M5-C dedup return, or the mid-job head-SHA-mismatch return) — always wins over everything else below, since it means `reviewResult` was never even computed. */
+  /** Set inline at any pre-review-result exit point (an aborted signal check, the re-review dedup return, or the mid-job head-SHA-mismatch return) — always wins over everything else below, since it means `reviewResult` was never even computed. */
   earlyOutcome?: JobOutcome;
   /** The `ReviewResult` `runReview` (or the synthesized diff-too-large skip) produced, if the job got that far. */
   reviewResult?: ReviewResult;
@@ -285,21 +285,21 @@ export interface PipelineDeps {
   /** Defaults to {@link createWorkspace}. Overridable so tests can skip real git. */
   createWorkspace?: typeof createWorkspace;
   /**
-   * Mint the per-job gateway virtual key (M4-B). Defaults to
+   * Mint the per-job gateway virtual key. Defaults to
    * {@link mintGatewayKeyFromConfig}. Overridable so pipeline.test.ts can run
    * the whole flow against a fake gateway (or none at all) — production
    * callers (index.ts) leave it undefined so the real gateway mgmt API is
-   * called. As of M7-1 (Design D) takes the job id as a second argument — the
+   * called. Per Design D, takes the job id as a second argument — the
    * gateway needs it to create/name the per-job socket directory it returns
    * as `GatewayKey.socketDir` (see gateway.ts).
    */
   mintGatewayKey?: (config: Config, jobId: string) => Promise<GatewayKey>;
   /**
-   * Revoke a per-job gateway virtual key by id (M4-B). Defaults to
+   * Revoke a per-job gateway virtual key by id. Defaults to
    * {@link revokeGatewayKeyFromConfig}. Best-effort by contract — never
    * throws (see gateway.ts) — so the pipeline's cleanup can call it
    * unconditionally without a revoke failure ever masking the job result.
-   * Resolves the key's final spend (M5-D — see gateway.ts's
+   * Resolves the key's final spend (see gateway.ts's
    * `GatewayKeyRevocation`) when the gateway reported one, threaded into this
    * job's telemetry record; `undefined` when it didn't (revoke failure,
    * unreachable gateway, or an already-gone key).
@@ -307,8 +307,8 @@ export interface PipelineDeps {
   revokeGatewayKey?: (config: Config, id: string) => Promise<GatewayKeyRevocation | undefined>;
   logger?: PipelineLogger;
   /**
-   * The isolation tier RESOLVED by tier-ladder.ts's `resolveTier` (M8-D1 /
-   * task_2f46), computed ONCE at orchestrator startup (see index.ts) and
+   * The isolation tier RESOLVED by tier-ladder.ts's `resolveTier`, computed
+   * ONCE at orchestrator startup (see index.ts) and
    * forwarded to every job's `runReview` call as `RunReviewParams
    * .resolvedTier` below — this is what makes "the tier tier-ladder.ts
    * resolves is the tier that actually launches jobs" true: this pipeline
@@ -351,7 +351,7 @@ export function createReviewPipeline(
   const resolvedTier = deps.resolvedTier;
 
   const runJob: JobRunner = async (job, signal) => {
-    // M5-D (task_8a10): per-job cost/outcome telemetry. Every exit path below
+    // Per-job cost/outcome telemetry. Every exit path below
     // — an early return, a thrown error, or a normal completion — funnels
     // through the outer `finally` at the bottom of this function, which
     // classifies whichever of these got set into exactly one
@@ -392,7 +392,7 @@ export function createReviewPipeline(
         return;
       }
 
-      // Step 2z: re-review dedup (M5-C, see module doc comment). Read Magpie's
+      // Step 2z: re-review dedup (see module doc comment). Read Magpie's
       // own prior review state for this PR BEFORE spending anything else on
       // this job (gateway budget, a clone) — a redelivered webhook for a head
       // SHA already definitively reviewed is a no-op from here. Resolving the
@@ -441,11 +441,11 @@ export function createReviewPipeline(
         return;
       }
 
-      // Step 2y (M6-B, task_220f): resolve per-repo config overrides from
+      // Step 2y: resolve per-repo config overrides from
       // `.magpie.toml`, read ONLY from the base repo's DEFAULT branch — see
       // repo-config.ts's module doc comment for the full SECURITY rationale
       // (never `job.headSha`, never any PR-supplied ref). Placed AFTER the
-      // M5-C dedup check above (an already-reviewed job shouldn't pay for the
+      // re-review dedup check above (an already-reviewed job shouldn't pay for the
       // extra API round-trip this involves) but BEFORE minting the gateway
       // virtual key just below: that key is scoped to `config.llm.model`
       // (gateway.ts's `mintGatewayKeyFromConfig`), so the EFFECTIVE model —
@@ -527,7 +527,7 @@ export function createReviewPipeline(
           }
 
           logger.info({ event: "computing-diff", ...jobLogFields(job) });
-          // Incremental re-review (M5-B): on a `synchronize` delivery the filter
+          // Incremental re-review: on a `synchronize` delivery the filter
           // carries the pre/post-push head SHAs (job.before/job.after). Try to
           // review just that `before...after` range instead of the whole PR — a
           // small follow-up push shouldn't re-review (and re-bill) everything.
@@ -537,7 +537,7 @@ export function createReviewPipeline(
           // fast-forward, in which case we fall back to the full PR diff (see
           // diff.ts). The size cap applies to whichever range we end up using.
           //
-          // BASE PREFERENCE (M5-C): prefer `reviewState.lastReviewedSha` (step
+          // BASE PREFERENCE: prefer `reviewState.lastReviewedSha` (step
           // 2z) over the webhook's own `job.before` when both are available —
           // it's the more RELIABLE base: `job.before` is whatever the webhook
           // payload happened to carry for this one delivery, whereas
@@ -554,7 +554,7 @@ export function createReviewPipeline(
           let prDiff: PrDiffResult;
           let incremental = false;
           // The file list handed to the reviewer as context. For an incremental
-          // review this is the WHOLE-PR changed-file list (task_a193), NOT just
+          // review this is the WHOLE-PR changed-file list, NOT just
           // the incremental range's files — so the reviewer still sees every file
           // the PR touches even though the diff is only the new range.
           let reviewChangedFiles: string[] = [];
@@ -681,15 +681,14 @@ export function createReviewPipeline(
                   `Skipping automated review of this update.`
                 : `This PR changes ${prDiff.changedLineCount} lines, which exceeds the ` +
                   `configured review cap of ${effectiveConfig.limits.maxDiffLines}. Skipping automated review.`,
-              // No findings possible for a skipped review (task_0d97/wave 3 owns
-              // the real anchor+inline wiring); this is a minimal type-fix so this
+              // No findings possible for a skipped review; this is a minimal type-fix so this
               // synthetic result still satisfies reviewer.ts's now-required
               // ReviewResult.findings/verdict fields.
               findings: [],
               verdict: "comment",
             };
           } else {
-            // M8-C3, refined M8-D1: which reviewer TIER runs is selected
+            // Which reviewer TIER runs is selected
             // inside `runReview` from `resolvedTier` (falling back to
             // `config.container.tier` only if the ladder wasn't wired in —
             // see reviewer.ts's `RunReviewParams.resolvedTier` doc comment),
@@ -698,8 +697,8 @@ export function createReviewPipeline(
             // way (the micro-VM path derives its `--vsock-uds` from that
             // same socketDir via microvm-vsock.ts, so no new per-job input
             // is threaded here besides `resolvedTier` itself). The tier is
-            // logged for operator observability ONLY (M8-D2's "operator
-            // logs, never the public PR footer" surfacing rule — this log
+            // logged for operator observability ONLY (surfaced in operator
+            // logs, never the public PR footer — this log
             // object is ids/counts, never posted to the PR).
             logger.info({
               event: "running-review",
@@ -720,7 +719,7 @@ export function createReviewPipeline(
               incremental,
               prTitle: pr.title,
               prBody: pr.body ?? "",
-              // The per-job EFFECTIVE config (M6-B, step 2y above) — server
+              // The per-job EFFECTIVE config (step 2y above) — server
               // config with at most `llm.model`/`limits.maxDiffLines`
               // overridden by a validated `.magpie.toml` on the base repo's
               // default branch. Every other field (container/tier/image,
@@ -728,7 +727,7 @@ export function createReviewPipeline(
               // the server's own `config` (see repo-config.ts's
               // `applyRepoConfig`).
               config: effectiveConfig,
-              // Repo-supplied advisory guidance + ignore-globs (M6-B), also
+              // Repo-supplied advisory guidance + ignore-globs, also
               // from step 2y — `guidance` is folded into the prompt as its
               // own nonce-tagged advisory block, `ignorePaths` is a
               // belt-and-braces re-filter of Pi's reported findings (diff.ts
@@ -738,10 +737,10 @@ export function createReviewPipeline(
               ignorePaths,
               // The per-job virtual key minted in step 2a above (see this
               // module's doc comment) — reviewer.ts sets this as the review
-              // container's OPENROUTER_API_KEY (M4-C).
+              // container's OPENROUTER_API_KEY.
               gatewayApiKey: gatewayKey.key,
               // The per-job socket directory minted alongside the key above
-              // (M7-1, Design D — see gateway.ts's `GatewayKey.socketDir` doc
+              // (Design D — see gateway.ts's `GatewayKey.socketDir` doc
               // comment) — reviewer.ts bind-mounts this read-only at `/run/gw`
               // in the (now `--network none`) review container, the container's
               // only remaining path to the gateway.
@@ -758,7 +757,7 @@ export function createReviewPipeline(
             });
           }
 
-          // Capture the review result for telemetry (M5-D) as soon as it
+          // Capture the review result for telemetry as soon as it
           // exists — BEFORE the abort short-circuit below — so a job that
           // produced a real (possibly failed/timed-out) result still records
           // it even if an abort lands in the same tick.
@@ -789,11 +788,11 @@ export function createReviewPipeline(
 
           // See the module doc comment (step 7) for the three-way branch: a
           // failed review and a tooLarge-skipped review both keep using
-          // publishReview's M1 single-summary-comment path unchanged (there are
+          // publishReview's single-summary-comment path unchanged (there are
           // no real findings to anchor in either case); only a genuine
           // `{ ok: true }` result from `runReview` has findings worth anchoring
           // against the diff and publishing as inline PR review comments.
-          // M5-C: `reviewedSha` is only ever set on a definitive `result.ok`
+          // `reviewedSha` is only ever set on a definitive `result.ok`
           // outcome (a real success or the tooLarge-skip synthesized result) —
           // never on `{ok:false}` — so a redelivered webhook for a head SHA
           // whose only prior attempt failed still retries. See publisher.ts's
@@ -836,7 +835,7 @@ export function createReviewPipeline(
             commentUrl: published.url,
           });
 
-          // Step 7a (M5-C): minimize Magpie's prior minimizable comments as
+          // Step 7a: minimize Magpie's prior minimizable comments as
           // OUTDATED now that a fresh, definitive review has been posted for
           // this head SHA — but only on a definitive outcome (`result.ok`,
           // covering both a real success and a tooLarge skip), mirroring the
@@ -863,7 +862,7 @@ export function createReviewPipeline(
         // gateway.ts), so this can't mask the job's real outcome — a revoke
         // failure is only logged. Runs OUTSIDE the workspace `finally` above so
         // the key is still revoked even if `makeWorkspace` itself threw before
-        // that inner try was entered. Its resolved value (M5-D) is the gateway's
+        // that inner try was entered. Its resolved value is the gateway's
         // own authoritative final spend for this key, captured here for the
         // telemetry record assembled in the outermost `finally` below.
         const revocation = await revokeGatewayKey(config, gatewayKey.id);
@@ -883,11 +882,11 @@ export function createReviewPipeline(
       thrownReason = err instanceof Error ? err.message : String(err);
       throw err;
     } finally {
-      // M5-D: exactly one per-job telemetry record on EVERY exit path. Runs
+      // Exactly one per-job telemetry record on EVERY exit path. Runs
       // best-effort (recordJobTelemetry never throws — see telemetry.ts), so a
       // telemetry-sink failure can never mask the job's real outcome or the
       // rethrow above. `usage` prefers the review result's own usage (present
-      // on success AND, as of M5-D, on reviewer.ts's failure/kill paths);
+      // on success AND on reviewer.ts's failure/kill paths);
       // `costUsd` is the gateway's authoritative spend when available, else
       // Pi's self-reported cost, else 0 (see telemetry.ts's COST OF RECORD).
       const threw = thrownReason !== undefined;

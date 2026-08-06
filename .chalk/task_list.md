@@ -3,6 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **epic_59b1** · P1 · open · Milestone 8 — Rootless micro-VM reviewer sandbox (CTO-approved synthesis)
-- **epic_3c41** · P3 · open · Milestone 6 — Nice-to-haves (on-demand review, per-repo config, multi-provider)
-- **task_9c9d** · P3 · open · M6-D: multi-provider support beyond OpenRouter  (parent: epic_3c41)
+- **task_e70f** · P2 · in_progress · Reframe docs as a complete product, not a build log
+- **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter

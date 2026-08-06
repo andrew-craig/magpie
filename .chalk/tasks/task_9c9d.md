@@ -1,15 +1,15 @@
 ---
 id: task_9c9d
-title: M6-D: multi-provider support beyond OpenRouter
+title: Multi-provider support beyond OpenRouter
 type: task
 status: open
 priority: 3
 labels: []
 blocked_by: []
-parent: epic_3c41
+parent: 
 remote_task_url: null
 created_at: 2026-07-10T21:53:33Z
-updated_at: 2026-07-10T21:53:33Z
+updated_at: 2026-08-05T07:35:33Z
 ---
 PLAN.md milestone 6. Make the LLM provider configurable rather than OpenRouter-only.
 

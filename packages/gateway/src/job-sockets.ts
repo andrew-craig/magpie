@@ -1,5 +1,5 @@
-// Per-job unix-socket proxy-plane lifecycle for the magpie gateway (M7-1,
-// DISTRIBUTION.md §2.6 "Design D"). Before this module existed, the proxy
+// Per-job unix-socket proxy-plane lifecycle for the magpie gateway
+// (DISTRIBUTION.md §2.6 "Design D"). Before this module existed, the proxy
 // (data) plane was a single `http.Server` bound once at startup to a TCP
 // host:port shared by every job. Design D replaces that with ONE unix
 // socket PER JOB: the orchestrator bind-mounts a job's socket DIRECTORY
@@ -44,7 +44,7 @@ import type { GatewayConfig } from "./config.js";
 import type { KeyStore } from "./keystore.js";
 import { createProxyServer, type ProxyServer, type ProxyServerDeps } from "./proxy-server.js";
 
-/** Filename of the proxy-plane socket inside each job's directory — matches DISTRIBUTION.md §2.6 and the M7-0 spike (`spike/m7-0/gateway-on-socket.mjs`). */
+/** Filename of the proxy-plane socket inside each job's directory — matches DISTRIBUTION.md §2.6 and the original prototype (`spike/m7-0/gateway-on-socket.mjs`). */
 const SOCKET_FILE_NAME = "gw.sock";
 
 /** Mode for each per-job socket DIRECTORY — search-only for non-owners; see module doc comment. */
