@@ -2,18 +2,14 @@
 
 Self-hosted GitHub code-review bot — any organisation can stand up its own instance on its
 own Linux host (single-host, single-tenant per deployment; see the platform matrix below).
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design, [DISTRIBUTION.md](DISTRIBUTION.md)
-for the distribution/self-hosting architecture, and [CLAUDE.md](CLAUDE.md) for project/
-task-tracking conventions.
 
 ## Supported platforms
 
 | Requirement | Detail |
 |---|---|
 | OS | Any Linux host with **systemd** |
-| Container runtime | **Rootless Podman** (default; any docker-compatible CLI works) — runs the reviewer at the hardened **crun floor** tier by default, with an opt-in **micro-VM (KVM)** tier for stronger isolation; see ARCHITECTURE.md's isolation-tier ladder |
-| Architecture | **amd64 and arm64** — the reviewer image is published multi-arch; the host services are pure JS and arch-independent (the micro-VM tier's native `magpie-tier-probe` preflight binary is per-arch, bundled in the release tarball) |
-| Host | A **cloud VM or a Raspberry Pi** alike — this project runs on a Pi in production |
+| Container runtime | **Rootless Podman** (default; any docker-compatible CLI works) — runs the reviewer at the hardened **crun floor** tier by default, with an opt-in **micro-VM (KVM)** tier for stronger isolation; see ARCHITECTURE.md |
+| Architecture | **amd64 and arm64** |
 | Ingress | Pluggable — reverse proxy, Cloudflare Tunnel, or another outbound tunnel; see [docs/ingress.md](docs/ingress.md) |
 
 New to Magpie? Start with [QUICKSTART.md](QUICKSTART.md) for the end-to-end install, or
@@ -21,7 +17,7 @@ New to Magpie? Start with [QUICKSTART.md](QUICKSTART.md) for the end-to-end inst
 
 ## Prerequisites
 
-- **Node.js 22+** and npm (workspaces are used, so a recent npm is required)
+- **Node.js 22+** and npm
 - **Podman** — the review agent runs in a container/micro-VM launched by rootless Podman:
   no root daemon, no `docker`/root group membership needed, just the `magpie` user's own
   subuid/subgid ranges and a lingering session (see `INSTALL.md`). Any docker-compatible CLI
@@ -46,9 +42,9 @@ npm test
 ### Configuration
 
 Non-secret settings live in `config.toml` at the repo root — copy
-`config.example.toml` to `config.toml` and fill it in (it is git-ignored).
+`config.example.toml` to `config.toml` and fill it in.
 
-Secrets are kept **out** of `config.toml` and read from the environment. Copy
+Secrets are read from the environment. Copy
 `.env.example` to `.env` (also git-ignored) and set:
 
 - `MAGPIE_WEBHOOK_SECRET` — the GitHub App webhook secret
@@ -70,13 +66,10 @@ slice of review behaviour (model, diff-size cap, reviewer guidance, ignored
 paths) by committing a `.magpie.toml` file to its own default branch — see
 [`docs/repo-config.md`](docs/repo-config.md).
 
-### On-demand review
+### Usage
 
-Besides the automatic triggers (`opened`/`ready_for_review`/`reopened`/`synchronize`), any PR
-collaborator with write access can request a fresh review at any time by commenting
-`@magpie review` on the PR. Authorization is checked live against the commenter's GitHub
-permissions — never inferred from the comment text — so a PR author can't grant themselves a
-review by posting the command from an unauthorized account.
+Magpie will review PRs when `opened`, `ready_for_review`, `reopened`, `synchronize`. You can also request a fresh review at any time by commenting
+`@magpie review` on a PR.
 
 ## Running
 
@@ -125,9 +118,3 @@ install use the release tarball instead (see [QUICKSTART.md](QUICKSTART.md) /
 For exposing the orchestrator's webhook endpoint to GitHub via an
 outbound-only, dashboard-managed Cloudflare Tunnel (no inbound ports, no
 ingress config committed to this repo), see [docs/ingress.md](docs/ingress.md).
-
-## Webhook ingress (development)
-
-For receiving real GitHub webhook deliveries locally during development,
-without a public inbound port, see [docs/smee.md](docs/smee.md) and
-`npm run dev:smee`.
