@@ -59,20 +59,42 @@ Either way: the reverse proxy is the only public listener; the orchestrator
 stays on `127.0.0.1:8787` and never sees a public IP directly. Point the
 GitHub App's webhook URL at `https://magpie.example.com/webhook`.
 
-## Option 2: Cloudflare Tunnel
+## Option 2: Cloudflare Tunnel (dashboard-managed)
 
 An outbound-only tunnel — no inbound port to open, no port-forward on your
-router. Run as a host service via `scripts/setup-cloudflared.sh` +
-`systemd/cloudflared.service`; full runbook in `docs/cloudflared.md`.
+router. Set it up entirely from the Cloudflare Zero Trust dashboard, following
+[Cloudflare's own tunnel setup guide][cf-tunnel-setup]:
 
-- Works on any architecture: the setup script installs from Cloudflare's apt
-  repo on Debian-family hosts (any `dpkg` arch), or the official static
-  binary (verified by checksum) everywhere else — it is not limited to
-  arm64/Raspberry Pi.
-- You do **not** need to buy or register a domain through Cloudflare. Any
-  domain whose DNS is hosted on Cloudflare (free plan included) works — point
-  an existing domain's nameservers at Cloudflare, or use a subdomain of one
-  you already manage there.
+1. **Networking → Tunnels → Create a tunnel** (choose the "Cloudflared"
+   connector type), and give it a name (e.g. `magpie`).
+2. Pick your host's OS/architecture; the dashboard gives you a one-line
+   install command containing a connector token
+   (`cloudflared service install <TOKEN>`). Run it on the magpie host. This
+   installs `cloudflared` **and** registers + starts its own systemd service
+   — magpie ships no `cloudflared` unit or config of its own, and there is no
+   local `config.yml` or credentials file to manage.
+3. Back in the dashboard, confirm the tunnel shows **Healthy**, then add a
+   **Public Hostname** route: pick a subdomain of a domain whose DNS is
+   hosted on Cloudflare (free plan included — you don't need to have bought
+   or registered the domain through Cloudflare, just have its nameservers
+   pointed there), and set the **Service URL** to
+   `http://localhost:8787` — the orchestrator's default loopback bind
+   (`config.toml` `[server]`). Cloudflare creates the DNS record for you.
+4. Point the GitHub App's webhook URL at `https://<your-hostname>/webhook`.
+
+That's the whole setup — no scripts to run on the magpie host beyond the
+one-line install command the dashboard gives you, and no ingress rules to
+maintain in this repo (routing lives in the Cloudflare dashboard, not in a
+committed config file). See [Cloudflare's tunnel routing docs][cf-routing]
+if you need more than a single hostname/service mapping.
+
+As with every ingress option on this page: do **not** put a Cloudflare
+Access / Zero Trust login policy in front of the webhook hostname — it would
+intercept and block GitHub's webhook deliveries before the orchestrator's own
+HMAC check ever runs. The HMAC check is the auth gate, not Cloudflare Access.
+
+[cf-tunnel-setup]: https://developers.cloudflare.com/tunnel/setup/
+[cf-routing]: https://developers.cloudflare.com/tunnel/routing/
 
 ## Option 3: Other outbound tunnels
 
@@ -112,5 +134,5 @@ matters). Pick based on what you already operate:
 | No public server, want a stable free setup | Option 2 (Cloudflare Tunnel) |
 | An existing Tailscale/ngrok setup, or quick evaluation | Option 3 |
 
-See also: `INSTALL.md` (host service install), `docs/cloudflared.md`
-(Cloudflare Tunnel runbook), `DISTRIBUTION.md` §2.3 (design rationale).
+See also: `INSTALL.md` (host service install), `DISTRIBUTION.md` §2.3
+(design rationale).

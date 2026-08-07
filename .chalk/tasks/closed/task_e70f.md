@@ -2,14 +2,14 @@
 id: task_e70f
 title: Reframe docs as a complete product, not a build log
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-08-05T07:45:47Z
-updated_at: 2026-08-05T10:02:19Z
+updated_at: 2026-08-07T03:37:07Z
 ---
 
 Docs accumulated milestone/task-ID narration ("M8-D3 did X", "as of M7-1", "task_89c4")

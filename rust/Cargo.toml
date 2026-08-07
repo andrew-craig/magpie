@@ -2,9 +2,8 @@
 #
 # Scope: see docs/design/rust-adoption.md "Build & signing". This workspace
 # exists alongside the npm workspaces at the repo root; it is the build lane
-# for Magpie's native (Rust) process-boundary components: the
-# scaffolding crate `vsock-framing`, the guest-side vsock client
-# `vsock-client`, the production host-side libkrun launcher
+# for Magpie's native (Rust) process-boundary components: the guest-side
+# vsock client `vsock-client`, the production host-side libkrun launcher
 # `magpie-microvm-launcher`, and the install-time/runtime KVM preflight
 # `magpie-tier-probe`.
 #
@@ -23,7 +22,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "vsock-framing",
     "vsock-client",
     "magpie-microvm-launcher",
     "magpie-tier-probe",

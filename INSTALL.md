@@ -172,9 +172,10 @@ sudo systemctl status magpie-gateway magpie
 ```
 
 You'll also need a public HTTPS endpoint forwarding to the orchestrator's
-webhook port — see `DISTRIBUTION.md` §2.3 for the supported ingress options
-(reverse proxy, Cloudflare Tunnel, other tunnels). The existing Cloudflare
-Tunnel path is documented separately in `docs/cloudflared.md`.
+webhook port — see `docs/ingress.md` for the supported ingress options
+(reverse proxy, Cloudflare Tunnel, other tunnels). The Cloudflare Tunnel
+option is set up entirely from the Cloudflare dashboard (no unit or config
+shipped by this repo) — see `docs/ingress.md`'s Option 2.
 
 ### Checking the active isolation tier
 

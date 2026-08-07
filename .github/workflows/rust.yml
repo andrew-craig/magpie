@@ -32,9 +32,8 @@
 #   zero test edits" an enforced CI property rather than an aspiration.
 #
 # SCOPE NOTE (read before wiring this into a real release)
-#   `rust/` holds the scaffolding crates (`vsock-framing`, the
-#   `magpie-vsock-client` guest-side relay) plus the production host-side
-#   libkrun launcher (`magpie-microvm-launcher`) plus the production
+#   `rust/` holds the guest-side relay (`magpie-vsock-client`) plus the
+#   production host-side libkrun launcher (`magpie-microvm-launcher`) plus the production
 #   install-time/runtime KVM preflight (`magpie-tier-probe`) — see
 #   docs/design/rust-adoption.md. Per that doc, a binary BAKED INTO the
 #   reviewer image is already covered by the image's digest pin + cosign

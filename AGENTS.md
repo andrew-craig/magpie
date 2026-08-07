@@ -64,7 +64,7 @@ budget-capped virtual keys. See `packages/gateway/README.md`.
 assertions), and the in-container TCP→unix `forwarder.mjs`.
 
 `rust/` — `magpie-tier-probe` (KVM preflight), `magpie-microvm-launcher` (rootless-libkrun
-launcher), `vsock-client`/`vsock-framing` (micro-VM guest-side gateway channel).
+launcher), `vsock-client` (micro-VM guest-side gateway channel).
 
 `systemd/`, `scripts/install.sh`, `scripts/pack-host.sh` — production units and the release/install
 tooling. `docs/` — `ingress.md`, `repo-config.md`, `review-flow.md`, and `design/` (decision

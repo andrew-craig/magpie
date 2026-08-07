@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 # Only dependency, matching magpie-microvm-launcher's posture (see that
 # crate's Cargo.toml doc comment): AF_VSOCK/sockaddr_vm/VMADDR_CID_HOST
-# primitives, proven sufficient by the spike prototype. Deliberately
-# does NOT depend on vsock-framing -- see src/main.rs's "Why not the
-# vsock-framing crate" doc section.
+# primitives, proven sufficient by the spike prototype. See src/main.rs's
+# module doc comment for why this relay needs no framing library.
 libc = "0.2"

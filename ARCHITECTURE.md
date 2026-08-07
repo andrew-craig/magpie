@@ -255,10 +255,10 @@ magpie/
 ├── rust/
 │   ├── magpie-tier-probe/           # /dev/kvm KVM_CREATE_VM preflight
 │   ├── magpie-microvm-launcher/     # rootless-libkrun launcher for the micro-VM tier
-│   └── vsock-client/, vsock-framing/  # micro-VM guest-side gateway channel
+│   └── vsock-client/                 # micro-VM guest-side gateway channel
 ├── docker/reviewer/                 # magpie-reviewer image: Dockerfile, entrypoint, forwarder
 ├── scripts/                         # install.sh, pack-host.sh, dev/test helpers
-├── systemd/                         # magpie.service, magpie-gateway.service, cloudflared.service
+├── systemd/                         # magpie.service, magpie-gateway.service
 ├── docs/                            # ingress, repo-config, review-flow, design decision records
 └── config.example.toml              # app id, key path, gateway URL, provider/model, limits
 ```

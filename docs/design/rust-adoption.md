@@ -19,8 +19,10 @@ net result is a **TS + Rust** two-language stack — not TS + Go + Rust.
 
 ## Why Rust, not Go
 
-The M8-A1 spike (`.chalk/tasks/task_1fdc.md`, `spike/m8-a1/frontend-investigation.md`) surfaced a
-component that wasn't in the original plan and settled the language question:
+The M8-A1 spike (`.chalk/tasks/closed/task_1fdc.md`; its working notes lived at
+`spike/m8-a1/frontend-investigation.md`, since removed along with the rest of `spike/` once its
+findings were folded into this doc and the production Rust crates) surfaced a component that
+wasn't in the original plan and settled the language question:
 
 1. **The host-side micro-VM launcher forces it.** Adopting the direct-libkrun front-end (the only
    way to get provable no-network — see below) means *we* call libkrun's C ABI:
@@ -31,8 +33,9 @@ component that wasn't in the original plan and settled the language question:
    ever need to patch it. C was the only other real candidate; Rust wins on memory safety.
 2. **The guest-side client is proven in Rust.** A static musl `AF_VSOCK` client (389 KB, fully
    static, `libc` crate only) did a full guest↔host vsock round-trip through `krun_add_vsock_port2`
-   with TSI off (spike commit `f47eaf3`, `spike/m8-a1/vsock-client/`). It meets every requirement
-   the Go mandate was written for.
+   with TSI off (spike commit `f47eaf3`; the spike's `spike/m8-a1/vsock-client/` prototype was
+   later removed once superseded by the production `rust/vsock-client` crate). It meets every
+   requirement the Go mandate was written for.
 
 Once Rust is required host-side for the launcher, running a *second* native language for a simple
 socket-forwarding guest binary is pure toolchain tax. Fewer signed-artifact toolchains and one
@@ -103,11 +106,11 @@ job for the relay contract against the real Rust binary):
    `AF_VSOCK`, the micro-VM path), selected at container startup by
    `docker/reviewer/entrypoint.sh` testing `[ -c /dev/vsock ]`. There is **no custom wire format**
    on this boundary — it's a raw byte pipe (Pi's HTTP traffic is already self-delimiting; see
-   `rust/vsock-client/src/main.rs`'s "Why not the vsock-framing crate" doc section) — so the
+   `rust/vsock-client/src/main.rs`'s "Why no framing library" doc section) — so the
    contract worth pinning is byte-stream *relay behaviour* (bidirectional copy, half-close/EOF
-   propagation, teardown-race tolerance), not a frame format. `vsock-framing` remains unused
-   scaffolding for a hypothetical future consumer that actually needs message framing; it is not
-   part of this boundary and has no golden fixture here.
+   propagation, teardown-race tolerance), not a frame format. The `vsock-framing` scaffolding crate
+   that briefly existed for a hypothetical framed-message consumer was removed once it was clear
+   neither this relay nor the host-side forwarder needed it.
 
    The suite is impl-selectable via `MAGPIE_RELAY_IMPL` (`node`, default — drives the real
    `forwarder.mjs` subprocess against a real unix-socket destination stub, always runs, no special

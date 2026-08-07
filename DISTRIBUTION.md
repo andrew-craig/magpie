@@ -226,8 +226,9 @@ GitHub PEM are not all co-readable; they do **not** collapse into a single world
 
 Magpie only needs *some* public HTTPS URL forwarded to the orchestrator's loopback webhook port.
 Three options are documented: (1) **reverse proxy + own TLS** (Caddy/nginx/Traefik) for orgs
-with a public server; (2) **Cloudflare Tunnel** as a host service (the official binary is
-multi-arch, no `apt`/arm64-only assumption); (3) other outbound tunnels (tailscale funnel,
+with a public server; (2) **Cloudflare Tunnel**, set up and routed entirely from the Cloudflare
+dashboard — `cloudflared` installs and manages its own systemd service via a connector token,
+so this repo ships no unit or ingress config for it; (3) other outbound tunnels (tailscale funnel,
 ngrok). HMAC verification makes the endpoint safe to expose regardless of which option is
 chosen; see [docs/ingress.md](docs/ingress.md) for the full matrix. When a port is published to
 a host reverse proxy, bind it to `127.0.0.1` explicitly.

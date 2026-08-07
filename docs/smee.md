@@ -7,8 +7,8 @@ an outbound `smee-client` (this repo's `scripts/dev-smee.mjs`) relays them to
 `http://localhost:8787/webhook` on your machine.
 
 The **production** counterpart — outbound-only Cloudflare Tunnel, no
-third-party relay — is [`docs/cloudflared.md`](cloudflared.md). Don't use
-smee.io in production; it's a convenience for local development only.
+third-party relay — is documented in [`docs/ingress.md`](ingress.md). Don't
+use smee.io in production; it's a convenience for local development only.
 
 ## How it works
 
