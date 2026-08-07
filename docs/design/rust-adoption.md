@@ -106,11 +106,11 @@ job for the relay contract against the real Rust binary):
    `AF_VSOCK`, the micro-VM path), selected at container startup by
    `docker/reviewer/entrypoint.sh` testing `[ -c /dev/vsock ]`. There is **no custom wire format**
    on this boundary — it's a raw byte pipe (Pi's HTTP traffic is already self-delimiting; see
-   `rust/vsock-client/src/main.rs`'s "Why not the vsock-framing crate" doc section) — so the
+   `rust/vsock-client/src/main.rs`'s "Why no framing library" doc section) — so the
    contract worth pinning is byte-stream *relay behaviour* (bidirectional copy, half-close/EOF
-   propagation, teardown-race tolerance), not a frame format. `vsock-framing` remains unused
-   scaffolding for a hypothetical future consumer that actually needs message framing; it is not
-   part of this boundary and has no golden fixture here.
+   propagation, teardown-race tolerance), not a frame format. The `vsock-framing` scaffolding crate
+   that briefly existed for a hypothetical framed-message consumer was removed once it was clear
+   neither this relay nor the host-side forwarder needed it.
 
    The suite is impl-selectable via `MAGPIE_RELAY_IMPL` (`node`, default — drives the real
    `forwarder.mjs` subprocess against a real unix-socket destination stub, always runs, no special

@@ -17,21 +17,20 @@
 //! equivalent of `forwarder.mjs`: same TCP address, same per-connection
 //! relay contract, different destination transport.
 //!
-//! # Why not the `vsock-framing` crate
+//! # Why no framing library
 //!
-//! `vsock-framing`'s doc comment (written before this task landed) speculated
-//! this client would length-prefix-frame Pi's traffic before relaying it.
-//! That turned out to be unnecessary and actively wrong for this shape: Pi's
-//! traffic is plain HTTP, already self-delimiting, and the M8-A1 spike
-//! addendum proved `AF_VSOCK` supports ordinary per-connection semantics
-//! (each `connect()` is a distinct byte stream, exactly like `AF_UNIX`/TCP) —
-//! so the correct relay is a 1:1 "new vsock connection per accepted TCP
-//! connection" raw byte pipe, identical in shape to `forwarder.mjs`'s
-//! `tcpConn.pipe(unixConn)`. Introducing a custom frame format here would
-//! require the host-side forwarder (`task_b3f7`, not yet built) to decode
-//! it, for no benefit. `vsock-framing` is left as-is for any future consumer
-//! that actually needs message framing (its own doc comment has been
-//! corrected to stop pointing at this crate).
+//! An early plan speculated this client would need to length-prefix-frame
+//! Pi's traffic before relaying it, which briefly motivated a standalone
+//! `vsock-framing` scaffolding crate (since removed — it never gained a
+//! consumer). That framing turned out to be unnecessary and actively wrong
+//! for this shape: Pi's traffic is plain HTTP, already self-delimiting, and
+//! the M8-A1 spike addendum proved `AF_VSOCK` supports ordinary
+//! per-connection semantics (each `connect()` is a distinct byte stream,
+//! exactly like `AF_UNIX`/TCP) — so the correct relay is a 1:1 "new vsock
+//! connection per accepted TCP connection" raw byte pipe, identical in shape
+//! to `forwarder.mjs`'s `tcpConn.pipe(unixConn)`. The host-side forwarder
+//! (`task_b3f7`) resolved the same way — a plain byte relay, no frame format
+//! to decode.
 //!
 //! # Fail-closed startup
 //!

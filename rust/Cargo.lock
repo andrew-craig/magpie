@@ -28,7 +28,3 @@ version = "0.0.0"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "vsock-framing"
-version = "0.0.0"
