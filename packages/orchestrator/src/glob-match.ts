@@ -30,10 +30,10 @@ function escapeRegExpLiteral(char: string): string {
 
 /**
  * Compiles one glob `pattern` into an anchored `RegExp` per the module doc
- * comment's wildcard semantics. Pure and exported so it's directly
- * unit-testable independent of {@link matchesGlob}.
+ * comment's wildcard semantics. Not exported — exercised indirectly via
+ * {@link matchesGlob}'s tests.
  */
-export function globToRegExp(pattern: string): RegExp {
+function globToRegExp(pattern: string): RegExp {
   let re = "";
   let i = 0;
   while (i < pattern.length) {
