@@ -74,7 +74,7 @@ flowchart TD
         RESULT -->|"no (failed / timed<br/>out / aborted)"| PUBFAIL["publisher.ts publishReview:<br/>single summary comment,<br/>no reviewed-sha marker<br/>(so a retry isn't skipped)"]
         RESULT -->|"yes, but diff<br/>was too large"| PUBSKIP["publisher.ts publishReview:<br/>single summary comment +<br/>reviewed-sha marker"]
         RESULT -->|"yes, real findings"| ANCH["Anchor findings to diff hunks<br/>— anchor.ts (in-diff → inline<br/>comments, out-of-diff → folded<br/>into the summary)"]
-        ANCH --> PUBOK["publisher.ts publishReviewWithFindings:<br/>ONE pulls.createReview,<br/>event: COMMENT (never approves<br/>or blocks) + reviewed-sha marker"]
+        ANCH --> PUBOK["publisher.ts publishReviewWithFindings:<br/>ONE pulls.createReview,<br/>event: COMMENT by default<br/>(APPROVE only if repo+operator<br/>both opted in AND verdict=approve<br/>AND zero findings) + reviewed-sha marker"]
         PUBFAIL --> CLEAN
         PUBSKIP --> MIN
         PUBOK --> MIN

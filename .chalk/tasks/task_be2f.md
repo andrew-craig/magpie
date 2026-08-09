@@ -160,7 +160,7 @@ well documented, not as a silent default-on behavior change.
       loads `true` when set.
 
 ### Docs
-- [ ] `docs/repo-config.md`: add `review.allow_approve` as a 5th key in the
+- [x] `docs/repo-config.md`: add `review.allow_approve` as a 5th key in the
       "exactly four keys" section (retitle to five, keep the same "nothing
       outside this list has any effect" framing). Immediately below the
       example, add a clearly-marked warning covering BOTH: (1) a Magpie
@@ -173,14 +173,16 @@ well documented, not as a silent default-on behavior change.
       new "## Enabling the approve tick (operator side)" section mirroring
       the existing "## Enabling the model override (operator side)" section,
       documenting the `config.toml` `[review] allow_approve` gate.
-- [ ] `docs/ARCHITECTURE.md`: update the "Review posture: `COMMENT` only —
+- [x] `docs/ARCHITECTURE.md`: update the "Review posture: `COMMENT` only —
       Magpie never approves or requests changes." line (~line 271) and the
       `event: COMMENT` mention (~line 209-210) to state the accurate default
       (COMMENT-only, never `REQUEST_CHANGES`, never merges) plus the narrow
       opt-in exception and point at repo-config.md.
-- [ ] `docs/review-flow.md`: update the diagram text at line 77
+      (Also updated the opening paragraph's summary line, which made the
+      same absolute claim.)
+- [x] `docs/review-flow.md`: update the diagram text at line 77
       (`event: COMMENT (never approves or blocks)`) to match.
-- [ ] `CLAUDE.md` (repo root): the opening description says "it never
+- [x] `CLAUDE.md` (repo root): the opening description says "it never
       approves or blocks; a human always decides." Reword precisely — do NOT
       weaken the actual capability-separation security claims elsewhere in
       that paragraph. Suggested replacement for just that clause: "it never
@@ -190,15 +192,42 @@ well documented, not as a silent default-on behavior change.
       tick on a fully clean review; a human always makes the merge decision."
       Get this wording right; it's the single most load-bearing sentence in
       the file.
+      (`CLAUDE.md` is a symlink → `AGENTS.md`; edited `AGENTS.md`, using the
+      suggested clause verbatim.)
+- [x] (Not in the original checklist, added for completeness per the "every
+      doc touchpoint" framing) `docs/QUICKSTART.md` made the same absolute
+      "never approves or blocks"/"never approves or requests changes" claim
+      in two places (the intro and step 9) — updated both to the accurate
+      default + narrow opt-in framing, linking to repo-config.md. Swept the
+      rest of `docs/*.md` and `README.md` for the same phrase afterward;
+      README.md's two `COMMENT`-review mentions are descriptions of the
+      DEFAULT path only (no absolute "never approves" claim), so left as-is.
 
 ## Verification
-- [ ] `npm run build && npm test` (or workspace-scoped equivalents) green
+- [x] `npm run build && npm test` (or workspace-scoped equivalents) green
       across `packages/orchestrator`.
-- [ ] `npm run lint`/typecheck clean.
-- [ ] Re-read the final `publisher.ts` diff to confirm the 422-retry path
+      (Root `npm run build` — orchestrator's `tsc -p` — clean; root `npm test`
+      — vitest across all three workspaces — 620/620 passing:
+      gateway 75, orchestrator 534 passed + 4 pre-existing skipped,
+      review-extension 11.)
+- [x] `npm run lint`/typecheck clean.
+      (No root/orchestrator `lint` script exists in this repo — the closest
+      analog is typecheck-via-build: orchestrator's `tsc -p` (root build),
+      gateway's `tsc -p`, and review-extension's dedicated `npm run
+      typecheck` script all pass clean. Note orchestrator's `tsconfig.json`
+      excludes `src/**/*.test.ts` from `tsc -p`, so this doesn't type-check
+      test files — matches this repo's existing CI, which runs `npm run
+      build` as its "Typecheck" step; see `.github/workflows/ci.yml`.)
+- [x] Re-read the final `publisher.ts` diff to confirm the 422-retry path
       still can't accidentally end up `APPROVE` after findings get folded
       into the body (it must always recompute/reuse the COMMENT-forcing
       condition, not the pre-fold `event`).
+      (Confirmed: `event` is a single `const` computed once at the top of
+      `publishReviewWithFindings` from the pre-fold `inline`/`other`, and
+      reused verbatim for both the primary `createReview` call and the
+      422-retry's `createReview` call — never recomputed against the folded
+      `comments: []` state. Also covered by a dedicated regression test in
+      `publisher.test.ts`, see Tests section above.)
 
 ## Out of scope
 - No change to `REQUEST_CHANGES` — still never used, not being added.

@@ -4,8 +4,10 @@ Magpie is a self-hosted code review bot that any organisation can stand up on it
 host — a single-host, single-tenant deployment per organisation, not a shared multi-tenant
 service. It listens for GitHub pull request activity, checks out the PR branch, runs the
 [Pi coding agent](https://pi.dev/) over the diff inside an isolated sandbox, and posts findings
-back to the PR as a review with inline comments. It never approves or requests changes — a
-human always decides.
+back to the PR as a review with inline comments. It never auto-merges and never requests
+changes — by default it posts a `COMMENT` review, and only when a repo opts in via
+`.magpie.toml` (and the operator has enabled it server-side) may it post a plain `APPROVE` tick
+on a fully clean review; a human always makes the merge decision.
 
 This document describes the system as it stands today. For how to install and run it, see
 [README.md](README.md), [QUICKSTART.md](QUICKSTART.md), and [INSTALL.md](INSTALL.md). For the
@@ -206,8 +208,12 @@ orchestrator posts a "review failed" comment rather than staying silent.
 Findings are re-validated at the trust boundary before the orchestrator ever relies on them,
 then anchored to diff hunks — GitHub rejects any inline comment on a line not present in the
 diff, so findings that don't anchor fold into the summary under "Other observations" instead of
-being dropped. Exactly one `pulls.createReview` (`event: COMMENT` — Magpie never approves or
-blocks) is posted per job, with inline comments plus a summary.
+being dropped. Exactly one `pulls.createReview` is posted per job, with inline comments plus a
+summary. `event` is `COMMENT` by default, and becomes `APPROVE` — a plain informational tick,
+never `REQUEST_CHANGES` and never a merge — only when a repo has opted in via `.magpie.toml`
+*and* the operator has enabled it server-side *and* the review came back with `verdict: "approve"`
+and zero findings; see [repo-config.md](repo-config.md) for the opt-in mechanism and the
+branch-protection / prompt-injection risks it's gated on.
 
 On a `synchronize` push, only the incremental diff is reviewed; a hidden HTML marker in the
 summary (`<!-- magpie:reviewed:<sha> -->`) tracks the last-reviewed commit statelessly straight
@@ -268,7 +274,10 @@ magpie/
 - **Trigger policy:** auto-review every non-draft PR on `opened`/`ready_for_review`/
   `reopened`/`synchronize`, plus on-demand via `@magpie review`, gated by a repo allowlist in
   config (Magpie doesn't auto-run on every repo the App could be installed on).
-- **Review posture:** `COMMENT` only — Magpie never approves or requests changes.
+- **Review posture:** `COMMENT` by default, never `REQUEST_CHANGES`, never a merge. A repo may
+  opt into a plain `APPROVE` tick on a fully clean review (`verdict: "approve"`, zero findings),
+  but only if the operator has ALSO enabled it server-side — see
+  [repo-config.md](repo-config.md#enabling-the-approve-tick-operator-side).
 - **LLM provider:** OpenRouter, model configurable, reached through the host-side gateway,
   which holds the key and enforces per-job budgets (the sandbox gets only a virtual key).
 - **Limits:** concurrency 2, 10-minute job timeout, ~4k-changed-lines diff cap, 4 GB / 2 CPU

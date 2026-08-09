@@ -13,8 +13,11 @@ provider key, mints short-lived per-job credentials) — plus a **reviewer
 container**, the one container in the product, pulled from GHCR and run
 `--network none` per review job. On each pull request against a repo you've
 allow-listed, Magpie clones the PR head, runs the Pi coding agent over the
-diff inside the isolated reviewer container, and posts exactly one `COMMENT`
-review back to the PR — it never approves or blocks; a human still decides.
+diff inside the isolated reviewer container, and posts exactly one review
+back to the PR — a `COMMENT` by default, never `REQUEST_CHANGES` and never a
+merge; a human still decides. A repo can opt into a plain `APPROVE` tick on a
+fully clean review, but only if the operator has also enabled it server-side
+— see [`repo-config.md`](repo-config.md#enabling-the-approve-tick-operator-side).
 See [`DISTRIBUTION.md`](DISTRIBUTION.md) for the full architecture and threat
 model.
 
@@ -230,5 +233,7 @@ start/verify detail: **[`INSTALL.md`](INSTALL.md) §7**.
 Open a (non-draft) pull request — or push a new commit to one, or mark a
 draft ready for review — on a repo in your `repo_allowlist`. Within a few
 minutes Magpie clones the PR head, runs the review, and posts a single
-`COMMENT`-type review summarizing what it found. It never approves or
-requests changes; that's still on you.
+review summarizing what it found — a `COMMENT` by default. It never requests
+changes and never merges anything; the merge decision is still on you, even
+on a repo where the optional `APPROVE`-tick feature (see
+[`repo-config.md`](repo-config.md)) is enabled.

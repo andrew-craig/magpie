@@ -31,7 +31,7 @@ schema validation in any way, Magpie silently falls back to the operator's
 server config and runs the review normally. A broken `.magpie.toml` never
 fails or skips a review — it just means no overrides apply for that job.
 
-## The overridable subset — exactly four keys
+## The overridable subset — exactly five keys
 
 Nothing outside this list has any effect. An unrecognized top-level section
 or an unrecognized key inside a recognized section invalidates the **whole
@@ -68,7 +68,49 @@ guidance = "This is a Rust codebase; flag `unwrap()`/`expect()` outside tests. P
 # ignoring a large vendored/generated directory can let an otherwise
 # oversized PR through the cap.
 ignore_paths = ["vendor/**", "**/*.min.js", "dist/**"]
+
+# Opt this repo into a real GitHub APPROVE review (an informational "tick")
+# instead of Magpie's baseline COMMENT — but ONLY when the operator's own
+# config.toml has ALSO set `[review] allow_approve = true` (see "Enabling the
+# approve tick" below); a repo can request this, never grant it to itself.
+# Even then, Magpie only ever posts APPROVE when the review is genuinely
+# clean: the reviewer's own verdict is "approve" AND it found zero findings.
+# Any finding at all, or a "comment" verdict, still posts a plain COMMENT
+# review. Magpie never posts REQUEST_CHANGES and never merges anything,
+# regardless of this setting. Default: false (unset). **Read the warning
+# immediately below before enabling this.**
+allow_approve = false
 ```
+
+> **Warning — read before setting `allow_approve = true` in EITHER `.magpie.toml`
+> or the operator's `config.toml`:**
+>
+> 1. **Branch protection / merge gate.** A bot `APPROVE` from Magpie's GitHub
+>    App counts toward a repo's "required approving reviews" branch
+>    protection rule exactly like a human approval does — there is no GitHub
+>    API to mark a bot approval as "doesn't count." If a repo's branch
+>    protection requires only **one** approving review, enabling this can let
+>    a PR merge with **zero human sign-off**, as long as Magpie's own findings
+>    happen to come back clean. Only enable this on a repo whose branch
+>    protection either requires more than one approval, or where an operator
+>    is comfortable with Magpie's tick alone being able to satisfy the rule.
+> 2. **Prompt injection.** The `verdict` that drives this decision is
+>    authored by the Pi reviewer from PR-supplied (and therefore
+>    attacker-influenced) diff/title/body content — indirect prompt injection
+>    against the review agent is Magpie's own named threat model (see
+>    ARCHITECTURE.md's threat model section). Today, a manipulated
+>    verdict/summary is low-stakes: a human reads a `COMMENT`. Once `verdict`
+>    can drive a real GitHub `APPROVE`, a sufficiently crafted PR becomes a
+>    materially higher-stakes target — the zero-findings condition raises the
+>    bar, but does not eliminate it, since findings themselves are also
+>    LLM-authored from the same untrusted input.
+>
+> Both risks are inherent to what "post a real GitHub review status from an
+> LLM's read of untrusted PR content" means; they are not implementation bugs
+> to be engineered around. The double opt-in (operator `config.toml` **and**
+> repo `.magpie.toml`) exists specifically so this is never a silent
+> default — an operator must consciously accept both risks for a specific
+> repo before it takes effect.
 
 Every other section a `.magpie.toml` might name — the container image or
 isolation tier, the gateway URL, per-job budgets, timeouts, concurrency, the
@@ -76,8 +118,10 @@ reviewer's tool allowlist, the operator's `repo_allowlist` itself, workspace
 paths, telemetry — is **server-only** and cannot be reached from this file at
 all, by construction: the code that builds the effective per-job config
 copies every one of those fields verbatim from the operator's `config.toml`
-and only ever substitutes in the two values above (`llm.model`,
-`limits.max_diff_lines`) when they're present and valid.
+and only ever substitutes in the values above (`llm.model`,
+`limits.max_diff_lines`) when they're present and valid — `review.allow_approve`
+is handled the same way, but as a separate sidecar value rather than a
+`Config` field (see repo-config.ts's `applyRepoConfig`).
 
 ## Enabling the model override (operator side)
 
@@ -98,6 +142,27 @@ Choose this list with the same care as the per-job budget
 gateway virtual key gets scoped to, so only list models you're comfortable
 any allowlisted repo choosing to run against.
 
+## Enabling the approve tick (operator side)
+
+By default, `.magpie.toml` cannot turn Magpie's `COMMENT` reviews into a real
+GitHub `APPROVE` — `review.allow_approve` in the operator's own `config.toml`
+starts `false`. To let repos opt into the approve tick:
+
+```toml
+[review]
+allow_approve = true
+```
+
+Read the warning above the `[review]` example before setting this. Enabling
+it here does **not** make Magpie start approving PRs by itself — it only
+makes it *possible* for a repo to opt in via its own `.magpie.toml`; a repo
+that never sets `[review] allow_approve = true` keeps getting plain `COMMENT`
+reviews even after the operator flips this on. Treat this the same way you'd
+treat granting a repo the ability to affect branch-protection outcomes at
+all, because that is exactly what it does: only enable it for repos where an
+operator has actually reviewed that repo's branch-protection configuration
+and is comfortable with a clean Magpie review being able to satisfy it.
+
 ## Why this exists / threat model
 
 See `packages/orchestrator/src/repo-config.ts`'s module doc comment for the
@@ -106,5 +171,9 @@ agent never holds anything worth stealing and the *host* does all privileged
 work. Per-repo config had to be added without creating a new lever a hostile
 PR (or even a hostile default-branch commit, which is already a more trusted
 position) could pull to reach budgets, network egress, the container image,
-or the tool allowlist. The base-branch pin plus the fixed four-key subset
+or the tool allowlist. The base-branch pin plus the fixed five-key subset
 plus fail-soft-on-anything-else is how that property is preserved.
+`review.allow_approve` is the one knob in that subset with a real security
+consequence beyond "Magpie reviews slightly differently," which is why it
+carries the extra server-side gate on top of the base-branch pin every other
+knob relies on alone.
