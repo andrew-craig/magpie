@@ -6,10 +6,9 @@ import type { PullRequestEvent } from "./server.js";
 
 const ALLOWED_REPO = "my-org/repo";
 
-function testConfig(overrides: Partial<Pick<Config, "repoAllowlist">> = {}): Pick<
-  Config,
-  "repoAllowlist"
-> {
+type TestConfig = Pick<Config, "repoAllowlist"> & { review?: { skipDraftPrs?: boolean } };
+
+function testConfig(overrides: Partial<TestConfig> = {}): TestConfig {
   return {
     repoAllowlist: [ALLOWED_REPO],
     ...overrides,
@@ -86,6 +85,18 @@ describe("createPullRequestFilter", () => {
     filter(makeEvent({ action: "opened", draft: true }));
 
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("reviews draft PRs when config.review.skipDraftPrs is false", () => {
+    const enqueue = vi.fn();
+    const filter = createPullRequestFilter(
+      testConfig({ review: { skipDraftPrs: false } }),
+      enqueue,
+    );
+
+    filter(makeEvent({ action: "opened", draft: true }));
+
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it("ignores non-matching actions", () => {

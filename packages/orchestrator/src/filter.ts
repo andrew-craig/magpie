@@ -7,7 +7,9 @@
 //
 //   - only `opened` / `ready_for_review` / `reopened` / `synchronize` PR
 //     actions are ever reviewed (comments, labels, closes, etc. are ignored);
-//   - draft PRs are ignored (nothing to review yet);
+//   - draft PRs are ignored (nothing to review yet) UNLESS the operator has
+//     set `config.review.skipDraftPrs = false` (see loadConfig's
+//     `review.skip_draft_prs`, default `true`);
 //   - the PR's *base* repository must match an entry in `config.repoAllowlist`
 //     — this is the last line of defense against a public GitHub App instance
 //     being pointed at a repo the operator never opted in to running the
@@ -112,7 +114,8 @@ interface LenientPullRequestPayload {
  * Build the `OnPullRequest` handler that filters webhook deliveries down to
  * review jobs and hands accepted ones to `enqueue`.
  *
- * Gating order: action allowlist -> not-draft -> repo allowlist (checked
+ * Gating order: action allowlist -> not-draft (skippable via
+ * `config.review.skipDraftPrs = false`) -> repo allowlist (checked
  * against the PR's *base* repository, i.e. `payload.repository.full_name` —
  * the repo the PR targets, not a fork it may come from). Allowlist entries
  * are matched with `matchesAnyGlob` (see glob-match.ts): an exact
@@ -128,17 +131,22 @@ interface LenientPullRequestPayload {
  * the event loop. Every failure mode — missing fields, an unexpected
  * payload shape, `enqueue` rejecting — is caught and logged instead.
  *
- * @param config  Only `repoAllowlist` is read; accepts a `Config` or any
- *                slice that has it, so tests don't need a full fake Config.
+ * @param config  Only `repoAllowlist` and `review.skipDraftPrs` are read;
+ *                accepts a `Config` or any slice that has them, so tests
+ *                don't need a full fake Config.
  * @param enqueue Seam invoked once per accepted job (see {@link EnqueueJob}).
  * @param logger  Defaults to a JSON-on-console logger.
  */
 export function createPullRequestFilter(
-  config: Pick<Config, "repoAllowlist">,
+  config: Pick<Config, "repoAllowlist"> & { review?: { skipDraftPrs?: boolean } },
   enqueue: EnqueueJob,
   logger: FilterLogger = consoleLogger,
 ): OnPullRequest {
   const allowlist = config.repoAllowlist;
+  // Default `true` (skip drafts) if a caller passes a slice without
+  // `review` at all — matches loadConfig's own schema default, so a test
+  // fixture built before this field existed keeps its prior behavior.
+  const skipDraftPrs = config.review?.skipDraftPrs ?? true;
 
   return (event: PullRequestEvent): void => {
     try {
@@ -150,7 +158,7 @@ export function createPullRequestFilter(
       }
 
       const pr = payload?.pull_request;
-      if (!pr || pr.draft === true) {
+      if (!pr || (skipDraftPrs && pr.draft === true)) {
         return;
       }
 

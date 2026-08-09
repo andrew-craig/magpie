@@ -72,6 +72,16 @@ const rawConfigSchema = z
         // get APPROVE reviews, no matter what a repo's own `.magpie.toml`
         // requests.
         allow_approve: z.boolean().default(false),
+        // Whether draft PRs are skipped (see filter.ts's `ACCEPTED_ACTIONS`/
+        // draft check). Default `true` preserves Magpie's original
+        // behavior — a draft is a work-in-progress signal from the author,
+        // so reviewing it by default would be surprising. Set to `false`
+        // for an operator who wants draft PRs reviewed too (e.g. to get
+        // early feedback before marking ready). Unlike `allow_approve`
+        // above this is a plain server-side toggle, not double-gated with a
+        // repo's own `.magpie.toml` — skipping (or not) a review has no
+        // security consequence, unlike posting a real GitHub review status.
+        skip_draft_prs: z.boolean().default(true),
       })
       .strict()
       .prefault({}),
@@ -316,6 +326,11 @@ export interface Config {
      * to flag.
      */
     allowApprove: boolean;
+    /**
+     * Whether draft PRs are skipped. Default `true`. See schema comment
+     * above. Read by filter.ts's `createPullRequestFilter`.
+     */
+    skipDraftPrs: boolean;
   };
   server: {
     host: string;
@@ -652,6 +667,7 @@ export function loadConfig(configPath?: string): Config {
     },
     review: {
       allowApprove: data.review.allow_approve,
+      skipDraftPrs: data.review.skip_draft_prs,
     },
     server: {
       host: data.server.host,

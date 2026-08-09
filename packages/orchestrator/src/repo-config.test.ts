@@ -44,7 +44,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
     llm: { baseUrl: "https://example.com/v1", model: "server/model", allowedModels: [] },
-    review: { allowApprove: false },
+    review: { allowApprove: false, skipDraftPrs: true },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
     repoAllowlist: ["acme/widgets"],
@@ -333,7 +333,7 @@ describe("applyRepoConfig", () => {
   });
 
   it("applies review.allow_approve when the repo requests it AND the server allows it", () => {
-    const server = testConfig({ review: { allowApprove: true } });
+    const server = testConfig({ review: { allowApprove: true, skipDraftPrs: true } });
     const result = applyRepoConfig(server, { review: { allowApprove: true } }, silentLogger());
     expect(result.allowApprove).toBe(true);
     expect(result.accepted).toEqual(["review.allowApprove=true"]);
@@ -351,7 +351,7 @@ describe("applyRepoConfig", () => {
   });
 
   it("leaves allowApprove false, with nothing accepted or refused, when the repo doesn't set review.allow_approve at all", () => {
-    const server = testConfig({ review: { allowApprove: true } });
+    const server = testConfig({ review: { allowApprove: true, skipDraftPrs: true } });
     const result = applyRepoConfig(server, { review: { guidance: "just guidance" } }, silentLogger());
     expect(result.allowApprove).toBe(false);
     expect(result.refused).toEqual([]);
