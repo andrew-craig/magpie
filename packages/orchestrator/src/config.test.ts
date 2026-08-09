@@ -72,6 +72,8 @@ describe("loadConfig", () => {
     // explicitly opt in before ANY repo can receive a real GitHub APPROVE
     // review (see repo-config.ts's applyRepoConfig double-gate).
     expect(config.review.allowApprove).toBe(false);
+    // Draft PRs are skipped by default (see filter.ts).
+    expect(config.review.skipDraftPrs).toBe(true);
     expect(config.server.host).toBe("127.0.0.1");
     expect(config.server.port).toBe(8787);
     expect(config.limits.jobTimeoutSeconds).toBe(600);
@@ -132,6 +134,7 @@ model = "some/model"
 
 [review]
 allow_approve = true
+skip_draft_prs = false
 
 [server]
 host = "0.0.0.0"
@@ -175,6 +178,7 @@ ttl_margin_seconds = 300
     expect(config.github.appId).toBe("999");
     expect(config.llm.baseUrl).toBe("https://example.com/v1");
     expect(config.review.allowApprove).toBe(true);
+    expect(config.review.skipDraftPrs).toBe(false);
     expect(config.server.host).toBe("0.0.0.0");
     expect(config.server.port).toBe(9000);
     expect(config.limits.jobTimeoutSeconds).toBe(30);

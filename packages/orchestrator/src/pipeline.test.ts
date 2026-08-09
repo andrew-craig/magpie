@@ -252,7 +252,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
     llm: { baseUrl: "https://example.com/v1", model: "some/model", allowedModels: [] },
-    review: { allowApprove: false },
+    review: { allowApprove: false, skipDraftPrs: true },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 100, ...overrides },
     repoAllowlist: [],

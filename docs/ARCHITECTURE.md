@@ -164,7 +164,8 @@ localhost; the configured ingress option routes the public webhook URL to it. Ev
 Two kinds of verified delivery become a review job:
 
 - **`pull_request` events** (`opened`, `ready_for_review`, `reopened`, `synchronize`) — drafts
-  are ignored, and the base repo must be on the configured allowlist.
+  are ignored by default (`review.skip_draft_prs = true`; an operator can flip this to review
+  drafts too), and the base repo must be on the configured allowlist.
 - **`@magpie review` PR comments** — an `issue_comment` delivery whose body matches the
   command. Because the comment body is attacker-controlled (any PR participant, including a
   malicious PR author, can post the literal string), authorization never keys off body content:
@@ -273,7 +274,9 @@ magpie/
 
 - **Trigger policy:** auto-review every non-draft PR on `opened`/`ready_for_review`/
   `reopened`/`synchronize`, plus on-demand via `@magpie review`, gated by a repo allowlist in
-  config (Magpie doesn't auto-run on every repo the App could be installed on).
+  config (Magpie doesn't auto-run on every repo the App could be installed on). Skipping drafts
+  is itself a default, not a hard rule — `review.skip_draft_prs = false` in `config.toml` has
+  Magpie review draft PRs too.
 - **Review posture:** `COMMENT` by default, never `REQUEST_CHANGES`, never a merge. A repo may
   opt into a plain `APPROVE` tick on a fully clean review (`verdict: "approve"`, zero findings),
   but only if the operator has ALSO enabled it server-side — see

@@ -108,6 +108,14 @@ allowed_models = []
 # risks this key intentionally gates. Default: false.
 allow_approve = false
 
+# Whether draft PRs are skipped (opened/reopened/synchronize events on a
+# draft, and `ready_for_review` is unaffected either way since a PR is no
+# longer a draft by the time that action fires). Default: true — a draft is
+# a work-in-progress signal from the author, so Magpie stays quiet until it's
+# marked ready. Set to false to have Magpie review draft PRs too (e.g. for
+# early feedback before marking ready).
+skip_draft_prs = true
+
 [server]
 # Host/interface the webhook HTTP server listens on.
 # Default: "127.0.0.1" (localhost only; expose via Cloudflare Tunnel, not by
