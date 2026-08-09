@@ -95,14 +95,21 @@ function fakePiScriptEmitting(text: string): string {
  * `findings[]` array written to the findings file, so tests can drive the
  * pipeline's inline-anchoring path (anchor.ts's `anchorFindings`, wired in
  * pipeline.ts) instead of always taking the "no findings" happy path.
+ * `verdict` defaults to `"comment"` (the existing behaviour for every
+ * pre-existing caller); pass `"approve"` to drive tests of the opt-in
+ * APPROVE-tick path (see publisher.ts's `publishReviewWithFindings`).
  */
-function fakePiScriptEmittingFindings(text: string, findingsList: unknown[]): string {
+function fakePiScriptEmittingFindings(
+  text: string,
+  findingsList: unknown[],
+  verdict: "approve" | "comment" = "comment",
+): string {
   const msg = {
     role: "assistant",
     content: [{ type: "text", text }],
     usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.001 } },
   };
-  const findings = { findings: findingsList, summary: text, verdict: "comment" };
+  const findings = { findings: findingsList, summary: text, verdict };
   return [
     `const fs = require("fs");`,
     `const nodepath = require("path");`,
@@ -245,6 +252,7 @@ function testConfig(overrides: Partial<Config["limits"]> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
     llm: { baseUrl: "https://example.com/v1", model: "some/model", allowedModels: [] },
+    review: { allowApprove: false },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 100, ...overrides },
     repoAllowlist: [],
@@ -2602,6 +2610,68 @@ describe("createReviewPipeline / runJob — per-repo config (.magpie.toml)", () 
     // The gateway key was minted scoped to the REPO-overridden (allowed) model.
     expect(mintGatewayKey).toHaveBeenCalledTimes(1);
     expect(mintGatewayKey.mock.calls[0][0].llm.model).toBe("repo/allowed-model");
+  });
+
+  it("threads review.allow_approve through to the publish call: a clean (zero-finding), verdict:'approve' review publishes with event: APPROVE when BOTH the server config AND the repo's .magpie.toml opt in", async () => {
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 1, deletions: 0 }],
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: "[review]\nallow_approve = true\n" },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmittingFindings("Ship it.", [], "approve"));
+
+    const config = testConfig();
+    config.review.allowApprove = true;
+
+    const { runJob } = createReviewPipeline(config, {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(createReview.mock.calls[0][0]).toMatchObject({ event: "APPROVE" });
+  });
+
+  it("does NOT reach event: APPROVE when only the repo's .magpie.toml opts in but the server's own config.toml has not (the double-gate)", async () => {
+    const diffText = "diff --git a/src/a.ts b/src/a.ts\n+hello\n";
+    const { octokit, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 1, deletions: 0 }],
+      diffText,
+      defaultBranch: "main",
+      magpieTomlByRef: { main: "[review]\nallow_approve = true\n" },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const piBinary = writeFakePi(fakePiScriptEmittingFindings("Ship it.", [], "approve"));
+
+    // config.review.allowApprove left at its default: false.
+    const { runJob } = createReviewPipeline(testConfig(), {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey: fakeMintGatewayKey,
+      revokeGatewayKey: fakeRevokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    expect(createReview).toHaveBeenCalledTimes(1);
+    expect(createReview.mock.calls[0][0]).toMatchObject({ event: "COMMENT" });
   });
 
   it("the same .magpie.toml content on the PR head has no effect — fetched from the default branch only", async () => {

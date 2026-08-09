@@ -349,7 +349,7 @@ describe("publishReviewWithFindings", () => {
     expect(body).toContain("Unvalidated input reaches a sink.");
   });
 
-  it("always uses event: COMMENT, even when verdict: 'approve' is passed", async () => {
+  it("uses event: APPROVE when allowApprove is true, verdict is 'approve', and there are zero findings", async () => {
     const { client, createReview } = fakeClient();
 
     await publishReviewWithFindings({
@@ -359,6 +359,54 @@ describe("publishReviewWithFindings", () => {
       inline: [],
       other: [],
       verdict: "approve",
+      allowApprove: true,
+    });
+
+    expect(createReview.mock.calls[0][0].event).toBe("APPROVE");
+  });
+
+  it("uses event: COMMENT when allowApprove is true and verdict is 'approve' but there are nonzero findings", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Mostly fine, one nit.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [],
+      verdict: "approve",
+      allowApprove: true,
+    });
+
+    expect(createReview.mock.calls[0][0].event).toBe("COMMENT");
+  });
+
+  it("uses event: COMMENT when verdict is 'approve' and findings are zero but allowApprove is false (the default)", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Ship it.",
+      inline: [],
+      other: [],
+      verdict: "approve",
+    });
+
+    expect(createReview.mock.calls[0][0].event).toBe("COMMENT");
+  });
+
+  it("uses event: COMMENT when verdict is 'comment', regardless of allowApprove or findings", async () => {
+    const { client, createReview } = fakeClient();
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Some notes.",
+      inline: [],
+      other: [],
+      verdict: "comment",
+      allowApprove: true,
     });
 
     expect(createReview.mock.calls[0][0].event).toBe("COMMENT");
@@ -393,6 +441,35 @@ describe("publishReviewWithFindings", () => {
       id: 99,
       url: "https://github.com/acme/widgets/pull/7#pullrequestreview-99",
     });
+  });
+
+  it("on a 422 retry, still uses event: COMMENT even with verdict: 'approve' and allowApprove: true — folding inline into the body never flips it to APPROVE", async () => {
+    const { client, createReview } = fakeClient();
+    const conflictError = Object.assign(new Error("Unprocessable Entity"), { status: 422 });
+    createReview.mockRejectedValueOnce(conflictError);
+
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      // Nonzero inline findings pre-fold — this is what triggers the 422 in
+      // the first place, and is also why the zero-findings condition for
+      // APPROVE was never met even before the retry folds them into text.
+      inline: [SINGLE_LINE_COMMENT],
+      other: [],
+      verdict: "approve",
+      allowApprove: true,
+    });
+
+    expect(createReview).toHaveBeenCalledTimes(2);
+    // The PRIMARY attempt (pre-fold) is already COMMENT, since inline was
+    // non-empty.
+    expect(createReview.mock.calls[0][0].event).toBe("COMMENT");
+    // The RETRY reuses that same computed event rather than recomputing off
+    // the folded (now-empty) comments[] — asserting this catches a
+    // regression where the retry path naively recomputed "zero findings"
+    // from the folded state and wrongly produced APPROVE.
+    expect(createReview.mock.calls[1][0].event).toBe("COMMENT");
   });
 
   it("on a 422, folds a multi-line inline finding (with a fenced code block) into the body without flattening it", async () => {

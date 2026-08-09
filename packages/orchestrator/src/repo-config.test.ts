@@ -44,6 +44,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     github: { appId: "123", privateKeyPath: null },
     llm: { baseUrl: "https://example.com/v1", model: "server/model", allowedModels: [] },
+    review: { allowApprove: false },
     server: { host: "127.0.0.1", port: 0 },
     limits: { jobTimeoutSeconds: 600, concurrency: 2, maxDiffLines: 4000 },
     repoAllowlist: ["acme/widgets"],
@@ -254,6 +255,7 @@ describe("applyRepoConfig", () => {
     expect(result.config).toEqual(server);
     expect(result.guidance).toBe("");
     expect(result.ignorePaths).toEqual([]);
+    expect(result.allowApprove).toBe(false);
     expect(result.accepted).toEqual([]);
     expect(result.refused).toEqual([]);
   });
@@ -330,7 +332,33 @@ describe("applyRepoConfig", () => {
     expect(result.ignorePaths).toEqual(["vendor/**", "*.min.js"]);
   });
 
-  it("SECURITY: a hostile RepoConfig can only ever carry the four typed fields — every non-overridable Config field is byte-identical to server config", () => {
+  it("applies review.allow_approve when the repo requests it AND the server allows it", () => {
+    const server = testConfig({ review: { allowApprove: true } });
+    const result = applyRepoConfig(server, { review: { allowApprove: true } }, silentLogger());
+    expect(result.allowApprove).toBe(true);
+    expect(result.accepted).toEqual(["review.allowApprove=true"]);
+    // Not a `Config` field override — the effective config's own `review`
+    // section is still copied verbatim from the server.
+    expect(result.config.review).toEqual(server.review);
+  });
+
+  it("refuses review.allow_approve when the repo requests it but the server default (false) has not opted in", () => {
+    const server = testConfig(); // review.allowApprove defaults to false
+    const result = applyRepoConfig(server, { review: { allowApprove: true } }, silentLogger());
+    expect(result.allowApprove).toBe(false);
+    expect(result.refused).toEqual([expect.stringContaining("review.allowApprove=true")]);
+    expect(result.accepted).toEqual([]);
+  });
+
+  it("leaves allowApprove false, with nothing accepted or refused, when the repo doesn't set review.allow_approve at all", () => {
+    const server = testConfig({ review: { allowApprove: true } });
+    const result = applyRepoConfig(server, { review: { guidance: "just guidance" } }, silentLogger());
+    expect(result.allowApprove).toBe(false);
+    expect(result.refused).toEqual([]);
+    expect(result.accepted).not.toEqual(expect.arrayContaining([expect.stringContaining("allowApprove")]));
+  });
+
+  it("SECURITY: a hostile RepoConfig can only ever carry the five typed fields — every non-overridable Config field is byte-identical to server config", () => {
     const server = testConfig({
       llm: { baseUrl: "https://real-gateway.internal/v1", model: "server/model", allowedModels: ["repo/model"] },
       repoAllowlist: ["acme/widgets", "acme/other"],
@@ -360,15 +388,20 @@ describe("applyRepoConfig", () => {
     const hostile: RepoConfig = {
       llm: { model: "repo/model" },
       limits: { maxDiffLines: 1 },
-      review: { guidance: "hi", ignorePaths: ["**"] },
+      review: { guidance: "hi", ignorePaths: ["**"], allowApprove: true },
     };
     const result = applyRepoConfig(server, hostile, silentLogger());
 
     // Every field EXCEPT llm.model and limits.maxDiffLines must be identical
-    // to the server config.
+    // to the server config. In particular, `config.review` is copied
+    // VERBATIM regardless of the hostile repo's `allow_approve` request —
+    // the server's own `review.allowApprove` (here, the default `false`)
+    // never changes as a `Config` field; only the separate `allowApprove`
+    // sidecar can reflect a repo's (gated) request.
     expect(result.config.github).toEqual(server.github);
     expect(result.config.llm.baseUrl).toBe(server.llm.baseUrl);
     expect(result.config.llm.allowedModels).toEqual(server.llm.allowedModels);
+    expect(result.config.review).toEqual(server.review);
     expect(result.config.server).toEqual(server.server);
     expect(result.config.limits.jobTimeoutSeconds).toBe(server.limits.jobTimeoutSeconds);
     expect(result.config.limits.concurrency).toBe(server.limits.concurrency);
@@ -380,10 +413,15 @@ describe("applyRepoConfig", () => {
     expect(result.config.telemetry).toEqual(server.telemetry);
     expect(result.config.secrets).toEqual(server.secrets);
 
-    // The two genuinely-overridable fields DID change (proving this isn't a
-    // vacuous "nothing ever applies" test).
+    // The two genuinely-overridable `Config` fields DID change (proving this
+    // isn't a vacuous "nothing ever applies" test) — but the server here
+    // never opted into `review.allowApprove`, so the hostile request for it
+    // is refused: the sidecar stays `false` even though everything else in
+    // the hostile file was otherwise well-formed.
     expect(result.config.llm.model).toBe("repo/model");
     expect(result.config.limits.maxDiffLines).toBe(1);
+    expect(result.allowApprove).toBe(false);
+    expect(result.refused).toEqual([expect.stringContaining("review.allowApprove=true")]);
   });
 
   it("SECURITY: a fully-populated but schema-rejected hostile .magpie.toml (fetchRepoConfig -> null) yields an effective config identical to server config end-to-end", async () => {
