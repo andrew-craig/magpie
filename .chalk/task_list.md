@@ -3,4 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_1ca4** · P2 · in_progress · Support owner/* glob patterns in repo_allowlist
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter
