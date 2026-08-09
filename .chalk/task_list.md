@@ -3,5 +3,4 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_ff76** · P2 · in_progress · Cut v0.3.2 release (host services + reviewer image) to deploy @magpie review + repo_allowlist glob support
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter
