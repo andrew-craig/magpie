@@ -458,6 +458,7 @@ export function createReviewPipeline(
       let effectiveConfig = config;
       let guidance = "";
       let ignorePaths: string[] = [];
+      let allowApprove = false;
       try {
         // The base repo's default branch — NOT `job.headSha`, NOT any PR
         // base ref — is the one surface `.magpie.toml` is trusted from (see
@@ -477,6 +478,7 @@ export function createReviewPipeline(
         effectiveConfig = applied.config;
         guidance = applied.guidance;
         ignorePaths = applied.ignorePaths;
+        allowApprove = applied.allowApprove;
       } catch (err) {
         // `fetchRepoConfig`/`applyRepoConfig` never throw on their own (see
         // repo-config.ts's FAIL-SOFT contract) — this only catches the
@@ -824,6 +826,7 @@ export function createReviewPipeline(
               other,
               usage: result.usage,
               verdict: result.verdict,
+              allowApprove,
               reviewedSha: job.headSha,
             });
           }

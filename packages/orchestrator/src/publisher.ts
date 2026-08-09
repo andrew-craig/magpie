@@ -100,7 +100,15 @@ export interface MinimalIssuesClient {
       owner: string;
       repo: string;
       pull_number: number;
-      event: "COMMENT";
+      /**
+       * `"COMMENT"` is Magpie's baseline (and the only value ever used for
+       * `publishReview`'s callers of this shape). `publishReviewWithFindings`
+       * is the one caller that can also pass `"APPROVE"` — a plain
+       * informational tick, gated by `verdict`/`allowApprove`/zero findings
+       * (see that function's doc comment). Never `"REQUEST_CHANGES"` — not
+       * part of this type at all, by construction.
+       */
+      event: "COMMENT" | "APPROVE";
       body: string;
       comments: Array<{
         path: string;
@@ -279,14 +287,28 @@ export interface PublishReviewWithFindingsParams {
   other: Finding[];
   usage?: ReviewUsage;
   /**
-   * Advisory only. ACCEPTED BUT IGNORED: Magpie never approves or requests
-   * changes (see CLAUDE.md's core security principle — a human
-   * always decides), so every review this function posts uses
-   * `event: "COMMENT"` regardless of what's passed here. The parameter
-   * exists purely so callers holding a `verdict` from the findings payload
-   * don't need to strip it before calling this function.
+   * One input to the `event` decision (see {@link publishReviewWithFindings}'s
+   * doc comment for the full condition). By itself this does NOT cause an
+   * `APPROVE` — it also requires `allowApprove: true` AND zero findings
+   * (`inline.length === 0 && other.length === 0`). Magpie's baseline posture
+   * remains `event: "COMMENT"` (see CLAUDE.md's core security principle — a
+   * human always decides); `verdict: "approve"` only ever upgrades a
+   * genuinely clean, opted-in review to a plain informational `APPROVE`
+   * "tick", never `REQUEST_CHANGES` and never a merge.
    */
   verdict?: "approve" | "comment";
+  /**
+   * Whether this repo/operator pair has opted into the `APPROVE`-tick
+   * feature at all — the double-gated result of BOTH the operator's
+   * `config.toml` `[review] allow_approve` AND the repo's own
+   * `.magpie.toml` `[review] allow_approve` (see repo-config.ts's
+   * `applyRepoConfig`, whose `allowApprove` sidecar value pipeline.ts passes
+   * straight through here). Default `false`: without this explicit opt-in,
+   * `event` is always `"COMMENT"` regardless of `verdict` or findings. See
+   * docs/repo-config.md for the opt-in mechanism and the branch-protection /
+   * prompt-injection risks it exists to flag.
+   */
+  allowApprove?: boolean;
   /**
    * Embeds {@link buildReviewedShaMarker}'s hidden marker in the review
    * body. This function is only ever called by pipeline.ts on the genuine
@@ -305,7 +327,15 @@ export interface PublishReviewWithFindingsParams {
  * nothing is silently dropped (see ARCHITECTURE.md's "Findings and
  * publishing" section for the diff-anchoring constraint).
  *
- * `event` is always `"COMMENT"` — see {@link PublishReviewWithFindingsParams.verdict}.
+ * `event` is `"COMMENT"` by default — Magpie's baseline review posture (see
+ * CLAUDE.md's core security principle — a human always decides) — and
+ * becomes `"APPROVE"` (a plain informational "tick"; never `REQUEST_CHANGES`,
+ * never a merge) only when ALL of: `verdict === "approve"`, `allowApprove`
+ * is `true`, and the review found ZERO findings (`inline.length === 0 &&
+ * other.length === 0`). See {@link PublishReviewWithFindingsParams.allowApprove}
+ * and docs/repo-config.md for the double opt-in (operator `config.toml` AND
+ * repo `.magpie.toml`) this depends on, and the branch-protection /
+ * prompt-injection risks documented there.
  *
  * FALLBACK CHAIN (never throws, never goes silent — mirrors `publishReview`'s
  * never-go-silent contract):
@@ -322,7 +352,22 @@ export interface PublishReviewWithFindingsParams {
 export async function publishReviewWithFindings(
   params: PublishReviewWithFindingsParams,
 ): Promise<PublishedComment> {
-  const { octokit, owner, repo, prNumber, summary, inline, other, usage, reviewedSha } = params;
+  const { octokit, owner, repo, prNumber, summary, inline, other, usage, verdict, allowApprove, reviewedSha } =
+    params;
+
+  // Computed ONCE, from the pre-fold `inline`/`other` arrays, and reused for
+  // BOTH the primary attempt and the 422-retry below — never recomputed
+  // against the folded (comments:[]) retry payload. This matters because the
+  // retry folds `inline` findings into body text (so a naive recompute off
+  // the folded state could look like "zero findings"); reusing this single
+  // value means the retry can only ever end up "COMMENT" here too, which it
+  // always would anyway since it only runs when the primary attempt's
+  // `comments[]` was non-empty (i.e. `inline.length > 0`, which already
+  // fails the zero-findings condition on its own).
+  const event: "APPROVE" | "COMMENT" =
+    verdict === "approve" && allowApprove === true && inline.length === 0 && other.length === 0
+      ? "APPROVE"
+      : "COMMENT";
 
   const body = buildFindingsBody({ summary, other, usage, reviewedSha });
   const comments = inline.map(toReviewComment);
@@ -332,7 +377,7 @@ export async function publishReviewWithFindings(
       owner,
       repo,
       pull_number: prNumber,
-      event: "COMMENT",
+      event,
       body,
       comments,
     });
@@ -348,7 +393,7 @@ export async function publishReviewWithFindings(
         owner,
         repo,
         pull_number: prNumber,
-        event: "COMMENT",
+        event,
         body: fallbackBody,
         comments: [],
       });
