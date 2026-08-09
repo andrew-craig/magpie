@@ -8,10 +8,15 @@
 //   - only `opened` / `ready_for_review` / `reopened` / `synchronize` PR
 //     actions are ever reviewed (comments, labels, closes, etc. are ignored);
 //   - draft PRs are ignored (nothing to review yet);
-//   - the PR's *base* repository must be on `config.repoAllowlist` — this is
-//     the last line of defense against a public GitHub App instance being
-//     pointed at a repo the operator never opted in to running the reviewer
-//     agent against.
+//   - the PR's *base* repository must match an entry in `config.repoAllowlist`
+//     — this is the last line of defense against a public GitHub App instance
+//     being pointed at a repo the operator never opted in to running the
+//     reviewer agent against. Entries are matched with the same glob matcher
+//     `.magpie.toml`'s `ignore_paths` uses (see glob-match.ts): an exact
+//     `"owner/repo"` entry matches only that repo, while `"owner/*"` matches
+//     any repo under that owner (the `*` wildcard never crosses the `/`
+//     between owner and repo, so it can't accidentally match another owner
+//     or a nested path).
 //
 // A `PullRequestFilter` is intentionally NOT wired to the concrete
 // `JobQueue` class. It takes an injected `enqueue` callback instead, so this
@@ -30,6 +35,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Config } from "./config.js";
+import { matchesAnyGlob } from "./glob-match.js";
 import type { JobDescriptor } from "./queue.js";
 import type { OnPullRequest, PullRequestEvent } from "./server.js";
 
@@ -108,10 +114,14 @@ interface LenientPullRequestPayload {
  *
  * Gating order: action allowlist -> not-draft -> repo allowlist (checked
  * against the PR's *base* repository, i.e. `payload.repository.full_name` —
- * the repo the PR targets, not a fork it may come from). Repo-allowlist
- * drops are logged at debug level (expected/routine — e.g. the App
- * installed on repos beyond the ones the operator configured); anything
- * that looks like a malformed payload is logged at warn level and dropped.
+ * the repo the PR targets, not a fork it may come from). Allowlist entries
+ * are matched with `matchesAnyGlob` (see glob-match.ts): an exact
+ * `"owner/repo"` entry matches only that repo; an `"owner/*"` entry matches
+ * any repo under that owner but nothing else (the `*` wildcard stays within
+ * one `/`-delimited segment). Repo-allowlist drops are logged at debug level
+ * (expected/routine — e.g. the App installed on repos beyond the ones the
+ * operator configured); anything that looks like a malformed payload is
+ * logged at warn level and dropped.
  *
  * Never throws: this is wired directly into the webhook emitter's dispatch
  * path (see server.ts), and a throw there would be an unhandled exception on
@@ -128,7 +138,7 @@ export function createPullRequestFilter(
   enqueue: EnqueueJob,
   logger: FilterLogger = consoleLogger,
 ): OnPullRequest {
-  const allowlist = new Set(config.repoAllowlist);
+  const allowlist = config.repoAllowlist;
 
   return (event: PullRequestEvent): void => {
     try {
@@ -147,7 +157,7 @@ export function createPullRequestFilter(
       const repository = payload?.repository;
       const fullName = repository?.full_name;
 
-      if (typeof fullName !== "string" || !allowlist.has(fullName)) {
+      if (typeof fullName !== "string" || !matchesAnyGlob(fullName, allowlist)) {
         logger.debug({
           event: "pr-filter-drop-not-allowlisted",
           fullName: fullName ?? null,
