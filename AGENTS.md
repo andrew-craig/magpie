@@ -4,9 +4,12 @@ Magpie is a self-hosted GitHub code-review bot that any organisation can run on 
 host. It listens for pull request webhooks (and `@magpie review` PR comments), checks out the
 PR branch, runs the [Pi coding agent](https://pi.dev/) over the diff inside an isolated
 sandbox, and posts findings back to the PR as a `COMMENT` review with inline comments — it
-never approves or blocks; a human always decides. See [ARCHITECTURE.md](ARCHITECTURE.md) for
-the full design and threat model, [DISTRIBUTION.md](DISTRIBUTION.md) for the self-hosting
-architecture, and [HISTORY.md](HISTORY.md) for how the system was built.
+never auto-merges and never requests changes — by default it posts a `COMMENT` review, and only
+when a repo opts in via `.magpie.toml` (and the operator has enabled it server-side) may it post
+a plain `APPROVE` tick on a fully clean review; a human always makes the merge decision. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full design and threat model,
+[DISTRIBUTION.md](DISTRIBUTION.md) for the self-hosting architecture, and
+[HISTORY.md](HISTORY.md) for how the system was built.
 
 **Core security principle — capability separation.** The real threat is *indirect prompt
 injection* against the review agent, not execution of PR code. The defenses are structural, not

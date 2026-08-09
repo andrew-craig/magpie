@@ -52,6 +52,29 @@ const rawConfigSchema = z
         allowed_models: z.array(z.string().min(1)).default([]),
       })
       .strict(),
+    review: z
+      .object({
+        // The server-side gate on whether ANY repo may ever receive a real
+        // GitHub `APPROVE` review (an informational "tick") instead of
+        // Magpie's baseline `COMMENT` (see publisher.ts's
+        // `publishReviewWithFindings` and repo-config.ts's
+        // `applyRepoConfig`). Mirrors `llm.allowed_models` immediately
+        // above: a repo's own `.magpie.toml` `[review] allow_approve = true`
+        // is necessary but NOT sufficient on its own — this operator-only
+        // flag must ALSO be `true`. Unlike a model choice, this has a real
+        // security consequence documented in docs/repo-config.md: a bot
+        // APPROVE counts toward a repo's "required approving reviews"
+        // branch protection by default (which could let a PR merge with
+        // zero human sign-off), and the `verdict` that drives it is
+        // LLM-authored from PR-supplied (attacker-influenced) content under
+        // Magpie's own indirect-prompt-injection threat model. Default
+        // `false`: an operator must explicitly opt in before ANY repo can
+        // get APPROVE reviews, no matter what a repo's own `.magpie.toml`
+        // requests.
+        allow_approve: z.boolean().default(false),
+      })
+      .strict()
+      .prefault({}),
     server: z
       .object({
         host: z.string().min(1).default("127.0.0.1"),
@@ -281,6 +304,18 @@ export interface Config {
     model: string;
     /** Server-side allowlist for a repo's `.magpie.toml` `[llm] model` override. Empty means no repo-level model override is possible. See schema comment above. */
     allowedModels: string[];
+  };
+  review: {
+    /**
+     * Server-side gate on whether ANY repo may receive a real GitHub
+     * `APPROVE` review instead of Magpie's baseline `COMMENT`. A repo can
+     * only get `APPROVE` reviews if BOTH this AND the repo's own
+     * `.magpie.toml` `[review] allow_approve` are `true` (see
+     * repo-config.ts's `applyRepoConfig`). Default `false`. See schema
+     * comment above and docs/repo-config.md for the risks this gate exists
+     * to flag.
+     */
+    allowApprove: boolean;
   };
   server: {
     host: string;
@@ -614,6 +649,9 @@ export function loadConfig(configPath?: string): Config {
       baseUrl: data.llm.base_url,
       model: data.llm.model,
       allowedModels: data.llm.allowed_models,
+    },
+    review: {
+      allowApprove: data.review.allow_approve,
     },
     server: {
       host: data.server.host,

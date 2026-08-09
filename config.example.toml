@@ -98,6 +98,16 @@ model = "anthropic/claude-sonnet-4.5"
 # Example: allowed_models = ["anthropic/claude-sonnet-4.5", "openai/gpt-5"]
 allowed_models = []
 
+[review]
+# Server-side gate on whether Magpie may EVER post a real GitHub APPROVE
+# review (an informational "tick", never an auto-merge and never
+# REQUEST_CHANGES) instead of its baseline COMMENT. A repo can only receive
+# APPROVE reviews if BOTH this is `true` AND that repo's own `.magpie.toml`
+# also sets `[review] allow_approve = true`. See docs/repo-config.md for the
+# full explanation, including the branch-protection and prompt-injection
+# risks this key intentionally gates. Default: false.
+allow_approve = false
+
 [server]
 # Host/interface the webhook HTTP server listens on.
 # Default: "127.0.0.1" (localhost only; expose via Cloudflare Tunnel, not by

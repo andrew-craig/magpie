@@ -68,6 +68,10 @@ describe("loadConfig", () => {
     expect(config.github.privateKeyPath).toBe(pemPath);
     expect(config.llm.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(config.llm.model).toBe("anthropic/claude-sonnet-4.5");
+    // Server-side APPROVE-tick gate defaults to false — an operator must
+    // explicitly opt in before ANY repo can receive a real GitHub APPROVE
+    // review (see repo-config.ts's applyRepoConfig double-gate).
+    expect(config.review.allowApprove).toBe(false);
     expect(config.server.host).toBe("127.0.0.1");
     expect(config.server.port).toBe(8787);
     expect(config.limits.jobTimeoutSeconds).toBe(600);
@@ -126,6 +130,9 @@ private_key_path = "${pemPath}"
 base_url = "https://example.com/v1"
 model = "some/model"
 
+[review]
+allow_approve = true
+
 [server]
 host = "0.0.0.0"
 port = 9000
@@ -167,6 +174,7 @@ ttl_margin_seconds = 300
 
     expect(config.github.appId).toBe("999");
     expect(config.llm.baseUrl).toBe("https://example.com/v1");
+    expect(config.review.allowApprove).toBe(true);
     expect(config.server.host).toBe("0.0.0.0");
     expect(config.server.port).toBe(9000);
     expect(config.limits.jobTimeoutSeconds).toBe(30);
