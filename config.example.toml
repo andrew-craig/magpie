@@ -57,10 +57,15 @@
 # means "review nothing yet"), so an operator must consciously opt repos in
 # rather than magpie silently reviewing every repo the GitHub App is
 # installed on.
+# Entries may use a "*" wildcard to match a single path segment — e.g.
+# "my-org/*" matches any repo under my-org (present or future), but never
+# another owner and never anything with an extra "/" in it. Mix exact and
+# wildcard entries freely.
 # NOTE: this is a top-level key, so it must stay ABOVE the first [section]
 # header — TOML assigns bare keys appearing after a header to that section.
 repo_allowlist = [
   # "my-org/my-repo",
+  # "my-org/*",
 ]
 
 [github]

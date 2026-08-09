@@ -114,6 +114,59 @@ describe("createPullRequestFilter", () => {
     ).toBe(true);
   });
 
+  it("accepts an owner/* wildcard entry matching any repo under that owner", () => {
+    const enqueue = vi.fn();
+    const filter = createPullRequestFilter(testConfig({ repoAllowlist: ["my-org/*"] }), enqueue);
+
+    filter(makeEvent({ fullName: "my-org/repo" }));
+    filter(makeEvent({ fullName: "my-org/another-repo" }));
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an owner/* wildcard entry match a different owner", () => {
+    const enqueue = vi.fn();
+    const logger = makeLogger();
+    const filter = createPullRequestFilter(
+      testConfig({ repoAllowlist: ["my-org/*"] }),
+      enqueue,
+      logger,
+    );
+
+    filter(makeEvent({ fullName: "other-org/repo" }));
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(
+      logger.calls.some(
+        (c) => c.level === "debug" && c.event === "pr-filter-drop-not-allowlisted",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not let an owner/* wildcard entry match a nested/extra path segment", () => {
+    const enqueue = vi.fn();
+    const filter = createPullRequestFilter(testConfig({ repoAllowlist: ["my-org/*"] }), enqueue);
+
+    filter(makeEvent({ fullName: "my-org/repo/extra" }));
+
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("supports a mixed list of exact and wildcard allowlist entries", () => {
+    const enqueue = vi.fn();
+    const filter = createPullRequestFilter(
+      testConfig({ repoAllowlist: ["specific-org/specific-repo", "wild-org/*"] }),
+      enqueue,
+    );
+
+    filter(makeEvent({ fullName: "specific-org/specific-repo" }));
+    filter(makeEvent({ fullName: "wild-org/any-repo" }));
+    filter(makeEvent({ fullName: "specific-org/other-repo" }));
+    filter(makeEvent({ fullName: "unrelated-org/repo" }));
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["opened", "ready_for_review", "reopened", "synchronize"] as const)(
     "accepts a non-draft, allowlisted '%s' event and enqueues exactly one well-formed job",
     (action) => {
