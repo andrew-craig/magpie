@@ -2,14 +2,14 @@
 id: task_1ca4
 title: Support owner/* glob patterns in repo_allowlist
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-08-09T04:22:33Z
-updated_at: 2026-08-09T04:23:04Z
+updated_at: 2026-08-09T04:28:09Z
 ---
 
 ## Context
