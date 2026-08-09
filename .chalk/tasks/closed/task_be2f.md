@@ -2,14 +2,14 @@
 id: task_be2f
 title: Opt-in Magpie APPROVE reviews (per-repo .magpie.toml + server gate)
 type: task
-status: in_progress
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-08-09T12:55:20Z
-updated_at: 2026-08-09T12:58:15Z
+updated_at: 2026-08-09T13:17:29Z
 ---
 
 ## Goal
