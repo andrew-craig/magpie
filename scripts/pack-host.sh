@@ -124,7 +124,7 @@ GW_ENTRY="$REPO_ROOT/packages/gateway/dist/index.js"
 [[ -f "$GW_ENTRY" ]]   || die "missing $GW_ENTRY — run 'npm run gateway:build' first"
 
 for f in systemd/magpie.service systemd/magpie-gateway.service scripts/install.sh \
-         config.example.toml LICENSE INSTALL.md package-lock.json; do
+         config.example.toml LICENSE docs/INSTALL.md package-lock.json; do
   [[ -f "$REPO_ROOT/$f" ]] || die "missing required repo file: $f"
 done
 
@@ -165,7 +165,7 @@ cp "$REPO_ROOT/scripts/install.sh" "$STAGE/scripts/install.sh"
 chmod +x "$STAGE/scripts/install.sh"
 cp "$REPO_ROOT/config.example.toml" "$STAGE/config.example.toml"
 cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE"
-cp "$REPO_ROOT/INSTALL.md" "$STAGE/INSTALL.md"
+cp "$REPO_ROOT/docs/INSTALL.md" "$STAGE/INSTALL.md"
 
 # -- native per-arch magpie-tier-probe: install.sh installs it from
 # bin/magpie-tier-probe onto PATH at /usr/local/bin.
