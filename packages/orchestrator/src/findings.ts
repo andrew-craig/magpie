@@ -46,8 +46,10 @@ const reviewFindingsSchema = z
     findings: z.array(findingSchema),
     /** Overall review summary (markdown). */
     summary: z.string(),
-    /** Advisory only — Magpie always posts as COMMENT regardless (see
-     *  ARCHITECTURE.md's "Findings and publishing" section). */
+    /** Magpie's baseline posture is always `COMMENT`; this only ever upgrades
+     *  to a real GitHub `APPROVE` tick when the repo/operator have both opted
+     *  in AND the review found zero findings (see publisher.ts's
+     *  `publishReviewWithFindings` and docs/repo-config.md). */
     verdict: z.enum(["approve", "comment"]),
   })
   .strict();
