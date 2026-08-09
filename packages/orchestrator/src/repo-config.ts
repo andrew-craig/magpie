@@ -25,7 +25,7 @@
 // resolves it itself, so there is exactly one place in the codebase that
 // decides "which ref is authoritative for repo config".
 //
-// SECURITY — the overridable subset is EXACTLY four knobs, gated field-by-
+// SECURITY — the overridable subset is EXACTLY five knobs, gated field-by-
 // field (see {@link applyRepoConfig}):
 //   - `llm.model`, but ONLY if it's a member of the server's OWN
 //     `config.llm.allowedModels` (config.ts). Absent/empty
@@ -46,6 +46,19 @@
 //   - `review.ignore_paths` — glob list, applied to the changed-file list and
 //     diff body (see diff.ts) and, belt-and-braces, to findings
 //     (reviewer.ts) before anything is published.
+//   - `review.allow_approve`, but ONLY if the server's OWN
+//     `config.review.allowApprove` (config.ts) is also `true` — the same
+//     double-gate shape as `llm.model`/`allowedModels` immediately above,
+//     applied here because this knob has a comparable security consequence:
+//     it decides whether Magpie may post a real GitHub `APPROVE` review
+//     (publisher.ts's `publishReviewWithFindings`) rather than always
+//     `COMMENT`. A bot APPROVE counts toward a repo's "required approving
+//     reviews" branch protection by default, and the `verdict` that would
+//     drive it is LLM-authored from PR-supplied (attacker-influenced)
+//     content — see docs/repo-config.md for the full risk writeup. Absent/
+//     false server `review.allowApprove` silently refuses every repo
+//     request to enable it, exactly like `allowedModels` does for
+//     `llm.model`.
 // Everything else a hostile `.magpie.toml` might try to name (container
 // image/tier, gateway URLs, budgets, timeouts, concurrency, the tool
 // allowlist, the repo allowlist, workspace paths, telemetry, secrets, ...)
@@ -188,6 +201,12 @@ const repoConfigSchema = z
           .array(z.string().min(1).max(IGNORE_PATH_MAX_CHARS))
           .max(IGNORE_PATHS_MAX_ENTRIES)
           .optional(),
+        // Opt-in for a real GitHub `APPROVE` review — ONLY takes effect if
+        // the server's own `config.toml` `[review] allow_approve` is ALSO
+        // `true` (see module doc comment's SECURITY section and
+        // `applyRepoConfig` below). A repo requesting this alone does
+        // nothing.
+        allow_approve: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -198,7 +217,7 @@ const repoConfigSchema = z
 export interface RepoConfig {
   llm?: { model?: string };
   limits?: { maxDiffLines?: number };
-  review?: { guidance?: string; ignorePaths?: string[] };
+  review?: { guidance?: string; ignorePaths?: string[]; allowApprove?: boolean };
 }
 
 function mapRepoConfig(data: z.infer<typeof repoConfigSchema>): RepoConfig {
@@ -210,7 +229,11 @@ function mapRepoConfig(data: z.infer<typeof repoConfigSchema>): RepoConfig {
         : undefined,
     review:
       data.review !== undefined
-        ? { guidance: data.review.guidance, ignorePaths: data.review.ignore_paths }
+        ? {
+            guidance: data.review.guidance,
+            ignorePaths: data.review.ignore_paths,
+            allowApprove: data.review.allow_approve,
+          }
         : undefined,
   };
 }
@@ -343,6 +366,16 @@ export interface RepoConfigOverrideResult {
   guidance: string;
   /** `review.ignore_paths`, or `[]` if not set/refused. Not a `Config` field — threaded separately into diff.ts's file/diff filtering and reviewer.ts's findings filtering. */
   ignorePaths: string[];
+  /**
+   * Whether THIS job may post a real GitHub `APPROVE` review — `true` only
+   * when BOTH the server's `config.review.allowApprove` AND this repo's own
+   * `.magpie.toml` `[review] allow_approve` are `true`. `false` otherwise
+   * (not requested, refused, or no repo config at all). Not a `Config`
+   * field — threaded separately into publisher.ts's
+   * `publishReviewWithFindings`, same sidecar treatment as `guidance`/
+   * `ignorePaths`.
+   */
+  allowApprove: boolean;
   /** Human-readable descriptions of every override actually applied, for one structured operator log line (pipeline.ts). */
   accepted: string[];
   /** Human-readable descriptions of every override the repo attempted but was refused, with why, for the same log line. */
@@ -418,11 +451,34 @@ export function applyRepoConfig(
     accepted.push(`review.ignorePaths(${ignorePaths.length})`);
   }
 
+  // --- review.allow_approve: double-gated by BOTH server and repo, not a
+  // Config field. Mirrors the `llm.model`/`allowedModels` shape above: the
+  // repo can only turn this ON, and only if the operator's OWN
+  // `config.toml` has already opted in server-side. See module doc
+  // comment's SECURITY section and docs/repo-config.md for why this one
+  // extra gate exists beyond the usual base-branch-pin + fail-soft
+  // protections every other knob here relies on.
+  let allowApprove = false;
+  const requestedAllowApprove = repoConfig?.review?.allowApprove;
+  if (requestedAllowApprove === true) {
+    if (serverConfig.review.allowApprove) {
+      allowApprove = true;
+      accepted.push("review.allowApprove=true");
+    } else {
+      refused.push(
+        "review.allowApprove=true (server review.allow_approve is false; operator has not enabled the APPROVE-tick feature)",
+      );
+    }
+  }
+
   // SECURITY: every `Config` field enumerated explicitly — see module doc
   // comment. `github`/`server`/`repoAllowlist`/`workspace`/`container`/
-  // `microvm`/`gateway`/`telemetry`/`secrets` are copied VERBATIM from
-  // `serverConfig`; only `llm.model` and `limits.maxDiffLines` are ever
-  // replaced, and only with the gated/clamped values computed above.
+  // `microvm`/`gateway`/`telemetry`/`secrets`/`review` are copied VERBATIM
+  // from `serverConfig`; only `llm.model` and `limits.maxDiffLines` are
+  // ever replaced, and only with the gated/clamped values computed above.
+  // (`review.allow_approve`'s double-gated result is NOT a `Config` field —
+  // it's the `allowApprove` sidecar returned below, same treatment as
+  // `guidance`/`ignorePaths`.)
   const config: Config = {
     github: serverConfig.github,
     llm: {
@@ -430,6 +486,7 @@ export function applyRepoConfig(
       model,
       allowedModels: serverConfig.llm.allowedModels,
     },
+    review: serverConfig.review,
     server: serverConfig.server,
     limits: {
       jobTimeoutSeconds: serverConfig.limits.jobTimeoutSeconds,
@@ -449,5 +506,5 @@ export function applyRepoConfig(
     logger.info({ event: "repo-config-overrides", accepted, refused });
   }
 
-  return { config, guidance, ignorePaths, accepted, refused };
+  return { config, guidance, ignorePaths, allowApprove, accepted, refused };
 }

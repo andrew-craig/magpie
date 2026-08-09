@@ -3,4 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_be2f** · P2 · in_progress · Opt-in Magpie APPROVE reviews (per-repo .magpie.toml + server gate)
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter
