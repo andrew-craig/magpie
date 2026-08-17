@@ -159,7 +159,7 @@ import { getAppBotLoginFromConfig, mintInstallationTokenFromConfig } from "./git
 import { publishReview, publishReviewWithFindings } from "./publisher.js";
 import type { JobCleanup, JobDescriptor, JobRunner } from "./queue.js";
 import type { ReviewState } from "./rereview.js";
-import { minimizeOutdated, readReviewState } from "./rereview.js";
+import { minimizeOutdated, readReviewState, resolveOutdatedThreads } from "./rereview.js";
 import { applyRepoConfig, fetchRepoConfig } from "./repo-config.js";
 import type { ReviewResult } from "./reviewer.js";
 import { runReview } from "./reviewer.js";
@@ -408,6 +408,7 @@ export function createReviewPipeline(
       let reviewState: ReviewState = {
         lastReviewedSha: undefined,
         minimizableNodeIds: [],
+        resolvableReviewCommentNodeIds: [],
       };
       try {
         const botLogin = await getBotLogin(config);
@@ -839,19 +840,30 @@ export function createReviewPipeline(
           });
 
           // Step 7a: minimize Magpie's prior minimizable comments as
-          // OUTDATED now that a fresh, definitive review has been posted for
-          // this head SHA — but only on a definitive outcome (`result.ok`,
-          // covering both a real success and a tooLarge skip), mirroring the
-          // `reviewedSha` gating just above: a `{ok:false}` failure doesn't
-          // supersede anything, so prior comments (which may still describe the
-          // PR's actual current state) are left alone. `minimizableNodeIds` is
-          // the PRE-publish snapshot from step 2z, so the artifact just
-          // published above is never included. Best-effort — never fails the
-          // job (see rereview.ts's `minimizeOutdated` doc comment).
+          // OUTDATED, and resolve the review-conversation thread each prior
+          // inline review comment belongs to, now that a fresh, definitive
+          // review has been posted for this head SHA — but only on a
+          // definitive outcome (`result.ok`, covering both a real success and
+          // a tooLarge skip), mirroring the `reviewedSha` gating just above: a
+          // `{ok:false}` failure doesn't supersede anything, so prior
+          // comments (which may still describe the PR's actual current
+          // state) are left alone. `minimizableNodeIds` /
+          // `resolvableReviewCommentNodeIds` are the PRE-publish snapshot
+          // from step 2z, so the artifact just published above is never
+          // included. Minimizing and resolving act on independent GitHub
+          // state (see rereview.ts's THREAD RESOLUTION doc comment), so both
+          // are called. Both best-effort — never fail the job (see
+          // rereview.ts's `minimizeOutdated` / `resolveOutdatedThreads` doc
+          // comments).
           if (result.ok) {
             await minimizeOutdated({
               octokit,
               nodeIds: reviewState.minimizableNodeIds,
+              logger,
+            });
+            await resolveOutdatedThreads({
+              octokit,
+              commentNodeIds: reviewState.resolvableReviewCommentNodeIds,
               logger,
             });
           }

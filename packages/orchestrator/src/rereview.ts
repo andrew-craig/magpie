@@ -29,6 +29,18 @@
 // review summary bodies simply stay
 // visible on the PR — an accepted trade-off, not a bug.
 //
+// THREAD RESOLUTION: separately from minimizing, pipeline.ts also RESOLVES
+// the PR review-conversation thread ("Resolved" badge in GitHub's UI) each
+// superseded inline review comment belongs to, via the GraphQL-only
+// `resolveReviewThread` mutation (see `resolveOutdatedThreads` below) — again
+// no REST equivalent. Only inline review comments have a parent thread
+// (`PullRequestReviewThread`); issue comments and the review-summary body do
+// not, so thread resolution only ever applies to the review-comment subset of
+// `minimizableNodeIds`, tracked separately as
+// `ReviewState.resolvableReviewCommentNodeIds`. Minimizing and resolving are
+// independent GitHub states — one does not imply the other — so both are
+// called from pipeline.ts's step 7a.
+//
 // Every "is this comment/review mine?" check below requires BOTH of:
 //
 //   1. AUTHOR IDENTITY — `user.type === "Bot"` AND `user.login === botLogin`,
@@ -133,6 +145,13 @@ export interface ReviewState {
    * errors, but there is no point trying).
    */
   minimizableNodeIds: string[];
+  /**
+   * `node_id`s of Magpie's own inline review comments ONLY — a subset of
+   * `minimizableNodeIds` (excludes issue comments, which have no parent
+   * review thread). Pass to `resolveOutdatedThreads` (see THREAD RESOLUTION
+   * in the module doc comment).
+   */
+  resolvableReviewCommentNodeIds: string[];
 }
 
 /**
@@ -202,6 +221,9 @@ interface TimestampedMagpieBody {
  *   4. `minimizableNodeIds`: every Magpie issue comment's `node_id` plus every
  *      Magpie inline review comment's `node_id` (NOT review node_ids — see
  *      the SCOPE CONSTRAINT in the module doc comment).
+ *      `resolvableReviewCommentNodeIds`: just the inline-review-comment
+ *      subset of the above (see THREAD RESOLUTION in the module doc
+ *      comment).
  *
  * Never called with a `signal` — this is a single paginated read, not a
  * long-running operation; the caller (pipeline.ts) applies its own
@@ -216,7 +238,7 @@ export async function readReviewState(params: ReadReviewStateParams): Promise<Re
   // safely trusted as Magpie's own. Short-circuit BEFORE even paginating —
   // there's no point reading state we're going to discard.
   if (!botLogin) {
-    return { lastReviewedSha: undefined, minimizableNodeIds: [] };
+    return { lastReviewedSha: undefined, minimizableNodeIds: [], resolvableReviewCommentNodeIds: [] };
   }
 
   const [issueComments, reviews, reviewComments] = await Promise.all([
@@ -256,12 +278,10 @@ export async function readReviewState(params: ReadReviewStateParams): Promise<Re
   const lastReviewedSha =
     timestampedMagpieBodies.length > 0 ? parseReviewedSha(timestampedMagpieBodies[0].body) : undefined;
 
-  const minimizableNodeIds = [
-    ...magpieIssueComments.map((c) => c.node_id),
-    ...magpieReviewComments.map((rc) => rc.node_id),
-  ];
+  const resolvableReviewCommentNodeIds = magpieReviewComments.map((rc) => rc.node_id);
+  const minimizableNodeIds = [...magpieIssueComments.map((c) => c.node_id), ...resolvableReviewCommentNodeIds];
 
-  return { lastReviewedSha, minimizableNodeIds };
+  return { lastReviewedSha, minimizableNodeIds, resolvableReviewCommentNodeIds };
 }
 
 /**
@@ -350,6 +370,97 @@ export async function minimizeOutdated(params: MinimizeOutdatedParams): Promise<
       logger.error({
         event: "minimize-outdated-failed",
         nodeId,
+        error: serializeError(err),
+      });
+    }
+  }
+}
+
+/** Parameters for {@link resolveOutdatedThreads}. */
+export interface ResolveOutdatedThreadsParams {
+  /** Authenticated Octokit client — its `.graphql` method carries the installation token. */
+  octokit: Octokit;
+  /**
+   * Inline review comment `node_id`s ONLY — pass
+   * {@link ReviewState.resolvableReviewCommentNodeIds}, NOT the full
+   * `minimizableNodeIds` (issue comments have no parent thread — see the
+   * module doc comment's THREAD RESOLUTION section).
+   */
+  commentNodeIds: string[];
+  /** Defaults to a JSON-on-console logger; pipeline.ts passes its own `PipelineLogger`. */
+  logger?: RereviewLogger;
+}
+
+const REVIEW_COMMENT_THREAD_QUERY = `
+  query MagpieReviewCommentThread($commentId: ID!) {
+    node(id: $commentId) {
+      ... on PullRequestReviewComment {
+        pullRequestReviewThread {
+          id
+          isResolved
+        }
+      }
+    }
+  }
+`;
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation MagpieResolveReviewThread($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        isResolved
+      }
+    }
+  }
+`;
+
+interface ReviewCommentThreadQueryResult {
+  node?: {
+    pullRequestReviewThread?: {
+      id: string;
+      isResolved: boolean;
+    } | null;
+  } | null;
+}
+
+/**
+ * Resolve the PR review-conversation thread each inline review comment in
+ * `commentNodeIds` belongs to, via GitHub's GraphQL-only `resolveReviewThread`
+ * mutation (there is no REST equivalent — see module doc comment). This sets
+ * the "Resolved" badge GitHub's own UI shows on a review thread; it is
+ * DISTINCT from `minimizeOutdated`'s comment-hiding — the two act on
+ * different GitHub state (thread vs comment) and are called together from
+ * pipeline.ts's step 7a, not as alternatives to each other.
+ *
+ * Two GraphQL round trips per comment are unavoidable: `resolveReviewThread`
+ * needs the thread's own node id, which only a lookup query returns — a
+ * review comment's `node_id` cannot be passed directly as `threadId`. If
+ * multiple comments in `commentNodeIds` share one thread, each independently
+ * looks it up; the `isResolved` check before the mutation call means the
+ * second (and later) hit that thread costs one query and no mutation call.
+ *
+ * Best-effort, per comment, mirroring `minimizeOutdated`'s error-isolation
+ * contract: a lookup or resolve failure for one comment (comment or thread
+ * since deleted, permission hiccup, transient API error) is logged and does
+ * NOT stop the remaining comments from being attempted, and NEVER propagates
+ * out of this function — like minimize, thread resolution is cosmetic
+ * cleanup, not part of the job's success/failure contract.
+ */
+export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParams): Promise<void> {
+  const { octokit, commentNodeIds, logger = consoleLogger } = params;
+
+  for (const commentNodeId of commentNodeIds) {
+    try {
+      const result = (await octokit.graphql(REVIEW_COMMENT_THREAD_QUERY, {
+        commentId: commentNodeId,
+      })) as ReviewCommentThreadQueryResult;
+      const thread = result.node?.pullRequestReviewThread;
+      if (!thread || thread.isResolved) continue;
+      await octokit.graphql(RESOLVE_REVIEW_THREAD_MUTATION, { threadId: thread.id });
+    } catch (err) {
+      logger.error({
+        event: "resolve-outdated-thread-failed",
+        commentNodeId,
         error: serializeError(err),
       });
     }

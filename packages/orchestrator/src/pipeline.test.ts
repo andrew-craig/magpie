@@ -2206,10 +2206,11 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     expect(body).not.toContain("magpie:reviewed:");
   });
 
-  it("minimizes prior minimizable nodes as OUTDATED after a successful publish, using the pre-publish snapshot (never the just-posted review)", async () => {
+  it("minimizes prior minimizable nodes as OUTDATED, and looks up their review thread to resolve it, after a successful publish, using the pre-publish snapshot (never the just-posted review)", async () => {
     // Prior state: a magpie review (id 5) whose OWN node_id must NEVER be
-    // minimized (PullRequestReview isn't Minimizable), plus an inline review
-    // comment attached to that review, which MUST be minimized.
+    // minimized (PullRequestReview isn't Minimizable) or looked up for thread
+    // resolution, plus an inline review comment attached to that review,
+    // which MUST be both minimized and have its thread looked up.
     const { octokit, createReview, graphql } = fakeOctokit({
       title: "Add feature",
       body: "Some PR body",
@@ -2242,12 +2243,21 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     await runJob(testJob(), new AbortController().signal); // headSha "deadbeef" != "older-sha" -> proceeds
 
     expect(createReview).toHaveBeenCalledTimes(1);
-    expect(graphql).toHaveBeenCalledTimes(1);
-    const [query, vars] = graphql.mock.calls[0] as [string, { subjectId: string }];
-    expect(query).toContain("OUTDATED");
-    expect(vars.subjectId).toBe("PRRC_OLD");
-    // The prior review's OWN node_id is never targeted (not Minimizable).
-    expect(graphql.mock.calls.map((c) => (c[1] as { subjectId: string }).subjectId)).not.toContain("PRR_OLD");
+    // 1 minimizeComment call + 1 thread-lookup call for PRRC_OLD. The fake
+    // octokit's default graphqlImpl returns `{}` for the lookup, so no
+    // parent thread is found and resolveReviewThread is never reached here.
+    expect(graphql).toHaveBeenCalledTimes(2);
+
+    const minimizeCall = graphql.mock.calls.find((c) => (c[0] as string).includes("minimizeComment"));
+    const threadLookupCall = graphql.mock.calls.find((c) => (c[0] as string).includes("MagpieReviewCommentThread"));
+    expect(minimizeCall?.[0]).toContain("OUTDATED");
+    expect((minimizeCall?.[1] as { subjectId: string }).subjectId).toBe("PRRC_OLD");
+    expect((threadLookupCall?.[1] as { commentId: string }).commentId).toBe("PRRC_OLD");
+
+    // The prior review's OWN node_id is never targeted (not Minimizable, no parent thread).
+    for (const call of graphql.mock.calls) {
+      expect(Object.values(call[1] as Record<string, unknown>)).not.toContain("PRR_OLD");
+    }
   });
 
   it("does NOT minimize anything when the review fails", async () => {

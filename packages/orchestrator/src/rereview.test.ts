@@ -1,7 +1,7 @@
 import type { Octokit } from "@octokit/rest";
 import { describe, expect, it, vi } from "vitest";
 import { buildReviewedShaMarker, MAGPIE_REVIEW_MARKER } from "./publisher.js";
-import { minimizeOutdated, readReviewState } from "./rereview.js";
+import { minimizeOutdated, readReviewState, resolveOutdatedThreads } from "./rereview.js";
 
 // NOTE: fully offline — no real Octokit, no network. `readReviewState` and
 // `minimizeOutdated` only ever touch `octokit.paginate` (keyed by function
@@ -94,7 +94,7 @@ describe("readReviewState", () => {
   it("returns an empty state (no lastReviewedSha, no minimizable nodes) when there's no prior magpie activity", async () => {
     const { octokit } = fakeOctokit({});
     const state = await readReviewState({ octokit, ...BASE_PARAMS });
-    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [] });
+    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [], resolvableReviewCommentNodeIds: [] });
   });
 
   it("parses lastReviewedSha from the most recent (by timestamp) magpie post, across mixed issue-comments and reviews", async () => {
@@ -210,6 +210,10 @@ describe("readReviewState", () => {
     // PullRequestReview is not GitHub's `Minimizable` interface (see
     // rereview.ts's module doc comment / SCOPE CONSTRAINT).
     expect(state.minimizableNodeIds).not.toContain("PRR_magpie_1");
+    // resolvableReviewCommentNodeIds is the inline-review-comment-only
+    // subset — excludes the issue comment (see THREAD RESOLUTION in the
+    // module doc comment).
+    expect(state.resolvableReviewCommentNodeIds).toEqual(["RC_magpie_1"]);
   });
 
   // SECURITY (spoof + wrong-bot): the marker `<!-- magpie-review -->` is a
@@ -299,7 +303,7 @@ describe("readReviewState", () => {
 
     const state = await readReviewState({ octokit, owner: "acme", repo: "widgets", prNumber: 7, botLogin: "" });
 
-    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [] });
+    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [], resolvableReviewCommentNodeIds: [] });
     // Fails toward doing the review, not just toward an empty result: an
     // unresolved identity short-circuits BEFORE even paginating GitHub's
     // API, since there's no point reading state that's going to be discarded
@@ -349,5 +353,83 @@ describe("minimizeOutdated", () => {
     expect(graphql).toHaveBeenCalledTimes(2);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ event: "minimize-outdated-failed", nodeId: "IC_fails" });
+  });
+});
+
+describe("resolveOutdatedThreads", () => {
+  it("looks up each comment's parent thread, then resolves it when unresolved", async () => {
+    const { octokit, graphql } = fakeOctokit({
+      graphqlImpl: async (query, vars) => {
+        if (query.includes("MagpieReviewCommentThread")) {
+          const commentId = (vars as { commentId: string }).commentId;
+          return { node: { pullRequestReviewThread: { id: `THREAD_${commentId}`, isResolved: false } } };
+        }
+        if (query.includes("resolveReviewThread")) {
+          return { resolveReviewThread: { thread: { isResolved: true } } };
+        }
+        throw new Error(`unexpected query: ${query}`);
+      },
+    });
+
+    await resolveOutdatedThreads({ octokit, commentNodeIds: ["RC_1"] });
+
+    expect(graphql).toHaveBeenCalledTimes(2);
+    const [lookupCall, resolveCall] = graphql.mock.calls as [string, Record<string, unknown>][][];
+    expect(lookupCall[0]).toContain("MagpieReviewCommentThread");
+    expect(lookupCall[1]).toEqual({ commentId: "RC_1" });
+    expect(resolveCall[0]).toContain("resolveReviewThread");
+    expect(resolveCall[1]).toEqual({ threadId: "THREAD_RC_1" });
+  });
+
+  it("skips the resolve mutation when the thread is already resolved", async () => {
+    const { octokit, graphql } = fakeOctokit({
+      graphqlImpl: async () => ({ node: { pullRequestReviewThread: { id: "THREAD_1", isResolved: true } } }),
+    });
+
+    await resolveOutdatedThreads({ octokit, commentNodeIds: ["RC_1"] });
+
+    expect(graphql).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the resolve mutation when the comment has no parent thread", async () => {
+    const { octokit, graphql } = fakeOctokit({
+      graphqlImpl: async () => ({ node: {} }),
+    });
+
+    await resolveOutdatedThreads({ octokit, commentNodeIds: ["RC_1"] });
+
+    expect(graphql).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls graphql when commentNodeIds is empty", async () => {
+    const { octokit, graphql } = fakeOctokit({});
+
+    await resolveOutdatedThreads({ octokit, commentNodeIds: [] });
+
+    expect(graphql).not.toHaveBeenCalled();
+  });
+
+  it("swallows a per-comment error (lookup or resolve), logs it, and still attempts the remaining comments", async () => {
+    const { octokit, graphql } = fakeOctokit({
+      graphqlImpl: async (query, vars) => {
+        if (query.includes("MagpieReviewCommentThread")) {
+          const commentId = (vars as { commentId: string }).commentId;
+          if (commentId === "RC_fails") throw new Error("permission denied");
+          return { node: { pullRequestReviewThread: { id: `THREAD_${commentId}`, isResolved: false } } };
+        }
+        return { resolveReviewThread: { thread: { isResolved: true } } };
+      },
+    });
+    const errors: Record<string, unknown>[] = [];
+    const logger = { info: vi.fn(), error: (p: Record<string, unknown>) => errors.push(p) };
+
+    await expect(
+      resolveOutdatedThreads({ octokit, commentNodeIds: ["RC_fails", "RC_succeeds"], logger }),
+    ).resolves.toBeUndefined();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ event: "resolve-outdated-thread-failed", commentNodeId: "RC_fails" });
+    // RC_succeeds still got both its lookup AND its resolve call.
+    expect(graphql).toHaveBeenCalledTimes(3);
   });
 });
