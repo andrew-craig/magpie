@@ -44,14 +44,29 @@ FROM rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e350
 # musl-dev: static-libc headers/archives cargo's linker needs; not already
 # present in the base rust:alpine image.
 RUN apk add --no-cache musl-dev
-WORKDIR /src
-COPY rust/ ./rust/
 WORKDIR /src/rust
+# SCOPED COPY, not `COPY rust/ ./rust/`: this stage builds exactly one crate
+# (magpie-vsock-client, whose only dependency is `libc` -- see
+# rust/vsock-client/Cargo.toml). Copying the whole `rust/` tree put it in one
+# layer, so ANY edit under rust/ -- including to crates this image never ships
+# (magpie-microvm-launcher, magpie-tier-probe) or a Cargo.lock bump for a dep
+# only those use -- invalidated the layer and forced a full cargo rebuild from
+# scratch. Copy only:
+#   - the workspace root manifests (Cargo.lock pins the build; the toolchain
+#     file keeps rustup on the pinned channel);
+#   - the sibling crate manifests, required purely so cargo can resolve the
+#     `[workspace] members` list (their `src/` is deliberately NOT copied --
+#     `-p magpie-vsock-client` never compiles them). magpie-microvm-launcher's
+#     build.rs comes along because its Cargo.toml references it via `build =`;
+#   - the one crate actually built, in full.
+COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
+COPY rust/magpie-microvm-launcher/Cargo.toml rust/magpie-microvm-launcher/build.rs ./magpie-microvm-launcher/
+COPY rust/magpie-tier-probe/Cargo.toml ./magpie-tier-probe/
+COPY rust/vsock-client/ ./vsock-client/
 # -p (not the whole workspace): magpie-microvm-launcher dynamically links a
 # HOST-installed libkrun.so (see its own Cargo.toml doc comment) that this
 # throwaway builder image doesn't have, so building the whole workspace here
-# would fail; magpie-vsock-client (its only dependency is the `libc` crate --
-# see rust/vsock-client/Cargo.toml) is all this stage needs.
+# would fail.
 RUN cargo build --release --locked -p magpie-vsock-client
 
 FROM node:22.23.1-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf

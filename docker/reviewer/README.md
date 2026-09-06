@@ -53,8 +53,13 @@ npm run build:reviewer-image
 ```
 
 The build context is the **repo root** (not `docker/reviewer/`), because the
-Dockerfile copies in `packages/review-extension/src` and `reviewer-prompt.md`, both
-of which live outside `docker/reviewer/`. The default tag is `magpie-reviewer:0.1.0`
+Dockerfile copies in `packages/review-extension/src` and `reviewer-prompt.md` (both
+outside `docker/reviewer/`) plus, for the `vsock-builder` stage, the workspace
+manifests and `rust/vsock-client/` (the guest-side AF_VSOCK relay). That builder
+stage deliberately copies only the manifests of the sibling Rust crates and the
+one crate it compiles — **not** the whole `rust/` tree — so an edit to
+`magpie-microvm-launcher` / `magpie-tier-probe` (neither is shipped in this image)
+doesn't invalidate the cached `cargo build` layer. The default tag is `magpie-reviewer:0.1.0`
 (also tagged `magpie-reviewer:latest`) — this exact string is coordinated with the
 `container.image` default in `packages/orchestrator/src/config.ts`; if
 you change the tag here, update that default too.
