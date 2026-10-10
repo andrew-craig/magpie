@@ -90,7 +90,7 @@ invisible to the service):
 
 ```bash
 sudo -u magpie XDG_RUNTIME_DIR=/run/user/$(id -u magpie) HOME=/var/lib/magpie \
-  podman pull ghcr.io/andrew-craig/magpie/reviewer:0.3.2@sha256:ae1e0d95b794e29390a792b0c0bdb800d22e7159b82345ae630293eccf2a9817
+  podman pull ghcr.io/andrew-craig/magpie/reviewer:0.4.0@sha256:4c602b11d749ce6cd04aa768c43ebfa45acdbc229a23766847ed8aa57ae8d7d7
 ```
 
 Optionally verify it was signed by this repo's release workflow before
@@ -100,7 +100,7 @@ trusting it:
 cosign verify \
   --certificate-identity-regexp '^https://github.com/andrew-craig/magpie' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/andrew-craig/magpie/reviewer@sha256:ae1e0d95b794e29390a792b0c0bdb800d22e7159b82345ae630293eccf2a9817
+  ghcr.io/andrew-craig/magpie/reviewer@sha256:4c602b11d749ce6cd04aa768c43ebfa45acdbc229a23766847ed8aa57ae8d7d7
 ```
 
 `config.example.toml`'s `[container].image` is already pinned to this exact
