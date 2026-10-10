@@ -59,23 +59,74 @@ of which live outside `docker/reviewer/`. The default tag is `magpie-reviewer:0.
 `container.image` default in `packages/orchestrator/src/config.ts`; if
 you change the tag here, update that default too.
 
-## Pinned versions (current as of 2026-07-10)
+## Pinned versions (current as of 2026-10-10)
 
 | Component | Pinned to | Where |
 |---|---|---|
 | Base image | `node:22.23.1-slim` | `Dockerfile` `FROM`, pinned by tag **and** digest (`sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf`) |
-| Pi coding agent | `@earendil-works/pi-coding-agent@0.80.3` | `docker/reviewer/extension-package.json` — matches the host's `pi --version` (0.80.3) at the time this image was built |
-| Extension runtime deps | `@earendil-works/pi-tui@0.80.3`, `typebox@1.1.38` | `docker/reviewer/extension-package.json` — must match `packages/review-extension/package.json`'s resolved versions on the host |
+| Pi coding agent | `@earendil-works/pi-coding-agent@1.1.0` | `docker/reviewer/extension-package.json` — matches the host's `pi --version` (1.1.0) at the time this image was built |
+| Extension runtime deps | `@earendil-works/pi-tui@1.1.0`, `typebox@1.3.27` | `docker/reviewer/extension-package.json` — must match `packages/review-extension/package.json`'s resolved versions on the host |
 
 None of these are floating tags or semver ranges. **Re-pinning checklist**, if the
 host's Pi version or the extension's deps ever move:
 
-1. Update `docker/reviewer/extension-package.json`'s pinned versions to match.
+1. Run `./scripts/bump-pi.sh [version|latest]` to bump Pi, `pi-tui`, and
+   `typebox` together — see "Bumping Pi" below. It updates both
+   `package.json` files and `package-lock.json`, but NOT this table or the
+   Dockerfile's version comment (update those by hand; the script prints
+   every remaining stale mention of the old version to help find them).
 2. Update the base image tag+digest in `Dockerfile` if you're also bumping Node
    (`docker pull node:22-slim && docker inspect node:22-slim --format '{{.RepoDigests}}'`
    to find the current digest, then pin both the resolved tag and that digest).
 3. Rebuild (`npm run build:reviewer-image`) and re-run the smoke tests below.
 4. Update the version table above and the "current as of" date.
+
+## Bumping Pi
+
+`./scripts/bump-pi.sh [version|latest]` (default `latest`) is the repeatable
+path for moving to a new Pi release:
+
+1. It resolves the requested version against the npm registry, reads THAT
+   version's own declared `@earendil-works/pi-tui` and `typebox`
+   dependencies (so the extension and Pi never end up with two different
+   installed copies of either), and rewrites all three pins in both
+   `packages/review-extension/package.json` (caret ranges) and
+   `docker/reviewer/extension-package.json` (exact pins).
+2. It runs `npm install` to refresh the root `package-lock.json`.
+3. It prints every remaining mention of the OLD pinned version in docs/
+   comments (this README's table, the Dockerfile's version comment,
+   `entrypoint.sh`, `reviewer.ts`, `config.ts`, `DISTRIBUTION.md`, the
+   extension's own `index.ts`) so a human can update the prose — some of
+   those are factual claims about Pi's behavior (e.g. "Pi 1.1.0 has no
+   generic base-URL env override"), not just a version number, so re-check
+   each one against the new version's docs/changelog rather than
+   search-and-replacing the digits.
+4. It prints the follow-up steps below as a reminder.
+
+After running it:
+
+1. **Read the changelog** for breaking changes between the old and new
+   version (`node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md`
+   after `npm install`). Pay particular attention to: the extension API
+   (`defineTool`/`registerTool`/`ExtensionAPI`, `typebox` schema helpers)
+   used by `packages/review-extension/src`; the `--mode json` NDJSON event
+   shapes `packages/orchestrator/src/reviewer.ts` parses (`message_end`,
+   `agent_end`, `AssistantMessage.content/usage/stopReason/errorMessage`);
+   the CLI flags `docker/reviewer/entrypoint.sh` and `reviewer.ts` pass
+   (`--provider`/`--model`/`--mode json`/`-e`/`--no-session`/etc.); and the
+   `~/.pi/agent/models.json` provider `baseUrl` override mechanism
+   `entrypoint.sh` relies on to redirect Pi's OpenRouter traffic to the
+   local gateway forwarder.
+2. **Fix whatever breaks**, then run `npm run build` and the full test
+   suite.
+3. **Rebuild the reviewer image** (`npm run build:reviewer-image`) and run
+   the smoke tests under "Smoke-testing a build" below.
+4. **Cut a new `reviewer-v*` release tag** so CI publishes the updated image
+   to GHCR.
+5. **Bump the digest pin** (`container.image` default in
+   `packages/orchestrator/src/config.ts`, `config.example.toml`, and any
+   other live config) to the newly published image's digest, then validate
+   live — this last step is operator/CTO-gated, not automatic.
 
 ## Baked in vs. mounted (rebuild required when these change)
 
@@ -123,8 +174,11 @@ args the caller passes (`"$@"`). So the runtime inputs are:
   the in-container forwarder (`forwarder.mjs`, baked into the image) that
   relays to the gateway's real unix socket bind-mounted read-only at
   `/run/gw/gw.sock`. **Pi itself does not read this env var** — verified
-  empirically against a stub HTTP server that a bare `OPENAI_BASE_URL` is silently
-  ignored by Pi 0.80.3. The entrypoint instead writes it into
+  empirically against a stub HTTP server on Pi 0.80.3 (a bare `OPENAI_BASE_URL`
+  was silently ignored), and reconfirmed against Pi 1.1.0's own bundled docs
+  (`docs/custom-provider.md`/`docs/models.md` in the installed package): no
+  generic OpenAI-compatible base-URL env override exists at 1.1.0 either. The
+  entrypoint instead writes it into
   `~/.pi/agent/models.json` as an `openrouter` provider `baseUrl` override before
   exec'ing `pi` (see `entrypoint.sh`'s doc comment for the full explanation) — that
   file-based override is the mechanism that actually redirects Pi's OpenRouter
@@ -202,7 +256,7 @@ version of the same proof):
 
 A build should be smoke-tested with the following checks:
 
-- `docker run --rm --entrypoint pi magpie-reviewer:0.1.0 --version` prints `0.80.3`
+- `docker run --rm --entrypoint pi magpie-reviewer:0.1.0 --version` prints `1.1.0`
   (the fixed `ENTRYPOINT` runs Pi in review mode and ignores appended args, so
   override `--entrypoint` to invoke Pi directly for a version check).
 - A hand-run of the full entrypoint against a throwaway worktree + `/out` dir, invoked
