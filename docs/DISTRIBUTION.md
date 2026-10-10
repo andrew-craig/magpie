@@ -76,8 +76,9 @@ model — it does **not** depend on the adopter's daemon config, container-runti
 settings, or the embedded resolver. There is nothing to misconfigure.
 
 The reviewer's *only* path off the container is the **mounted unix socket** to the gateway's proxy
-plane. Pi is pointed at it exactly as described here (`reviewer.ts` documents that Pi 0.80.3 ignores
-`OPENAI_BASE_URL` and is steered via a `~/.pi/agent/models.json` `baseUrl`; the entrypoint keeps
+plane. Pi is pointed at it exactly as described here (`reviewer.ts` documents that Pi 1.1.0 (like
+every version back to 0.80.3) ignores `OPENAI_BASE_URL` and is steered via a `~/.pi/agent/models.json`
+`baseUrl`; the entrypoint keeps
 writing that file). The `baseUrl` becomes `http://127.0.0.1:4000/v1`, served by a **tiny
 in-container TCP→unix forwarder** (listening on the container's loopback, which `--network none`
 leaves intact) that relays to `/run/gw.sock`. The forwarder holds no secret, so it is safe to ship

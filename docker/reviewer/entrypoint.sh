@@ -49,13 +49,16 @@ set -euo pipefail
 #     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP --
 #     the earlier magpie-net design that pointed this at a fixed bridge
 #     address instead has been deleted (see DISTRIBUTION.md §1.6). Required --
-#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 0.80.3 does NOT
-#     read this env var itself (verified empirically against a stub HTTP
-#     server: a plain OPENAI_BASE_URL was silently ignored and Pi's request
-#     still went to the real api.openrouter.ai). The mechanism that actually
-#     redirects Pi's OpenRouter traffic is a `~/.pi/agent/models.json` provider `baseUrl`
-#     override (see Pi's docs/models.md, "Overriding Built-in Providers") --
-#     so THIS SCRIPT translates OPENAI_BASE_URL into that file below, before
+#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 1.1.0 (like
+#     0.80.3 before it -- re-checked against this version's own bundled docs
+#     on the Pi bump, see docker/reviewer/README.md's "Bumping Pi") still has
+#     no generic env-var base-URL override: a plain OPENAI_BASE_URL is silently
+#     ignored and Pi's request would still go to the real api.openrouter.ai.
+#     The mechanism that actually redirects Pi's OpenRouter traffic is a
+#     `~/.pi/agent/models.json` provider `baseUrl` override that preserves the
+#     provider's built-in models (see Pi's docs/models.md "Configure a
+#     compatible endpoint" and docs/custom-provider.md "Register a provider")
+#     -- so THIS SCRIPT translates OPENAI_BASE_URL into that file below, before
 #     exec'ing `pi`. `pi`'s own invocation is otherwise unaffected: the
 #     `--provider openrouter` flag stays exactly as before, and the resolved
 #     credential (OPENROUTER_API_KEY above) still flows through Pi's normal

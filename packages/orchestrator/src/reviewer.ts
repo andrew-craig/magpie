@@ -40,13 +40,16 @@
 // `RunReviewParams.gatewayApiKey` below, threaded straight through with no
 // host-side substitution. `OPENAI_BASE_URL` carries
 // `config.gateway.containerBaseUrl`. Pi itself never reads `OPENAI_BASE_URL`
-// directly: Pi 0.80.3 has no generic OpenAI-compatible base-URL env override
-// (empirically verified against a stub HTTP server — a plain
-// `OPENAI_BASE_URL` env var was silently ignored and requests still went to
-// the real api.openrouter.ai). The mechanism that actually works is a
-// `~/.pi/agent/models.json` provider override
-// (`{"providers":{"openrouter":{"baseUrl":...}}}`, see Pi's docs/models.md
-// "Overriding Built-in Providers") — docker/reviewer/entrypoint.sh reads
+// directly: Pi 1.1.0 still has no generic OpenAI-compatible base-URL env
+// override (empirically verified against a stub HTTP server on 0.80.3 — a
+// plain `OPENAI_BASE_URL` env var was silently ignored and requests still
+// went to the real api.openrouter.ai — and reconfirmed on the Pi bump to
+// 1.1.0 against that version's own bundled docs). The mechanism that
+// actually works is a `~/.pi/agent/models.json` provider override
+// (`{"providers":{"openrouter":{"baseUrl":...}}}`, which preserves the
+// provider's built-in models — see Pi's docs/models.md "Configure a
+// compatible endpoint" and docs/custom-provider.md "Register a provider")
+// — docker/reviewer/entrypoint.sh reads
 // `OPENAI_BASE_URL` and writes that file before exec'ing `pi`, so this
 // module's job is only to deliver the value via env, same as any other
 // per-job input.

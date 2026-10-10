@@ -3,4 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_43d1** · P2 · open · Bump Pi to latest (1.1.0) + repeatable bump script
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter
