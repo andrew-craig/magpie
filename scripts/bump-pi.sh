@@ -62,10 +62,32 @@ for f in "$REVIEW_EXT_PKG_JSON" "$REVIEWER_EXT_PKG_JSON"; do
   [ -f "$f" ] || die "expected file not found: $f"
 done
 
+# --- resolve_version PKG SPEC -------------------------------------------------
+# Prints the single concrete version npm resolves PKG@SPEC to. `npm view ...
+# version` prints one line PER matching version when SPEC is a range or partial
+# (e.g. "1.1", "^1.1.0") -- and Pi's own deps are caret ranges, so pi-tui/
+# typebox hit this as soon as a newer patch is published. Ask for --json
+# instead (a string for one match, an array otherwise), take the highest match
+# (npm lists ascending -- the same version `npm install` would pick), and
+# refuse anything that isn't one well-formed semver string rather than write
+# it into the pins.
+resolve_version() {
+  local pkg="$1" spec="$2" raw v
+  raw="$(npm view "${pkg}@${spec}" version --json 2>/dev/null || true)"
+  [ -n "$raw" ] || return 1
+  v="$(RAW="$raw" node -e '
+    const r = JSON.parse(process.env.RAW);
+    const v = Array.isArray(r) ? r[r.length - 1] : r;
+    if (typeof v !== "string") process.exit(1);
+    process.stdout.write(v);
+  ')" || return 1
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || return 1
+  printf '%s' "$v"
+}
+
 # --- Resolve the target pi-coding-agent version -----------------------------
 log "Resolving ${PI_PKG}@${REQUESTED} ..."
-PI_VERSION="$(npm view "${PI_PKG}@${REQUESTED}" version 2>/dev/null || true)"
-[ -n "$PI_VERSION" ] || die "could not resolve ${PI_PKG}@${REQUESTED} -- does that version exist on the npm registry?"
+PI_VERSION="$(resolve_version "$PI_PKG" "$REQUESTED")" || die "could not resolve ${PI_PKG}@${REQUESTED} -- does that version exist on the npm registry?"
 log "Resolved: ${PI_PKG}@${PI_VERSION}"
 
 # --- Read pi-coding-agent's OWN declared pi-tui/typebox deps ----------------
@@ -92,11 +114,9 @@ log "${PI_PKG}@${PI_VERSION} declares ${PI_TUI_PKG}@${PI_TUI_RANGE}, ${TYPEBOX_P
 
 # Resolve both to concrete versions (ranges like "^1.1.0" aren't valid exact
 # pins for docker/reviewer/extension-package.json, which pins exactly).
-PI_TUI_VERSION="$(npm view "${PI_TUI_PKG}@${PI_TUI_RANGE}" version 2>/dev/null || true)"
-[ -n "$PI_TUI_VERSION" ] || die "could not resolve ${PI_TUI_PKG}@${PI_TUI_RANGE}"
+PI_TUI_VERSION="$(resolve_version "$PI_TUI_PKG" "$PI_TUI_RANGE")" || die "could not resolve ${PI_TUI_PKG}@${PI_TUI_RANGE}"
 
-TYPEBOX_VERSION="$(npm view "${TYPEBOX_PKG}@${TYPEBOX_RANGE}" version 2>/dev/null || true)"
-[ -n "$TYPEBOX_VERSION" ] || die "could not resolve ${TYPEBOX_PKG}@${TYPEBOX_RANGE}"
+TYPEBOX_VERSION="$(resolve_version "$TYPEBOX_PKG" "$TYPEBOX_RANGE")" || die "could not resolve ${TYPEBOX_PKG}@${TYPEBOX_RANGE}"
 
 log "Resolved ${PI_TUI_PKG}@${PI_TUI_VERSION}, ${TYPEBOX_PKG}@${TYPEBOX_VERSION}"
 
