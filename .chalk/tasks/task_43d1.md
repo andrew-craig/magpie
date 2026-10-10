@@ -123,3 +123,12 @@ every "Breaking Changes" section in that range) and how each was handled:**
 - Publishing a new `reviewer-v*` image, bumping the live digest pin, and
   running a live scratch-PR review are explicitly CTO/user-gated follow-ups,
   not done here (per the task plan's last item).
+
+## Release (2026-10-11)
+- [x] PR #84 merged (92ea1be)
+- [x] Tagged `reviewer-v0.4.0` on 92ea1be; `release-reviewer.yml` run 38081102056 succeeded
+- [x] Image index digest `sha256:4c602b11d749ce6cd04aa768c43ebfa45acdbc229a23766847ed8aa57ae8d7d7` (amd64+arm64); anonymous pull OK; `pi --version` = 1.1.0; 1 GitHub attestation present
+- [x] Digest pin bumped in config.ts (code default), config.test.ts, config.example.toml, QUICKSTART.md, docker/reviewer/README.md — branch `reviewer-v0.4.0-pin`; orchestrator tests 540/540
+- [ ] Pin PR merged
+- [x] Live host switched to reviewer-v0.4.0 (2026-10-11 06:58 AEST): image pre-pulled as `magpie` (pi 1.1.0), `/etc/magpie/config.toml` `container.image` updated (backup `config.toml.bak-pre-reviewer-0.4.0`), `systemctl restart magpie`; graceful drain let an in-flight #420 review finish on the old image; healthz ok, crun tier
+- [ ] Live glm-5.3 review on the new image confirms report_findings failures are gone
