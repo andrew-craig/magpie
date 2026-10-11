@@ -261,7 +261,10 @@ earlier service start, or by a `podman` you ran by hand as `magpie`, holds a
 different `/var/tmp` than the running service and podman can't find its own temp
 files. `magpie.service` therefore runs `ExecStartPre=-/usr/bin/podman system
 migrate` on every start, which stops the stale pause process so the service
-recreates it in its own namespace.
+recreates it in its own namespace. `install.sh` rewrites the template's
+`/usr/bin/podman` to the podman it finds (override with `MAGPIE_PODMAN_BIN=/path/to/podman`,
+like `MAGPIE_NODE_BIN` for node); it warns loudly if none is found, in which case the
+reset does not engage. Keep it the same podman as `container.docker_bin` in `config.toml`.
 
 Fix: `sudo systemctl restart magpie`. Rule of thumb: after running `podman` as
 the `magpie` user from a shell (pulls, inspects, debugging), restart

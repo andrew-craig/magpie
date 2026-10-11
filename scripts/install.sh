@@ -78,6 +78,12 @@ UNIT_TEMPLATE_PREFIX="/opt/magpie"
 # $NODE_BIN on install so hosts whose node lives elsewhere (nvm, /usr/local)
 # still get a working unit. systemd ExecStart needs an ABSOLUTE path.
 UNIT_TEMPLATE_NODE="/usr/bin/node"
+# The podman the magpie.service ExecStartPre (rootless pause-process reset)
+# hardcodes; rewritten to $PODMAN_BIN on install. Only the ExecStartPre line is
+# touched. Keep this the same podman as `container.docker_bin` in config.toml
+# (default "podman", resolved on the orchestrator's PATH) — otherwise the reset
+# targets a different podman than the one that runs reviews.
+UNIT_TEMPLATE_PODMAN="/usr/bin/podman"
 
 ENABLE_UNITS=0
 for arg in "$@"; do
@@ -154,6 +160,27 @@ case "$NODE_BIN" in
   *) die "resolved node path '$NODE_BIN' is not absolute — set MAGPIE_NODE_BIN to an absolute path" ;;
 esac
 log "node interpreter for units' ExecStart: $NODE_BIN"
+
+# Resolve podman the same way: override, conventional path, then PATH. Needed by
+# magpie.service's ExecStartPre=-podman system migrate (pause-process reset).
+PODMAN_BIN="${MAGPIE_PODMAN_BIN:-}"
+if [[ -z "$PODMAN_BIN" ]]; then
+  if [[ -x "$UNIT_TEMPLATE_PODMAN" ]]; then
+    PODMAN_BIN="$UNIT_TEMPLATE_PODMAN"
+  elif PODMAN_BIN="$(command -v podman 2>/dev/null)"; then
+    :
+  else
+    PODMAN_BIN="$UNIT_TEMPLATE_PODMAN"
+    warn "no podman found at $UNIT_TEMPLATE_PODMAN or on PATH — magpie.service will reference $PODMAN_BIN,"
+    warn "so the rootless pause-process reset will NOT engage (and reviews need podman anyway)."
+    warn "Install podman, or re-run with MAGPIE_PODMAN_BIN=/path/to/podman."
+  fi
+fi
+case "$PODMAN_BIN" in
+  /*) : ;;
+  *) die "resolved podman path '$PODMAN_BIN' is not absolute — set MAGPIE_PODMAN_BIN to an absolute path" ;;
+esac
+log "podman for magpie.service's ExecStartPre: $PODMAN_BIN"
 
 # ---------------------------------------------------------------------------
 # 1. Service users (idempotent).
@@ -417,6 +444,7 @@ install_unit() {
   # such placeholder, so this substitution is a no-op there.
   sed -e "s|$UNIT_TEMPLATE_PREFIX|$PREFIX|g" \
       -e "s|$UNIT_TEMPLATE_NODE|$NODE_BIN|g" \
+      -e "s|^\(ExecStartPre=-\)$UNIT_TEMPLATE_PODMAN |\1$PODMAN_BIN |" \
       -e "s|MAGPIE_RUNTIME_UID|$MAGPIE_UID|g" \
       "$src" > "$dst"
   chmod 0644 "$dst"
