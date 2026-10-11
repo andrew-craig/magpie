@@ -139,7 +139,8 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/MAGPIE_RUNTIME_UID/bus
 # (startup orphan-cleanup handles any leftover containers). The leading `-`
 # keeps a failure here (e.g. podman missing, no pause process) from blocking
 # startup. /usr/bin/podman is the template path; install.sh rewrites it
-# (like node) to $MAGPIE_PODMAN_BIN / the podman found on PATH. Do NOT drop PrivateTmp instead — it is a deliberate hardening
+# (like node) to $MAGPIE_PODMAN_BIN, else the first podman on THIS unit's PATH
+# (the one a bare container.docker_bin resolves to). Do NOT drop PrivateTmp instead — it is a deliberate hardening
 # choice. Operators: manual `podman` as the magpie user from a shell can
 # recreate a pause process in the HOST namespace; restart this service afterwards
 # (see docs/INSTALL.md, Troubleshooting).

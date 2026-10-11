@@ -262,9 +262,13 @@ different `/var/tmp` than the running service and podman can't find its own temp
 files. `magpie.service` therefore runs `ExecStartPre=-/usr/bin/podman system
 migrate` on every start, which stops the stale pause process so the service
 recreates it in its own namespace. `install.sh` rewrites the template's
-`/usr/bin/podman` to the podman it finds (override with `MAGPIE_PODMAN_BIN=/path/to/podman`,
-like `MAGPIE_NODE_BIN` for node); it warns loudly if none is found, in which case the
-reset does not engage. Keep it the same podman as `container.docker_bin` in `config.toml`.
+`/usr/bin/podman` to the first podman on the service's own PATH (systemd's
+manager PATH, the same lookup a bare `container.docker_bin = "podman"` gets), so the
+reset targets the podman that runs reviews. Override with
+`MAGPIE_PODMAN_BIN=/path/to/podman` (like `MAGPIE_NODE_BIN` for node). It warns if several
+podmans are on that PATH, and warns loudly if none is found, in which case the reset does
+not engage. If you pin `container.docker_bin` to an absolute path in `config.toml`, set
+`MAGPIE_PODMAN_BIN` to the same path.
 
 Fix: `sudo systemctl restart magpie`. Rule of thumb: after running `podman` as
 the `magpie` user from a shell (pulls, inspects, debugging), restart

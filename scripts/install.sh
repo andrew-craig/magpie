@@ -161,17 +161,35 @@ case "$NODE_BIN" in
 esac
 log "node interpreter for units' ExecStart: $NODE_BIN"
 
-# Resolve podman the same way: override, conventional path, then PATH. Needed by
-# magpie.service's ExecStartPre=-podman system migrate (pause-process reset).
+# Resolve podman: override, else the FIRST podman on the PATH magpie.service
+# itself runs with. The orchestrator invokes `container.docker_bin` (default
+# bare "podman") via that PATH, so resolving any other way (e.g. preferring
+# /usr/bin/podman) could bake a DIFFERENT podman into ExecStartPre than the one
+# that owns the pause process on a host with two installs -- the reset would
+# then silently miss (the leading `-` swallows failures) and a mismatched
+# `system migrate` could touch the shared per-user storage. A unit without
+# Environment=PATH inherits the system manager's PATH, so ask systemd for it
+# (fall back to systemd's compiled-in default).
+UNIT_PATH="$(systemctl show-environment 2>/dev/null | sed -n 's/^PATH=//p')"
+[[ -n "$UNIT_PATH" ]] || UNIT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 PODMAN_BIN="${MAGPIE_PODMAN_BIN:-}"
 if [[ -z "$PODMAN_BIN" ]]; then
-  if [[ -x "$UNIT_TEMPLATE_PODMAN" ]]; then
-    PODMAN_BIN="$UNIT_TEMPLATE_PODMAN"
-  elif PODMAN_BIN="$(command -v podman 2>/dev/null)"; then
-    :
+  if PODMAN_BIN="$(PATH="$UNIT_PATH" command -v podman 2>/dev/null)"; then
+    # Several podmans on the unit's PATH: fine as long as nothing pins a
+    # different one, but say so -- container.docker_bin must match.
+    # Dedupe by resolved path: on merged-/usr distros /bin -> /usr/bin, so the
+    # same binary appears twice on PATH and must not trigger the warning.
+    mapfile -t ALL_PODMANS < <(PATH="$UNIT_PATH" type -aP podman 2>/dev/null \
+      | while IFS= read -r p; do printf '%s\t%s\n' "$(readlink -f "$p")" "$p"; done \
+      | awk -F'\t' '!seen[$1]++ { print $2 }')
+    if (( ${#ALL_PODMANS[@]} > 1 )); then
+      warn "multiple podman binaries on magpie.service's PATH: ${ALL_PODMANS[*]}"
+      warn "using $PODMAN_BIN (first on PATH, what a bare container.docker_bin=\"podman\" resolves to)."
+      warn "If config.toml pins container.docker_bin to another one, set it and MAGPIE_PODMAN_BIN to the SAME absolute path."
+    fi
   else
     PODMAN_BIN="$UNIT_TEMPLATE_PODMAN"
-    warn "no podman found at $UNIT_TEMPLATE_PODMAN or on PATH — magpie.service will reference $PODMAN_BIN,"
+    warn "no podman found on magpie.service's PATH ($UNIT_PATH) — the unit will reference $PODMAN_BIN,"
     warn "so the rootless pause-process reset will NOT engage (and reviews need podman anyway)."
     warn "Install podman, or re-run with MAGPIE_PODMAN_BIN=/path/to/podman."
   fi
