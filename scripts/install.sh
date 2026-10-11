@@ -168,9 +168,16 @@ log "node interpreter for units' ExecStart: $NODE_BIN"
 # that owns the pause process on a host with two installs -- the reset would
 # then silently miss (the leading `-` swallows failures) and a mismatched
 # `system migrate` could touch the shared per-user storage. A unit without
-# Environment=PATH inherits the system manager's PATH, so ask systemd for it
-# (fall back to systemd's compiled-in default).
-UNIT_PATH="$(systemctl show-environment 2>/dev/null | sed -n 's/^PATH=//p')"
+# Environment=PATH inherits the system manager's environment block, so ask
+# systemd for it (`show-environment` is the block passed to every spawned
+# process, DefaultEnvironment= in system.conf included). It does NOT reflect an
+# Environment=PATH= drop-in on magpie.service itself -- operators who add one
+# must set MAGPIE_PODMAN_BIN. `|| true` matters: under `set -euo pipefail` a
+# failing systemctl (container, chroot, no system bus) would otherwise abort the
+# whole installer here, silently. Fallback: upstream systemd's default PATH
+# (distro builds vary -- merged-/usr builds omit /sbin:/bin -- but extra
+# entries are harmless: they only widen the search, and duplicates are deduped).
+UNIT_PATH="$({ systemctl show-environment 2>/dev/null || true; } | sed -n 's/^PATH=//p')"
 [[ -n "$UNIT_PATH" ]] || UNIT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 PODMAN_BIN="${MAGPIE_PODMAN_BIN:-}"
 if [[ -z "$PODMAN_BIN" ]]; then
