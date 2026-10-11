@@ -2,14 +2,14 @@
 id: bug_b774
 title: Fix: magpie.service restart strands rootless podman pause process in old PrivateTmp namespace
 type: bug
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-10-11T02:17:07Z
-updated_at: 2026-10-11T02:17:07Z
+updated_at: 2026-10-11T02:22:16Z
 ---
 
 

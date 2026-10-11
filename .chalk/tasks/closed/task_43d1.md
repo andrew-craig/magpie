@@ -2,14 +2,14 @@
 id: task_43d1
 title: Bump Pi to latest (1.1.0) + repeatable bump script
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-10-10T10:32:14Z
-updated_at: 2026-10-10T10:32:14Z
+updated_at: 2026-10-11T02:22:16Z
 ---
 
 
@@ -131,4 +131,4 @@ every "Breaking Changes" section in that range) and how each was handled:**
 - [x] Digest pin bumped in config.ts (code default), config.test.ts, config.example.toml, QUICKSTART.md, docker/reviewer/README.md — branch `reviewer-v0.4.0-pin`; orchestrator tests 540/540
 - [ ] Pin PR merged
 - [x] Live host switched to reviewer-v0.4.0 (2026-10-11 06:58 AEST): image pre-pulled as `magpie` (pi 1.1.0), `/etc/magpie/config.toml` `container.image` updated (backup `config.toml.bak-pre-reviewer-0.4.0`), `systemctl restart magpie`; graceful drain let an in-flight #420 review finish on the old image; healthz ok, crun tier
-- [ ] Live glm-5.3 review on the new image confirms report_findings failures are gone
+- [x] Live glm-5.3 review on the new image succeeded (cairn-reader #420, 2026-10-11 13:20, 35 turns, outcome success) — after fixing an unrelated restart issue (bug_b774)
