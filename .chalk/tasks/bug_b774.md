@@ -43,3 +43,8 @@ crash, boot, post-manual-podman). Leading `-` so failure never blocks startup. i
 rewrites prefix/node/uid placeholders, so the line survives. Verified: systemd-analyze verify on a
 uid-substituted copy only complains /usr/bin/node absent on this dev box; npm test all green.
 Not verified: live behaviour of `system migrate` under the unit (no live host access by design).
+
+## Live validation (2026-10-11)
+- Rendered unit (uid 993, node at /usr/local/bin/node) differed from the installed one only by the ExecStartPre line + comments; installed to /etc/systemd/system/magpie.service (backup `magpie.service.bak-pre-bug_b774`), daemon-reload, restart while idle.
+- Pause process replaced on restart (331965 → 337878); `/proc/<pid>/root/var/tmp` inode identical for the service (337815) and the new pause process (155812), distinct from host /var/tmp (55339) → the new pause shares the service's private /var/tmp.
+- Prior test review (cairn-reader #420, 13:20) succeeded after a manual pause-process kill.
