@@ -78,6 +78,12 @@ UNIT_TEMPLATE_PREFIX="/opt/magpie"
 # $NODE_BIN on install so hosts whose node lives elsewhere (nvm, /usr/local)
 # still get a working unit. systemd ExecStart needs an ABSOLUTE path.
 UNIT_TEMPLATE_NODE="/usr/bin/node"
+# The podman the magpie.service ExecStartPre (rootless pause-process reset)
+# hardcodes; rewritten to $PODMAN_BIN on install. Only the ExecStartPre line is
+# touched. Keep this the same podman as `container.docker_bin` in config.toml
+# (default "podman", resolved on the orchestrator's PATH) — otherwise the reset
+# targets a different podman than the one that runs reviews.
+UNIT_TEMPLATE_PODMAN="/usr/bin/podman"
 
 ENABLE_UNITS=0
 for arg in "$@"; do
@@ -154,6 +160,52 @@ case "$NODE_BIN" in
   *) die "resolved node path '$NODE_BIN' is not absolute — set MAGPIE_NODE_BIN to an absolute path" ;;
 esac
 log "node interpreter for units' ExecStart: $NODE_BIN"
+
+# Resolve podman: override, else the FIRST podman on the PATH magpie.service
+# itself runs with. The orchestrator invokes `container.docker_bin` (default
+# bare "podman") via that PATH, so resolving any other way (e.g. preferring
+# /usr/bin/podman) could bake a DIFFERENT podman into ExecStartPre than the one
+# that owns the pause process on a host with two installs -- the reset would
+# then silently miss (the leading `-` swallows failures) and a mismatched
+# `system migrate` could touch the shared per-user storage. A unit without
+# Environment=PATH inherits the system manager's environment block, so ask
+# systemd for it (`show-environment` is the block passed to every spawned
+# process, DefaultEnvironment= in system.conf included). It does NOT reflect an
+# Environment=PATH= drop-in on magpie.service itself -- operators who add one
+# must set MAGPIE_PODMAN_BIN. `|| true` matters: under `set -euo pipefail` a
+# failing systemctl (container, chroot, no system bus) would otherwise abort the
+# whole installer here, silently. Fallback: upstream systemd's default PATH
+# (distro builds vary -- merged-/usr builds omit /sbin:/bin -- but extra
+# entries are harmless: they only widen the search, and duplicates are deduped).
+UNIT_PATH="$({ systemctl show-environment 2>/dev/null || true; } | sed -n 's/^PATH=//p')"
+[[ -n "$UNIT_PATH" ]] || UNIT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PODMAN_BIN="${MAGPIE_PODMAN_BIN:-}"
+if [[ -z "$PODMAN_BIN" ]]; then
+  if PODMAN_BIN="$(PATH="$UNIT_PATH" command -v podman 2>/dev/null)"; then
+    # Several podmans on the unit's PATH: fine as long as nothing pins a
+    # different one, but say so -- container.docker_bin must match.
+    # Dedupe by resolved path: on merged-/usr distros /bin -> /usr/bin, so the
+    # same binary appears twice on PATH and must not trigger the warning.
+    mapfile -t ALL_PODMANS < <(PATH="$UNIT_PATH" type -aP podman 2>/dev/null \
+      | while IFS= read -r p; do printf '%s\t%s\n' "$(readlink -f "$p")" "$p"; done \
+      | awk -F'\t' '!seen[$1]++ { print $2 }')
+    if (( ${#ALL_PODMANS[@]} > 1 )); then
+      warn "multiple podman binaries on magpie.service's PATH: ${ALL_PODMANS[*]}"
+      warn "using $PODMAN_BIN (first on PATH, what a bare container.docker_bin=\"podman\" resolves to)."
+      warn "If config.toml pins container.docker_bin to another one, set it and MAGPIE_PODMAN_BIN to the SAME absolute path."
+    fi
+  else
+    PODMAN_BIN="$UNIT_TEMPLATE_PODMAN"
+    warn "no podman found on magpie.service's PATH ($UNIT_PATH) — the unit will reference $PODMAN_BIN,"
+    warn "so the rootless pause-process reset will NOT engage (and reviews need podman anyway)."
+    warn "Install podman, or re-run with MAGPIE_PODMAN_BIN=/path/to/podman."
+  fi
+fi
+case "$PODMAN_BIN" in
+  /*) : ;;
+  *) die "resolved podman path '$PODMAN_BIN' is not absolute — set MAGPIE_PODMAN_BIN to an absolute path" ;;
+esac
+log "podman for magpie.service's ExecStartPre: $PODMAN_BIN"
 
 # ---------------------------------------------------------------------------
 # 1. Service users (idempotent).
@@ -417,6 +469,7 @@ install_unit() {
   # such placeholder, so this substitution is a no-op there.
   sed -e "s|$UNIT_TEMPLATE_PREFIX|$PREFIX|g" \
       -e "s|$UNIT_TEMPLATE_NODE|$NODE_BIN|g" \
+      -e "s|^\(ExecStartPre=-\)$UNIT_TEMPLATE_PODMAN |\1$PODMAN_BIN |" \
       -e "s|MAGPIE_RUNTIME_UID|$MAGPIE_UID|g" \
       "$src" > "$dst"
   chmod 0644 "$dst"
@@ -493,6 +546,9 @@ cat <<NOTES
        sudo -u magpie XDG_RUNTIME_DIR=/run/user/$MAGPIE_UID \\
          HOME=$STATE_DIR podman pull \\
          \$(grep -E '^image *=' $ETC_MAGPIE/config.toml | cut -d'"' -f2)
+     (If magpie.service is ALREADY running, restart it afterwards: a manual
+     podman as magpie can leave a pause process outside the service's private
+     /var/tmp. A fresh start, step 8, resets it automatically.)
 
   6. Cloudflare Tunnel ingress (if you use it) is set up entirely from the
      Cloudflare dashboard — no unit or config shipped by this repo. See

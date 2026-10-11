@@ -246,8 +246,40 @@ at startup and **fails closed** (unless `MAGPIE_ACK_TIER` acknowledges a weaker
 tier) if any is missing — it never silently downgrades. Confirm the active tier
 on `/healthz` (see below). No root daemon is involved at any tier.
 
+## Troubleshooting
+
+### Every review fails with `exited with code 125` / `open /var/tmp/NNN: no such file or directory`
+
+Full symptom: `review container exited with code 125: Error: checking platform
+of image ghcr.io/...: inspecting image: open /var/tmp/3919774104: no such file
+or directory`.
+
+Cause: rootless podman keeps one long-lived per-user "pause" process, and every
+`podman` call joins its mount namespace. `magpie.service` uses `PrivateTmp=true`
+(a private `/var/tmp` per service start), so a pause process created by an
+earlier service start, or by a `podman` you ran by hand as `magpie`, holds a
+different `/var/tmp` than the running service and podman can't find its own temp
+files. `magpie.service` therefore runs `ExecStartPre=-/usr/bin/podman system
+migrate` on every start, which stops the stale pause process so the service
+recreates it in its own namespace. `install.sh` rewrites the template's
+`/usr/bin/podman` to the first podman on the service's own PATH (systemd's
+manager PATH, the same lookup a bare `container.docker_bin = "podman"` gets), so the
+reset targets the podman that runs reviews. Override with
+`MAGPIE_PODMAN_BIN=/path/to/podman` (like `MAGPIE_NODE_BIN` for node). It warns if several
+podmans are on that PATH, and warns loudly if none is found, in which case the reset does
+not engage. If you pin `container.docker_bin` to an absolute path in `config.toml`, set
+`MAGPIE_PODMAN_BIN` to the same path.
+
+Fix: `sudo systemctl restart magpie`. Rule of thumb: after running `podman` as
+the `magpie` user from a shell (pulls, inspects, debugging), restart
+`magpie.service` before expecting reviews to work. If you installed from an
+older release whose unit lacks the `ExecStartPre=` line, re-run `install.sh`
+and `daemon-reload` (see Upgrading), or as a one-off stop the stale pause
+process (`ps -u magpie -o pid,args | grep 'catatonit -P'`) and restart.
+
 ## Upgrading
 
 Repeat steps 1–5 for the new tarball into the same prefix, then
 `sudo systemctl restart magpie-gateway magpie`. `install.sh` never
-overwrites your secrets or `config.toml`.
+overwrites your secrets or `config.toml`. (The restart also resets podman's
+pause process; see Troubleshooting.)
