@@ -29,7 +29,7 @@ the stale catatonit fixed it. Manual `podman` as magpie from a shell causes the 
 - [x] Docs: INSTALL.md troubleshooting + upgrade note, QUICKSTART.md pull step, ARCHITECTURE.md note
 - [x] Unit-content guard test (packages/orchestrator/src/systemd-unit.test.ts)
 - [x] systemd-analyze verify (substituted copy) + npm test
-- [ ] Operator applies unit to live host (not done here)
+- [x] Unit applied to live host (see "Live validation" below)
 
 ## Review
 
@@ -42,7 +42,7 @@ with ExecStart (systemd.exec). ExecStopPost omitted: start-time reset covers eve
 crash, boot, post-manual-podman). Leading `-` so failure never blocks startup. install.sh's sed only
 rewrites prefix/node/uid placeholders, so the line survives. Verified: systemd-analyze verify on a
 uid-substituted copy only complains /usr/bin/node absent on this dev box; npm test all green.
-Not verified: live behaviour of `system migrate` under the unit (no live host access by design).
+The implementing subagent had no live host access; live behaviour was validated afterwards by the tech lead (see "Live validation" below).
 
 ## Live validation (2026-10-11)
 - Rendered unit (uid 993, node at /usr/local/bin/node) differed from the installed one only by the ExecStartPre line + comments; installed to /etc/systemd/system/magpie.service (backup `magpie.service.bak-pre-bug_b774`), daemon-reload, restart while idle.

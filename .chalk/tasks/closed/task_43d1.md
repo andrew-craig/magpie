@@ -129,6 +129,6 @@ every "Breaking Changes" section in that range) and how each was handled:**
 - [x] Tagged `reviewer-v0.4.0` on 92ea1be; `release-reviewer.yml` run 38081102056 succeeded
 - [x] Image index digest `sha256:4c602b11d749ce6cd04aa768c43ebfa45acdbc229a23766847ed8aa57ae8d7d7` (amd64+arm64); anonymous pull OK; `pi --version` = 1.1.0; 1 GitHub attestation present
 - [x] Digest pin bumped in config.ts (code default), config.test.ts, config.example.toml, QUICKSTART.md, docker/reviewer/README.md — branch `reviewer-v0.4.0-pin`; orchestrator tests 540/540
-- [ ] Pin PR merged
+- [x] Pin PR merged (#85, 9003989) — task closed on the bug_b774 PR branch because #85 had already merged before live validation finished
 - [x] Live host switched to reviewer-v0.4.0 (2026-10-11 06:58 AEST): image pre-pulled as `magpie` (pi 1.1.0), `/etc/magpie/config.toml` `container.image` updated (backup `config.toml.bak-pre-reviewer-0.4.0`), `systemctl restart magpie`; graceful drain let an in-flight #420 review finish on the old image; healthz ok, crun tier
 - [x] Live glm-5.3 review on the new image succeeded (cairn-reader #420, 2026-10-11 13:20, 35 turns, outcome success) — after fixing an unrelated restart issue (bug_b774)
