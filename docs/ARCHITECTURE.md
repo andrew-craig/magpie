@@ -102,7 +102,10 @@ whose only job is to launch the sandbox around *untrusted* PR content — the co
 matters lives in the reviewer container/micro-VM guest, not in the orchestrator's own seccomp
 profile. What the orchestrator unit keeps: `RestrictNamespaces` (narrowed to an explicit
 allow-list; verified not to force `NoNewPrivileges`), `ProtectSystem=strict`, `PrivateTmp`, and
-`StateDirectory` confinement.
+`StateDirectory` confinement. Because `PrivateTmp` gives each service start a fresh `/var/tmp`
+while rootless podman's per-user pause process outlives the service, the unit runs
+`ExecStartPre=-/usr/bin/podman system migrate` to reset the pause process on every start (see
+INSTALL.md Troubleshooting).
 
 ## System overview
 

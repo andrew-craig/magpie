@@ -93,6 +93,11 @@ sudo -u magpie XDG_RUNTIME_DIR=/run/user/$(id -u magpie) HOME=/var/lib/magpie \
   podman pull ghcr.io/andrew-craig/magpie/reviewer:0.4.0@sha256:4c602b11d749ce6cd04aa768c43ebfa45acdbc229a23766847ed8aa57ae8d7d7
 ```
 
+This manual `podman` run is safe here because the service is started *after* it
+(step 8's start resets podman's per-user pause process). If you run `podman` as
+`magpie` again later, restart `magpie.service` afterwards — see
+[`INSTALL.md`](INSTALL.md) Troubleshooting.
+
 Optionally verify it was signed by this repo's release workflow before
 trusting it:
 

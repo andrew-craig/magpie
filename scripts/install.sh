@@ -493,6 +493,9 @@ cat <<NOTES
        sudo -u magpie XDG_RUNTIME_DIR=/run/user/$MAGPIE_UID \\
          HOME=$STATE_DIR podman pull \\
          \$(grep -E '^image *=' $ETC_MAGPIE/config.toml | cut -d'"' -f2)
+     (If magpie.service is ALREADY running, restart it afterwards: a manual
+     podman as magpie can leave a pause process outside the service's private
+     /var/tmp. A fresh start, step 8, resets it automatically.)
 
   6. Cloudflare Tunnel ingress (if you use it) is set up entirely from the
      Cloudflare dashboard — no unit or config shipped by this repo. See
