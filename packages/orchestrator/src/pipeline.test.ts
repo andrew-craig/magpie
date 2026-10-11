@@ -2243,16 +2243,16 @@ describe("createReviewPipeline / runJob — re-review dedup + comment minimizati
     await runJob(testJob(), new AbortController().signal); // headSha "deadbeef" != "older-sha" -> proceeds
 
     expect(createReview).toHaveBeenCalledTimes(1);
-    // 1 minimizeComment call + 1 thread-lookup call for PRRC_OLD. The fake
-    // octokit's default graphqlImpl returns `{}` for the lookup, so no
-    // parent thread is found and resolveReviewThread is never reached here.
+    // 1 minimizeComment call + 1 reviewThreads listing call. The fake
+    // octokit's default graphqlImpl returns `{}` for the listing, so no
+    // thread is found and resolveReviewThread is never reached here.
     expect(graphql).toHaveBeenCalledTimes(2);
 
     const minimizeCall = graphql.mock.calls.find((c) => (c[0] as string).includes("minimizeComment"));
-    const threadLookupCall = graphql.mock.calls.find((c) => (c[0] as string).includes("MagpieReviewCommentThread"));
+    const threadLookupCall = graphql.mock.calls.find((c) => (c[0] as string).includes("MagpieReviewThreads"));
     expect(minimizeCall?.[0]).toContain("OUTDATED");
     expect((minimizeCall?.[1] as { subjectId: string }).subjectId).toBe("PRRC_OLD");
-    expect((threadLookupCall?.[1] as { commentId: string }).commentId).toBe("PRRC_OLD");
+    expect(threadLookupCall?.[1]).toMatchObject({ owner: "acme", repo: "widgets", prNumber: expect.any(Number) });
 
     // The prior review's OWN node_id is never targeted (not Minimizable, no parent thread).
     for (const call of graphql.mock.calls) {

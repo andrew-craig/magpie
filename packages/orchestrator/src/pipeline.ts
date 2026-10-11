@@ -863,6 +863,9 @@ export function createReviewPipeline(
             });
             await resolveOutdatedThreads({
               octokit,
+              owner: job.owner,
+              repo: job.repo,
+              prNumber: job.prNumber,
               commentNodeIds: reviewState.resolvableReviewCommentNodeIds,
               logger,
             });
