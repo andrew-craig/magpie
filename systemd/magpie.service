@@ -118,6 +118,32 @@ EnvironmentFile=/etc/magpie/magpie.env
 Environment=HOME=/var/lib/magpie
 Environment=XDG_RUNTIME_DIR=/run/user/MAGPIE_RUNTIME_UID
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/MAGPIE_RUNTIME_UID/bus
+# Reset rootless podman's per-user "pause" process on EVERY start, so the first
+# podman call this service makes recreates it INSIDE this invocation's mount
+# namespace. WHY: rootless podman keeps a long-lived pause process (`catatonit
+# -P`, in user@<uid>.service/.../podman-pause-*.scope — OUTSIDE this unit's
+# cgroup, so it survives `systemctl restart magpie`), and every podman
+# invocation re-execs into the pause process's user+mount namespace. With
+# PrivateTmp=true each service start gets a NEW private /tmp + /var/tmp, but a
+# stale pause process still holds the OLD one: podman writes a temp file in the
+# new /var/tmp, re-execs into the old namespace, and can't find it — every
+# review then fails with "exited with code 125 ... inspecting image: open
+# /var/tmp/NNN: no such file or directory". `podman system migrate` is the
+# documented way to stop the pause process (man podman-system-migrate: it
+# "stop[s] both the running containers and the pause process" and deletes its
+# pid file); its container-migration side effect is a no-op for our
+# --rm, per-job containers. ExecStartPre= runs as the same User= with the same
+# Environment= (HOME, XDG_RUNTIME_DIR) and the same PrivateTmp mount namespace as
+# ExecStart= (systemd.exec(5): sandboxing applies to all of a unit's processes),
+# and it completes before the orchestrator starts, so no review is in flight
+# (startup orphan-cleanup handles any leftover containers). The leading `-`
+# keeps a failure here (e.g. podman missing, no pause process) from blocking
+# startup. /usr/bin/podman is the distro path (not rewritten by install.sh,
+# unlike node). Do NOT drop PrivateTmp instead — it is a deliberate hardening
+# choice. Operators: manual `podman` as the magpie user from a shell can
+# recreate a pause process in the HOST namespace; restart this service afterwards
+# (see docs/INSTALL.md, Troubleshooting).
+ExecStartPre=-/usr/bin/podman system migrate
 ExecStart=/usr/bin/node /opt/magpie/packages/orchestrator/dist/index.js
 Restart=on-failure
 RestartSec=5s
@@ -142,7 +168,8 @@ StateDirectoryMode=0750
 # separately-mounted /run/user/<uid> tmpfs, which keeps its own rw options).
 # KEPT — proven compatible with rootless podman on-target.
 ProtectSystem=strict
-# PrivateTmp=true: private /tmp + /var/tmp. KEPT — compatible.
+# PrivateTmp=true: private /tmp + /var/tmp. KEPT — compatible. (It is why the
+# ExecStartPre= above must reset podman's pause process on every start.)
 PrivateTmp=true
 # RestrictNamespaces RELAXED from `true` (deny-all) to an explicit ALLOW-LIST of
 # exactly the namespace types rootless podman + crun (+ libkrun at the micro-VM
