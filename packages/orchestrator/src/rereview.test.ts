@@ -404,6 +404,8 @@ describe("resolveOutdatedThreads", () => {
       event: "resolve-outdated-threads",
       prNumber: target.prNumber,
       requested: 2,
+      matched: 2,
+      alreadyResolved: 1,
       resolved: 1,
       failed: 0,
     });
@@ -494,5 +496,35 @@ describe("resolveOutdatedThreads", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ event: "list-review-threads-failed" });
     expect(graphql).toHaveBeenCalledTimes(1);
+    // Nothing was processed before the first page failed, so no summary.
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
+  it("still logs the partial summary when a later page's listing fails", async () => {
+    const { octokit } = fakeOctokit({
+      graphqlImpl: async (query, vars) => {
+        if (query.includes("MagpieReviewThreads")) {
+          if ((vars as { cursor: string | null }).cursor === null) {
+            return threadsPage([{ id: "PRRT_1", isResolved: false, commentIds: ["PRRC_a"] }], "CUR1");
+          }
+          throw new Error("secondary rate limit");
+        }
+        return { resolveReviewThread: { thread: { isResolved: true } } };
+      },
+    });
+    const logger = { info: vi.fn(), error: vi.fn() };
+
+    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a", "PRRC_b"], logger });
+
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "list-review-threads-failed" }));
+    expect(logger.info).toHaveBeenCalledWith({
+      event: "resolve-outdated-threads",
+      prNumber: target.prNumber,
+      requested: 2,
+      matched: 1,
+      alreadyResolved: 0,
+      resolved: 1,
+      failed: 0,
+    });
   });
 });

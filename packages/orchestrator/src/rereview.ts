@@ -482,16 +482,25 @@ export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParam
   const { octokit, owner, repo, prNumber, commentNodeIds, logger = consoleLogger } = params;
   if (commentNodeIds.length === 0) return;
   const wanted = new Set(commentNodeIds);
+  // Summary counters. Every Magpie comment is its thread's root (see SCHEMA
+  // NOTE), so comments and threads are 1:1 and these reconcile as
+  // `requested = (requested - matched) + alreadyResolved + resolved + failed`.
+  // `readReviewState` hands us EVERY prior Magpie inline comment, so on a
+  // routine re-review most matches are `alreadyResolved` by an earlier run;
+  // a silent no-op shows up as `matched: 0`.
+  let matched = 0;
+  let alreadyResolved = 0;
   let resolved = 0;
   let failed = 0;
-  // Success-path summary, so a silent no-op (e.g. our comments no longer
-  // matching any listed thread) is visible in the journal as `resolved: 0`
-  // rather than indistinguishable from "nothing logged".
+  // Also logged when a later page's listing fails, so threads already
+  // resolved before the failure are still recorded.
   const summarize = (): void =>
     logger.info({
       event: "resolve-outdated-threads",
       prNumber,
       requested: commentNodeIds.length,
+      matched,
+      alreadyResolved,
       resolved,
       failed,
     });
@@ -509,13 +518,19 @@ export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParam
       page = result.repository?.pullRequest?.reviewThreads ?? {};
     } catch (err) {
       logger.error({ event: "list-review-threads-failed", prNumber, error: serializeError(err) });
+      if (cursor !== null) summarize();
       return;
     }
 
     for (const thread of page.nodes ?? []) {
-      if (!thread || thread.isResolved) continue;
+      if (!thread) continue;
       const ours = (thread.comments?.nodes ?? []).some((c) => c && wanted.has(c.id));
       if (!ours) continue;
+      matched++;
+      if (thread.isResolved) {
+        alreadyResolved++;
+        continue;
+      }
       try {
         await octokit.graphql(RESOLVE_REVIEW_THREAD_MUTATION, { threadId: thread.id });
         resolved++;
