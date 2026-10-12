@@ -397,8 +397,16 @@ describe("resolveOutdatedThreads", () => {
       },
     });
 
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_ours", "PRRC_ours2"] });
+    const logger = { info: vi.fn(), error: vi.fn() };
+    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_ours", "PRRC_ours2"], logger });
 
+    expect(logger.info).toHaveBeenCalledWith({
+      event: "resolve-outdated-threads",
+      prNumber: target.prNumber,
+      requested: 2,
+      resolved: 1,
+      failed: 0,
+    });
     expect(graphql).toHaveBeenCalledTimes(2);
     const calls = graphql.mock.calls as unknown as [string, Record<string, unknown>][];
     expect(calls[0]![0]).toContain("reviewThreads");

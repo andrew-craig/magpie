@@ -403,6 +403,10 @@ export interface ResolveOutdatedThreadsParams {
 //     reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{id isResolved
 //     comments(first:100){nodes{id}}}}}}}'
 // `comments.nodes[].id` is the same GraphQL node id as the REST `node_id` we hold.
+// The nested `comments(first: 100)` connection is deliberately NOT paginated:
+// Magpie never replies inside a thread (publisher.ts only creates new inline
+// review comments), so every Magpie comment is its thread's ROOT and is always
+// the first node returned. Only human replies can fall past the first 100.
 const REVIEW_THREADS_QUERY = `
   query MagpieReviewThreads($owner: String!, $repo: String!, $prNumber: Int!, $cursor: String) {
     repository(owner: $owner, name: $repo) {
@@ -478,6 +482,19 @@ export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParam
   const { octokit, owner, repo, prNumber, commentNodeIds, logger = consoleLogger } = params;
   if (commentNodeIds.length === 0) return;
   const wanted = new Set(commentNodeIds);
+  let resolved = 0;
+  let failed = 0;
+  // Success-path summary, so a silent no-op (e.g. our comments no longer
+  // matching any listed thread) is visible in the journal as `resolved: 0`
+  // rather than indistinguishable from "nothing logged".
+  const summarize = (): void =>
+    logger.info({
+      event: "resolve-outdated-threads",
+      prNumber,
+      requested: commentNodeIds.length,
+      resolved,
+      failed,
+    });
 
   let cursor: string | null = null;
   for (;;) {
@@ -501,7 +518,9 @@ export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParam
       if (!ours) continue;
       try {
         await octokit.graphql(RESOLVE_REVIEW_THREAD_MUTATION, { threadId: thread.id });
+        resolved++;
       } catch (err) {
+        failed++;
         logger.error({
           event: "resolve-outdated-thread-failed",
           threadId: thread.id,
@@ -510,7 +529,10 @@ export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParam
       }
     }
 
-    if (!page.pageInfo?.hasNextPage || !page.pageInfo.endCursor) return;
+    if (!page.pageInfo?.hasNextPage || !page.pageInfo.endCursor) {
+      summarize();
+      return;
+    }
     cursor = page.pageInfo.endCursor;
   }
 }
