@@ -852,18 +852,23 @@ export function createReviewPipeline(
           // from step 2z, so the artifact just published above is never
           // included. Minimizing and resolving act on independent GitHub
           // state (see rereview.ts's THREAD RESOLUTION doc comment), so both
-          // are called. Both best-effort — never fail the job (see
-          // rereview.ts's `minimizeOutdated` / `resolveOutdatedThreads` doc
-          // comments).
+          // are called. Resolving runs FIRST so thread matching never depends
+          // on GitHub still listing already-minimized comments inside
+          // `reviewThreads.comments`. Both best-effort — never fail the job
+          // (see rereview.ts's `minimizeOutdated` / `resolveOutdatedThreads`
+          // doc comments).
           if (result.ok) {
+            await resolveOutdatedThreads({
+              octokit,
+              owner: job.owner,
+              repo: job.repo,
+              prNumber: job.prNumber,
+              commentNodeIds: reviewState.resolvableReviewCommentNodeIds,
+              logger,
+            });
             await minimizeOutdated({
               octokit,
               nodeIds: reviewState.minimizableNodeIds,
-              logger,
-            });
-            await resolveOutdatedThreads({
-              octokit,
-              commentNodeIds: reviewState.resolvableReviewCommentNodeIds,
               logger,
             });
           }

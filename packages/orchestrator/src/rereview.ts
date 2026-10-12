@@ -380,6 +380,9 @@ export async function minimizeOutdated(params: MinimizeOutdatedParams): Promise<
 export interface ResolveOutdatedThreadsParams {
   /** Authenticated Octokit client — its `.graphql` method carries the installation token. */
   octokit: Octokit;
+  owner: string;
+  repo: string;
+  prNumber: number;
   /**
    * Inline review comment `node_id`s ONLY — pass
    * {@link ReviewState.resolvableReviewCommentNodeIds}, NOT the full
@@ -391,13 +394,37 @@ export interface ResolveOutdatedThreadsParams {
   logger?: RereviewLogger;
 }
 
-const REVIEW_COMMENT_THREAD_QUERY = `
-  query MagpieReviewCommentThread($commentId: ID!) {
-    node(id: $commentId) {
-      ... on PullRequestReviewComment {
-        pullRequestReviewThread {
-          id
-          isResolved
+// SCHEMA NOTE: `PullRequestReviewComment` has NO field leading to its thread
+// (an earlier version queried a non-existent `pullRequestReviewThread` and
+// failed on every call in production). The only route is the other
+// direction: `PullRequest.reviewThreads` -> `PullRequestReviewThread.comments`.
+// Query shape verified read-only against the live schema with:
+//   gh api graphql -f query='{repository(owner:"O",name:"R"){pullRequest(number:N){
+//     reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{id isResolved
+//     comments(first:100){nodes{id}}}}}}}'
+// `comments.nodes[].id` is the same GraphQL node id as the REST `node_id` we hold.
+// The nested `comments(first: 100)` connection is deliberately NOT paginated:
+// Magpie never replies inside a thread (publisher.ts only creates new inline
+// review comments), so every Magpie comment is its thread's ROOT and is always
+// the first node returned. Only human replies can fall past the first 100.
+const REVIEW_THREADS_QUERY = `
+  query MagpieReviewThreads($owner: String!, $repo: String!, $prNumber: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $prNumber) {
+        reviewThreads(first: 100, after: $cursor) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            isResolved
+            comments(first: 100) {
+              nodes {
+                id
+              }
+            }
+          }
         }
       }
     }
@@ -414,55 +441,113 @@ const RESOLVE_REVIEW_THREAD_MUTATION = `
   }
 `;
 
-interface ReviewCommentThreadQueryResult {
-  node?: {
-    pullRequestReviewThread?: {
-      id: string;
-      isResolved: boolean;
+interface ReviewThreadsQueryResult {
+  repository?: {
+    pullRequest?: {
+      reviewThreads?: {
+        pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+        nodes?: Array<{
+          id: string;
+          isResolved: boolean;
+          comments?: { nodes?: Array<{ id: string } | null> | null } | null;
+        } | null> | null;
+      } | null;
     } | null;
   } | null;
 }
 
 /**
- * Resolve the PR review-conversation thread each inline review comment in
- * `commentNodeIds` belongs to, via GitHub's GraphQL-only `resolveReviewThread`
- * mutation (there is no REST equivalent — see module doc comment). This sets
- * the "Resolved" badge GitHub's own UI shows on a review thread; it is
- * DISTINCT from `minimizeOutdated`'s comment-hiding — the two act on
- * different GitHub state (thread vs comment) and are called together from
- * pipeline.ts's step 7a, not as alternatives to each other.
+ * Resolve the PR review-conversation threads that contain any of the inline
+ * review comments in `commentNodeIds`, via GitHub's GraphQL-only
+ * `resolveReviewThread` mutation (there is no REST equivalent — see module
+ * doc comment). This sets the "Resolved" badge GitHub's own UI shows on a
+ * review thread; it is DISTINCT from `minimizeOutdated`'s comment-hiding —
+ * the two act on different GitHub state (thread vs comment) and are called
+ * together from pipeline.ts's step 7a, not as alternatives to each other.
  *
- * Two GraphQL round trips per comment are unavoidable: `resolveReviewThread`
- * needs the thread's own node id, which only a lookup query returns — a
- * review comment's `node_id` cannot be passed directly as `threadId`. If
- * multiple comments in `commentNodeIds` share one thread, each independently
- * looks it up; the `isResolved` check before the mutation call means the
- * second (and later) hit that thread costs one query and no mutation call.
+ * A comment's `node_id` cannot be mapped to its thread directly (see SCHEMA
+ * NOTE above), so this pages through the PR's `reviewThreads` (100 per page,
+ * one query per page — NOT one per comment) and, for every thread that is not
+ * already resolved and contains at least one of `commentNodeIds`, calls the
+ * mutation once. Threads containing none of our comments (human-started
+ * threads) are never touched.
  *
- * Best-effort, per comment, mirroring `minimizeOutdated`'s error-isolation
- * contract: a lookup or resolve failure for one comment (comment or thread
- * since deleted, permission hiccup, transient API error) is logged and does
- * NOT stop the remaining comments from being attempted, and NEVER propagates
- * out of this function — like minimize, thread resolution is cosmetic
- * cleanup, not part of the job's success/failure contract.
+ * Best-effort, mirroring `minimizeOutdated`'s error-isolation contract: a
+ * failure listing threads (stops the listing; nothing more is attempted) or
+ * resolving one thread (logged, remaining threads still attempted) NEVER
+ * propagates out of this function — like minimize, thread resolution is
+ * cosmetic cleanup, not part of the job's success/failure contract.
  */
 export async function resolveOutdatedThreads(params: ResolveOutdatedThreadsParams): Promise<void> {
-  const { octokit, commentNodeIds, logger = consoleLogger } = params;
+  const { octokit, owner, repo, prNumber, commentNodeIds, logger = consoleLogger } = params;
+  if (commentNodeIds.length === 0) return;
+  const wanted = new Set(commentNodeIds);
+  // Summary counters. Every Magpie comment is its thread's root (see SCHEMA
+  // NOTE), so comments and threads are 1:1 and these reconcile as
+  // `requested = (requested - matched) + alreadyResolved + resolved + failed`.
+  // `readReviewState` hands us EVERY prior Magpie inline comment, so on a
+  // routine re-review most matches are `alreadyResolved` by an earlier run;
+  // a silent no-op shows up as `matched: 0`.
+  let matched = 0;
+  let alreadyResolved = 0;
+  let resolved = 0;
+  let failed = 0;
+  // Also logged when a later page's listing fails, so threads already
+  // resolved before the failure are still recorded.
+  const summarize = (): void =>
+    logger.info({
+      event: "resolve-outdated-threads",
+      prNumber,
+      requested: commentNodeIds.length,
+      matched,
+      alreadyResolved,
+      resolved,
+      failed,
+    });
 
-  for (const commentNodeId of commentNodeIds) {
+  let cursor: string | null = null;
+  for (;;) {
+    let page: NonNullable<NonNullable<NonNullable<ReviewThreadsQueryResult["repository"]>["pullRequest"]>["reviewThreads"]>;
     try {
-      const result = (await octokit.graphql(REVIEW_COMMENT_THREAD_QUERY, {
-        commentId: commentNodeId,
-      })) as ReviewCommentThreadQueryResult;
-      const thread = result.node?.pullRequestReviewThread;
-      if (!thread || thread.isResolved) continue;
-      await octokit.graphql(RESOLVE_REVIEW_THREAD_MUTATION, { threadId: thread.id });
+      const result = (await octokit.graphql(REVIEW_THREADS_QUERY, {
+        owner,
+        repo,
+        prNumber,
+        cursor,
+      })) as ReviewThreadsQueryResult;
+      page = result.repository?.pullRequest?.reviewThreads ?? {};
     } catch (err) {
-      logger.error({
-        event: "resolve-outdated-thread-failed",
-        commentNodeId,
-        error: serializeError(err),
-      });
+      logger.error({ event: "list-review-threads-failed", prNumber, error: serializeError(err) });
+      if (cursor !== null) summarize();
+      return;
     }
+
+    for (const thread of page.nodes ?? []) {
+      if (!thread) continue;
+      const ours = (thread.comments?.nodes ?? []).some((c) => c && wanted.has(c.id));
+      if (!ours) continue;
+      matched++;
+      if (thread.isResolved) {
+        alreadyResolved++;
+        continue;
+      }
+      try {
+        await octokit.graphql(RESOLVE_REVIEW_THREAD_MUTATION, { threadId: thread.id });
+        resolved++;
+      } catch (err) {
+        failed++;
+        logger.error({
+          event: "resolve-outdated-thread-failed",
+          threadId: thread.id,
+          error: serializeError(err),
+        });
+      }
+    }
+
+    if (!page.pageInfo?.hasNextPage || !page.pageInfo.endCursor) {
+      summarize();
+      return;
+    }
+    cursor = page.pageInfo.endCursor;
   }
 }
