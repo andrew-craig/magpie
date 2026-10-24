@@ -30,11 +30,9 @@ Job 0f8a0d8e (cairn-reader#436, 2026-10-21T20:52Z): Pi usage reported costUsd=$0
 
 **Side finding (separate issue):** reviewer containers stream every Pi `message_update` delta (thinking deltas etc.) into journald. That is why the 207M journal only reaches back to 2026-10-11, and why the gateway's startup lines have already rotated out.
 
-## Plan
-- [ ] Gateway: add `GET /admin/keys/:id` (loopback management plane, master key auth) returning `{spentUsd, budgetUsd}` without revoking.
-- [ ] Orchestrator `gateway.ts`: `getGatewayKeySpend` (best-effort, never throws, like revoke).
-- [ ] Pipeline: read the key's spend just before publishing and pass it to the publisher. The footer shows the gateway-metered cost. If the read fails, fall back to Pi's figure labelled as an estimate (`cost≈$… (est.)`).
-- [ ] Label the Pi number as an estimate everywhere it remains: the telemetry.ts doc comment, the reviewer log line (`est_cost=`). Leave the `usage.costUsd` JSONL field name unchanged for compatibility with existing records.
-- [ ] Tests: admin route, client helper, footer formatting (metered vs fallback), pipeline wiring.
-- [ ] Docs: note in docs/review-flow.md (or the gateway README) that the cost of record is OpenRouter's billed `usage.cost` and Pi's number is a price-table estimate.
-- [ ] Separate chalk bug for the journald flooding from reviewer streaming deltas.
+## Plan (revised 2026-10-25: user chose to drop cost from public PR posts entirely)
+- [ ] `publisher.ts` `formatUsageFooter`: drop `cost=` from the PR footer (keep turns/tokens); update doc comments.
+- [ ] `publisher.test.ts`: assert footer has turns/tokens and contains NO `cost`/`$` on both publish paths.
+- [ ] `reviewer.ts` "pi run complete" log line: rename `cost=` to `est_cost=` (Pi price-table estimate).
+- [ ] `telemetry.ts` doc comment: drop the "PR footer carries cost" claim; state explicitly that `usage.costUsd` is Pi's static price-table estimate (can diverge from billed cost several-fold; see bug_40f2) and `costUsd`/`gateway.spentUsd` (OpenRouter `usage.cost`) is the cost of record. JSONL field names unchanged.
+- [ ] Separate chalk bug for journald flooding by reviewer streaming deltas.
