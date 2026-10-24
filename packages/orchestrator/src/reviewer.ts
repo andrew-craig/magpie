@@ -1144,9 +1144,10 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     let stderrTail = "";
     const assistantMessages: AssistantMessageLike[] = [];
     let agentEndMessages: unknown[] | undefined;
-    // Every assistant AND toolResult `message_end`, in order. Only used as the
-    // fallback conversation for missing-report diagnostics when `agent_end`
-    // never arrived (see describeMissingReport).
+    // Every assistant AND toolResult `message_end`, in order. Primary source
+    // for missing-report diagnostics: Pi emits `message_end` for every message
+    // across all runs, whereas `agent_end.messages` is only that run's new
+    // messages (and may be empty), so it is just the fallback.
     const streamedMessages: unknown[] = [];
 
     let timedOut = false;
@@ -1436,7 +1437,10 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
               return;
             }
             // Diagnostics go BEFORE the stderr tail (mostly forwarder spam).
-            const diagnostic = describeMissingReport(agentEndMessages ?? streamedMessages, redactGatewayKey);
+            const diagnostic = describeMissingReport(
+              streamedMessages.length > 0 ? streamedMessages : (agentEndMessages ?? []),
+              redactGatewayKey,
+            );
             finish({ ok: false, reason: withStderr(diagnostic), usage });
             return;
           }
@@ -1729,7 +1733,10 @@ function contentText(content: unknown): string {
  * plain text, (b) hitting the output-token limit (stopReason "length", e.g. a
  * truncated report_findings call), or (c) calling report_findings with args
  * Pi's schema validation rejected (an `isError` toolResult) and never
- * retrying successfully. Pure: takes the conversation (assistant + toolResult
+ * retrying successfully. (Pi also reports output-token-limit truncation of a
+ * tool call as an `isError` toolResult — "...was not executed: the response
+ * hit the output token limit..." — so that case surfaces under
+ * `rejected`/`last rejection`.) Pure: takes the conversation (assistant + toolResult
  * messages, as parsed from Pi's NDJSON) and a redactor; everything embedded
  * is redacted, whitespace-collapsed and length-capped.
  */

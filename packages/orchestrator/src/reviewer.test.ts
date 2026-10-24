@@ -465,6 +465,29 @@ describe("runReview", () => {
       }
     });
 
+    it("still reports streamed calls/rejections when agent_end carries an empty messages array", async () => {
+      const call = JSON.stringify(toolCallMsg("toolUse"));
+      const res = JSON.stringify(toolResult("schema rejected"));
+      const last = JSON.stringify(withStop("giving up", "stop"));
+      const piBinary = writeFakeDocker(
+        [
+          `const w = (o) => process.stdout.write(JSON.stringify(o) + "\\n");`,
+          `w({type:"message_end",message:${call}});`,
+          `w({type:"message_end",message:${res}});`,
+          `w({type:"message_end",message:${last}});`,
+          `w({type:"agent_end",messages:[]});`,
+        ].join("\n"),
+      );
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("stopReason=stop");
+        expect(result.reason).toContain("calls=1, rejected=1");
+        expect(result.reason).toContain('last rejection: "schema rejected"');
+        expect(result.reason).toContain('final text: "giving up"');
+      }
+    });
+
     it("counts a rejected report_findings call and quotes the last rejection, redacting the key", async () => {
       const result = await runReview(
         baseParams({
