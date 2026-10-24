@@ -3,7 +3,6 @@ import type { ReviewResult, ReviewUsage } from "./reviewer.js";
 import type { Finding, InlineComment } from "./anchor.js";
 import {
   buildReviewedShaMarker,
-  fenceReason,
   MAGPIE_REVIEW_MARKER,
   parseReviewedSha,
   publishReview,
@@ -93,26 +92,46 @@ describe("publishReview", () => {
     expect(body).not.toMatch(/cost=/);
   });
 
-  it("posts exactly one clear failure comment on the ok:false path, surfacing the reason", async () => {
+  it("posts exactly one short failure comment on the ok:false path, carrying the error id", async () => {
     const { client, createComment } = fakeClient();
     const result: ReviewResult = {
       ok: false,
       reason: "pi exited with code 1: boom: something went wrong",
     };
 
-    const published = await publishReview({ ...BASE_PARAMS, octokit: client, result });
+    const published = await publishReview({
+      ...BASE_PARAMS,
+      octokit: client,
+      result,
+      errorId: "3f2b9c1e-0000-4000-8000-000000000001",
+    });
 
     expect(createComment).toHaveBeenCalledTimes(1);
     const body = createComment.mock.calls[0][0].body as string;
     expect(body).toContain(MAGPIE_REVIEW_MARKER);
     // Clearly worded, not a silent comment.
     expect(body).toMatch(/could not complete a review/i);
-    // The underlying provider/exit detail is still surfaced for debugging.
-    expect(body).toContain("pi exited with code 1: boom: something went wrong");
+    expect(body).toContain("Error ID: `3f2b9c1e-0000-4000-8000-000000000001`");
     expect(published).toEqual({
       id: 42,
       url: "https://github.com/acme/widgets/pull/7#issuecomment-42",
     });
+  });
+
+  it("never publishes the raw failure reason, however large", async () => {
+    const { client, createComment } = fakeClient();
+    const reason =
+      "pi exited with code 1: Error: provider unavailable\n" +
+      "    at Object.<anonymous> (/app/node_modules/pi/dist/index.js:1:1)\n".repeat(200);
+    const result: ReviewResult = { ok: false, reason };
+
+    await publishReview({ ...BASE_PARAMS, octokit: client, result, errorId: "job-1" });
+
+    const body = createComment.mock.calls[0][0].body as string;
+    expect(body).not.toContain("provider unavailable");
+    expect(body).not.toContain("node_modules");
+    expect(body).not.toContain("```");
+    expect(body.length).toBeLessThan(400);
   });
 
   it("never includes a secret/token-shaped string in the comment body on either path", async () => {
@@ -143,37 +162,6 @@ describe("publishReview", () => {
     expect(failBody).not.toContain(FAKE_TOKEN);
     expect(okBody).not.toMatch(/ghs_/);
     expect(failBody).not.toMatch(/ghs_/);
-  });
-
-  it("renders a markdown-sensitive failure reason verbatim inside a code fence", async () => {
-    const { client, createComment } = fakeClient();
-    const reason = "pi exited: _foo_ **bar** <tag> at path/to/file_name.ts";
-    const result: ReviewResult = { ok: false, reason };
-
-    await publishReview({ ...BASE_PARAMS, octokit: client, result });
-
-    const body = createComment.mock.calls[0][0].body as string;
-    // The raw text is preserved intact (underscores/asterisks/tags untouched).
-    expect(body).toContain(reason);
-    // ...and it sits inside a fenced code block that renders it verbatim.
-    expect(body).toContain(`\`\`\`\n${reason}\n\`\`\``);
-  });
-
-  it("widens the code fence so an embedded backtick run cannot break out", async () => {
-    const { client, createComment } = fakeClient();
-    // Reason contains a triple-backtick run — a naive ``` fence would be closed
-    // early by it, letting the tail escape into interpreted markdown.
-    const reason = "provider said: ```rm -rf``` then _crashed_";
-    const result: ReviewResult = { ok: false, reason };
-
-    await publishReview({ ...BASE_PARAMS, octokit: client, result });
-
-    const body = createComment.mock.calls[0][0].body as string;
-    // Reason still appears verbatim, unbroken.
-    expect(body).toContain(reason);
-    // The chosen fence is at least 4 backticks (one longer than the run of 3),
-    // wrapping the reason on its own line.
-    expect(body).toContain(`\`\`\`\`\n${reason}\n\`\`\`\``);
   });
 
   it("includes the marker constant identically on both the ok and failure paths", async () => {
@@ -709,20 +697,5 @@ describe("tier-silence guard: the published PR review never carries tier/runtime
     });
 
     expectTierSilent(createComment.mock.calls[0][0].body as string);
-  });
-});
-
-describe("fenceReason", () => {
-  it("uses a 3-backtick fence when the reason has no backticks", () => {
-    expect(fenceReason("plain error")).toBe("```\nplain error\n```");
-  });
-
-  it("uses a fence one backtick longer than the longest embedded run", () => {
-    // Longest run is 4 backticks -> fence must be 5.
-    const reason = "a ```` b `` c";
-    const fenced = fenceReason(reason);
-    expect(fenced).toBe("`````\n" + reason + "\n`````");
-    // The inner run can never match the wider fence, so nothing breaks out.
-    expect(fenced.startsWith("`````\n")).toBe(true);
   });
 });

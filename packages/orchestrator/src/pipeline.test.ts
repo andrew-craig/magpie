@@ -774,7 +774,7 @@ describe("createReviewPipeline / runJob", () => {
     expect(createComment).not.toHaveBeenCalled();
   });
 
-  it("review failure: still posts exactly one comment containing the failure note", async () => {
+  it("review failure: posts one short failure note with the error id and logs the full reason locally", async () => {
     const { octokit, createComment } = fakeOctokit({
       title: "Add feature",
       body: "Some PR body",
@@ -783,6 +783,7 @@ describe("createReviewPipeline / runJob", () => {
     });
     const { factory, cleanupCalls } = fakeWorkspaceFactory();
     const piBinary = writeFakePi(fakePiScriptFailing());
+    const { logger, events } = capturingLogger();
     const mintToken = vi.fn(async () => ({ token: FAKE_TOKEN }));
 
     const { runJob } = createReviewPipeline(testConfig(), {
@@ -793,6 +794,7 @@ describe("createReviewPipeline / runJob", () => {
       makeOctokit: () => octokit as unknown as Octokit,
       createWorkspace: factory,
       piBinary,
+      logger,
     });
 
     await runJob(testJob(), new AbortController().signal);
@@ -800,7 +802,13 @@ describe("createReviewPipeline / runJob", () => {
     expect(createComment).toHaveBeenCalledTimes(1);
     const body = createComment.mock.calls[0][0].body as string;
     expect(body).toMatch(/could not complete a review/i);
-    expect(body).toMatch(/boom: provider unavailable/);
+    expect(body).toContain("Error ID: `job-1`");
+    // The raw reason stays off the PR...
+    expect(body).not.toMatch(/boom: provider unavailable/);
+    // ...and is logged on the host under the same id.
+    const failed = events.find((e) => e.event === "review-failed");
+    expect(failed).toMatchObject({ errorId: "job-1", id: "job-1" });
+    expect(String(failed?.reason)).toMatch(/boom: provider unavailable/);
     expect(cleanupCalls).toHaveLength(1);
   });
 

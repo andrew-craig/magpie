@@ -803,6 +803,18 @@ export function createReviewPipeline(
           // (step 7).
           let published: { id: number; url: string };
           if (!result.ok || prDiff.tooLarge) {
+            // The failure note posted to the PR carries only an error id (the
+            // job id, which every log line and the telemetry record already
+            // carry) — never `result.reason`. The full reason is logged here
+            // so an operator can look it up by that id.
+            if (!result.ok) {
+              logger.error({
+                event: "review-failed",
+                ...jobLogFields(job),
+                errorId: job.id,
+                reason: result.reason,
+              });
+            }
             published = await publishReview({
               octokit,
               owner: job.owner,
@@ -810,6 +822,7 @@ export function createReviewPipeline(
               prNumber: job.prNumber,
               result,
               reviewedSha: result.ok ? job.headSha : undefined,
+              errorId: result.ok ? undefined : job.id,
             });
           } else {
             const { inline, other } = anchorFindings(prDiff.diff as string, {

@@ -12,9 +12,11 @@
 // directly — it only receives an already-authenticated client through the
 // `octokit` param, and Octokit handles attaching the token to the HTTP
 // request internally. The *comment body* built here is assembled only from
-// `result.summary` / `result.reason` (plain review text / provider error
-// text) — it is never templated from config, env, or any credential, so
-// there is no path for a secret to end up in a PR comment. See
+// `result.summary` (plain review text) or, on failure, a fixed message plus
+// an opaque error id — `result.reason` (raw provider/stderr error text) is
+// NEVER published; pipeline.ts logs it locally under the same error id. The
+// body is never templated from config, env, or any credential, so there is
+// no path for a secret to end up in a PR comment. See
 // `publisher.test.ts`'s "never leaks a secret-shaped token" test for the
 // enforced invariant.
 
@@ -142,6 +144,13 @@ export interface PublishReviewParams {
    * caller mistake threading a SHA into a failure note.
    */
   reviewedSha?: string;
+  /**
+   * Opaque id shown in the `{ok:false}` failure note so an operator can find
+   * the full failure detail in the host's logs / telemetry (pipeline.ts
+   * passes the job id, which every log line and the telemetry record already
+   * carry). Ignored on the `{ok:true}` path.
+   */
+  errorId?: string;
 }
 
 /** The created comment's identity, as returned by the GitHub API. */
@@ -156,7 +165,8 @@ export interface PublishedComment {
  * Both branches of `ReviewResult` are handled: a successful run posts
  * `result.summary` (plus a compact usage footer when telemetry is
  * available), and a failed run posts a short, clearly-worded failure note
- * that still surfaces `result.reason` for debugging. Magpie's publish step
+ * carrying only `errorId` — never `result.reason`, which can be a large
+ * stderr/provider dump; the caller logs that locally under the same id. Magpie's publish step
  * intentionally never goes silent — a bare "review failed" comment is far
  * more useful to a human than no comment at all, and it's the only signal
  * this bot ever gives besides inline findings (see
@@ -169,11 +179,11 @@ export interface PublishedComment {
 export async function publishReview(
   params: PublishReviewParams,
 ): Promise<PublishedComment> {
-  const { octokit, owner, repo, prNumber, result, reviewedSha } = params;
+  const { octokit, owner, repo, prNumber, result, reviewedSha, errorId } = params;
 
   const body = result.ok
     ? buildSuccessBody(result, reviewedSha)
-    : buildFailureBody(result);
+    : buildFailureBody(errorId);
 
   const response = await octokit.issues.createComment({
     owner,
@@ -200,53 +210,22 @@ function buildSuccessBody(
   return parts.join("\n");
 }
 
-function buildFailureBody(result: { ok: false; reason: string }): string {
-  // Kept short and human-readable per the task's requirement: this is a
-  // clear "the bot could not review this PR" signal, not a stack trace dump.
-  // `result.reason` can contain upstream provider error text (see
-  // reviewer.ts's "pi review failed: ..." / "pi exited with code ..." paths)
-  // but never the installation token or LLM key — reviewer.ts's own doc
-  // comments guarantee those are never placed in `reason`, and this function
-  // does not append anything else that could carry a secret.
-  //
-  // ASYMMETRY (deliberate): the reason is rendered VERBATIM inside a fenced
-  // code block, whereas the ok-path `summary` is rendered as raw markdown.
-  // The summary is the Pi agent's authored review (file:line citations,
-  // finding lists) meant to render as markdown; the reason is unknown-shape
-  // machine error text (stderr, provider JSON, file paths with underscores,
-  // `<tag>`-like fragments, asterisks) that would corrupt the rendered comment
-  // — and mislead a reader — if interpolated as markdown.
-  return [
+function buildFailureBody(errorId: string | undefined): string {
+  // Deliberately does NOT take the failure `reason`: it is unknown-shape
+  // machine error text (stderr, provider JSON, multi-KB stack dumps) that is
+  // noise to a PR reader and has no business on a public PR. The full detail
+  // is logged on the host (pipeline.ts's `review-failed` log line and the
+  // job's telemetry record) keyed by the same `errorId` shown here.
+  const lines = [
     MAGPIE_REVIEW_MARKER,
     COMMENT_HEADER,
     "",
     "Magpie could not complete a review of this PR.",
-    "",
-    "Reason:",
-    fenceReason(result.reason.trim()),
-  ].join("\n");
-}
-
-/**
- * Wrap `reason` in a fenced code block that renders it verbatim.
- *
- * WHY: `reason` is unknown-shape error text (see {@link buildFailureBody}) and
- * may itself contain a run of backticks — a naive triple-backtick fence would
- * let such a run close the fence early and let the rest of the reason "break
- * out" into interpreted markdown (the very corruption this fence prevents). So
- * the fence length is computed as one more than the longest backtick run in
- * the reason (floored at the CommonMark minimum of 3), which guarantees the
- * inner text cannot terminate the fence. The reason sits on its own line
- * between the open/close fences so a leading/trailing backtick can't merge
- * with the fence.
- */
-export function fenceReason(reason: string): string {
-  const longestBacktickRun = Math.max(
-    0,
-    ...Array.from(reason.matchAll(/`+/g), (m) => m[0].length),
-  );
-  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
-  return `${fence}\n${reason}\n${fence}`;
+  ];
+  if (errorId) {
+    lines.push("", `Error ID: \`${errorId}\` — a Magpie operator can use this to find the full details in the server logs.`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -266,7 +245,7 @@ function formatUsageFooter(usage: ReviewUsage | undefined): string | undefined {
 // `other`, plus the review `summary`), not a `ReviewResult`. pipeline.ts is
 // the one that calls `anchorFindings()` and passes its output in here; this
 // module stays ignorant of diff-anchoring entirely. `publishReview`,
-// `buildFailureBody`, `fenceReason`, `buildSuccessBody`, `formatUsageFooter`,
+// `buildFailureBody`, `buildSuccessBody`, `formatUsageFooter`,
 // the `{ok:false}` failure path, and the no-findings success path above
 // remain in use for pipeline.ts's plain-comment publish path, alongside
 // `publishReviewWithFindings` for the structured-findings path.
