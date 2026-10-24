@@ -1,14 +1,17 @@
 // Per-job cost/outcome telemetry (see ARCHITECTURE.md's "Operability" section).
 //
 // The reviewer already parses Pi's self-reported NDJSON usage (reviewer.ts's
-// `ReviewUsage`) and the published PR comment carries a compact usage footer
-// (publisher.ts's `formatUsageFooter`) — but neither of those is DURABLE or
-// GREPPABLE across jobs: the footer only exists on GitHub, and Pi's own
-// number is the model's self-report, not what was actually billed. This
-// module is the durable, per-job record: exactly ONE structured line per
-// job, containing enough to answer "what did this review cost, how long did
-// it take, and how did it end" without a dashboard — `grep` is the query
-// interface (see the module's `event: "job-telemetry"` tag below).
+// `ReviewUsage`) and the published PR comment carries a compact turns/tokens
+// footer (publisher.ts's `formatUsageFooter`; no cost) — but neither of those
+// is DURABLE or GREPPABLE across jobs: the footer only exists on GitHub, and
+// Pi's own `usage.costUsd` is a static price-table estimate, not what was
+// actually billed. It can diverge from the billed cost several-fold in either
+// direction, because OpenRouter routes across providers at different prices
+// (see bug_40f2). This module is the durable, per-job record: exactly ONE
+// structured line per job, containing enough to answer "what did this review
+// cost, how long did it take, and how did it end" without a dashboard —
+// `grep` is the query interface (see the module's `event: "job-telemetry"`
+// tag below).
 //
 // COST OF RECORD: `costUsd` is the gateway's own tracked spend
 // (`gateway.spentUsd`, threaded from gateway.ts's `revokeGatewayKey` — see

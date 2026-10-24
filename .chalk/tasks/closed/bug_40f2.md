@@ -2,14 +2,14 @@
 id: bug_40f2
 title: Investigate Pi-reported vs gateway-metered cost discrepancy
 type: bug
-status: in_progress
+status: closed
 priority: 2
 labels: [telemetry,gateway,cost]
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-10-24T02:41:58Z
-updated_at: 2026-10-24T20:25:09Z
+updated_at: 2026-10-24T20:37:35Z
 ---
 Job 0f8a0d8e (cairn-reader#436, 2026-10-21T20:52Z): Pi usage reported costUsd=$0.3237 (in/out/total tokens 65666/43184/2995314) but gateway virtual key spentUsd=$0.7206 (budget $1). Telemetry top-level costUsd uses the gateway figure. Determine which is right (check OpenRouter activity for the generations), why they diverge >2x (cache-read pricing? Pi's model price table for z-ai/glm-5.3 stale/missing? gateway double-counting retries/streams? unmetered requests e.g. failed/aborted calls?), and whether the gap is systematic across telemetry.jsonl. Fix whichever side is wrong and/or document.
 
@@ -31,8 +31,13 @@ Job 0f8a0d8e (cairn-reader#436, 2026-10-21T20:52Z): Pi usage reported costUsd=$0
 **Side finding (separate issue):** reviewer containers stream every Pi `message_update` delta (thinking deltas etc.) into journald. That is why the 207M journal only reaches back to 2026-10-11, and why the gateway's startup lines have already rotated out.
 
 ## Plan (revised 2026-10-25: user chose to drop cost from public PR posts entirely)
-- [ ] `publisher.ts` `formatUsageFooter`: drop `cost=` from the PR footer (keep turns/tokens); update doc comments.
-- [ ] `publisher.test.ts`: assert footer has turns/tokens and contains NO `cost`/`$` on both publish paths.
-- [ ] `reviewer.ts` "pi run complete" log line: rename `cost=` to `est_cost=` (Pi price-table estimate).
-- [ ] `telemetry.ts` doc comment: drop the "PR footer carries cost" claim; state explicitly that `usage.costUsd` is Pi's static price-table estimate (can diverge from billed cost several-fold; see bug_40f2) and `costUsd`/`gateway.spentUsd` (OpenRouter `usage.cost`) is the cost of record. JSONL field names unchanged.
-- [ ] Separate chalk bug for journald flooding by reviewer streaming deltas.
+- [x] `publisher.ts` `formatUsageFooter`: drop `cost=` from the PR footer (keep turns/tokens); update doc comments.
+- [x] `publisher.test.ts`: assert footer has turns/tokens and contains NO `cost`/`$` on both publish paths.
+- [x] `reviewer.ts` "pi run complete" log line: rename `cost=` to `est_cost=` (Pi price-table estimate).
+- [x] `telemetry.ts` doc comment: drop the "PR footer carries cost" claim; state explicitly that `usage.costUsd` is Pi's static price-table estimate (can diverge from billed cost several-fold; see bug_40f2) and `costUsd`/`gateway.spentUsd` (OpenRouter `usage.cost`) is the cost of record. JSONL field names unchanged.
+- [x] Separate chalk bug for journald flooding by reviewer streaming deltas.
+
+## Review
+- Implemented by a sonnet subagent and reviewed by me. Orchestrator tests: 34 files, 546 passed, 4 skipped. `tsc --noEmit` clean.
+- The PR footer is now `_turns=N tokens=M_` on both publish paths, with tests asserting there's no `cost=` and no `$`. The operator log line says `est_cost=`. The telemetry docs mark `usage.costUsd` as an estimate. No field renames.
+- The journald flooding moved to bug_0ba7.

@@ -78,7 +78,8 @@ describe("publishReview", () => {
     const body = createComment.mock.calls[0][0].body as string;
     expect(body).toMatch(/turns=2/);
     expect(body).toMatch(/tokens=333/);
-    expect(body).toMatch(/cost=\$0\.0042/);
+    expect(body).not.toMatch(/cost=/);
+    expect(body).not.toContain("$");
   });
 
   it("omits the usage footer when no usage telemetry is available", async () => {
@@ -284,6 +285,23 @@ const OTHER_FINDING: Finding = {
 };
 
 describe("publishReviewWithFindings", () => {
+  it("footer shows turns/tokens but no cost or dollar amount", async () => {
+    const { client, createReview } = fakeClient();
+    await publishReviewWithFindings({
+      ...WITH_FINDINGS_PARAMS,
+      octokit: client,
+      summary: "Overall looks fine.",
+      inline: [SINGLE_LINE_COMMENT],
+      other: [],
+      usage: { turns: 2, inputTokens: 111, outputTokens: 222, totalTokens: 333, costUsd: 0.0042 },
+    });
+    const body = createReview.mock.calls[0][0].body as string;
+    expect(body).toMatch(/turns=2/);
+    expect(body).toMatch(/tokens=333/);
+    expect(body).not.toMatch(/cost=/);
+    expect(body).not.toContain("$");
+  });
+
   it("builds comments[] from inline findings: path/line/side, start_line/start_side only for ranges, body == message", async () => {
     const { client, createReview } = fakeClient();
 
