@@ -761,13 +761,27 @@ describe("runReview", () => {
     );
 
     const controller = new AbortController();
-    const start = Date.now();
 
     const resultPromise = runReview(
       baseParams({ piBinary, config: testConfig({ jobTimeoutSeconds: 600 }), signal: controller.signal }),
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Wait (bounded) until the fake docker's prelude has written a complete
+    // invocation record, so the abort can't race ahead of process start-up
+    // (a fixed sleep made `readInvocation()` below flaky with ENOENT).
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      try {
+        readInvocation();
+        break;
+      } catch {
+        if (Date.now() > deadline) throw new Error("fake docker never wrote invocation.json");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    // Clock starts at the abort, so the bound below measures abort latency.
+    const start = Date.now();
     controller.abort();
 
     const result = await resultPromise;
