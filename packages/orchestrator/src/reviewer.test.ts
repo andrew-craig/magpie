@@ -418,11 +418,99 @@ describe("runReview", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // No stderr from this fake, so the reason stays EXACTLY the bare string
-      // — the stderr tail below is only appended when there is something to
-      // append (see the dedicated cases further down).
-      expect(result.reason).toBe("pi did not call report_findings");
+      // No stderr from this fake, so no stderr tail is appended (see the
+      // dedicated cases further down); the diagnostic suffix always is.
+      expect(result.reason).toBe(
+        'pi did not call report_findings (last turn: stopReason=unknown; report_findings calls=0, rejected=0; final text: "some text but no tool call")',
+      );
     }
+  });
+
+  describe("missing-report diagnostics", () => {
+    const withStop = (text: string, stopReason: string) => ({ ...assistantMessage(text), stopReason });
+    const toolCallMsg = (stopReason: string) => ({
+      role: "assistant" as const,
+      content: [{ type: "toolCall", id: "c1", name: "report_findings", arguments: { bogus: 1 } }],
+      stopReason,
+    });
+    const toolResult = (text: string) => ({
+      role: "toolResult" as const,
+      toolCallId: "c1",
+      toolName: "report_findings",
+      isError: true,
+      content: [{ type: "text", text }],
+    });
+
+    it("reports a plain-text stop with the final text snippet", async () => {
+      const result = await runReview(
+        baseParams({ piBinary: writeFakeDockerWithFindings([withStop("All done,\n  looks   fine.", "stop") as never], { kind: "omit" }) }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi did not call report_findings");
+        expect(result.reason).toContain("stopReason=stop");
+        expect(result.reason).toContain("calls=0, rejected=0");
+        expect(result.reason).toContain('final text: "All done, looks fine."');
+      }
+    });
+
+    it("uses a distinct lead phrase when the output-token limit was hit", async () => {
+      const result = await runReview(
+        baseParams({ piBinary: writeFakeDockerWithFindings([withStop("partial", "length") as never], { kind: "omit" }) }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi hit the output-token limit before report_findings completed");
+        expect(result.reason).toContain("stopReason=length");
+      }
+    });
+
+    it("still reports streamed calls/rejections when agent_end carries an empty messages array", async () => {
+      const call = JSON.stringify(toolCallMsg("toolUse"));
+      const res = JSON.stringify(toolResult("schema rejected"));
+      const last = JSON.stringify(withStop("giving up", "stop"));
+      const piBinary = writeFakeDocker(
+        [
+          `const w = (o) => process.stdout.write(JSON.stringify(o) + "\\n");`,
+          `w({type:"message_end",message:${call}});`,
+          `w({type:"message_end",message:${res}});`,
+          `w({type:"message_end",message:${last}});`,
+          `w({type:"agent_end",messages:[]});`,
+        ].join("\n"),
+      );
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("stopReason=stop");
+        expect(result.reason).toContain("calls=1, rejected=1");
+        expect(result.reason).toContain('last rejection: "schema rejected"');
+        expect(result.reason).toContain('final text: "giving up"');
+      }
+    });
+
+    it("counts a rejected report_findings call and quotes the last rejection, redacting the key", async () => {
+      const result = await runReview(
+        baseParams({
+          piBinary: writeFakeDockerWithFindings(
+            [
+              toolCallMsg("toolUse") as never,
+              toolResult(`Validation failed: unexpected property "bogus" key=${TEST_GATEWAY_API_KEY}`) as never,
+              withStop(`gave up ${TEST_GATEWAY_API_KEY} ${"x".repeat(1000)}`, "stop") as never,
+            ],
+            { kind: "omit" },
+          ),
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi did not call report_findings");
+        expect(result.reason).toContain("calls=1, rejected=1");
+        expect(result.reason).toContain('last rejection: "Validation failed: unexpected property "bogus" key=[redacted]"');
+        expect(result.reason).not.toContain(TEST_GATEWAY_API_KEY);
+        expect(result.reason).toContain("...");
+        expect(result.reason.length).toBeLessThan(1200);
+      }
+    });
   });
 
   // --- Guest stderr on ZERO-exit failures -----------------------------------
@@ -696,13 +784,27 @@ describe("runReview", () => {
     );
 
     const controller = new AbortController();
-    const start = Date.now();
 
     const resultPromise = runReview(
       baseParams({ piBinary, config: testConfig({ jobTimeoutSeconds: 600 }), signal: controller.signal }),
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Wait (bounded) until the fake docker's prelude has written a complete
+    // invocation record, so the abort can't race ahead of process start-up
+    // (a fixed sleep made `readInvocation()` below flaky with ENOENT).
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      try {
+        readInvocation();
+        break;
+      } catch {
+        if (Date.now() > deadline) throw new Error("fake docker never wrote invocation.json");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    // Clock starts at the abort, so the bound below measures abort latency.
+    const start = Date.now();
     controller.abort();
 
     const result = await resultPromise;

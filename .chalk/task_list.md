@@ -3,4 +3,5 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **bug_40f2** · P2 · open · Investigate Pi-reported vs gateway-metered cost discrepancy
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter

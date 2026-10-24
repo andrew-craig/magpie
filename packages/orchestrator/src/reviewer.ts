@@ -1144,6 +1144,11 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
     let stderrTail = "";
     const assistantMessages: AssistantMessageLike[] = [];
     let agentEndMessages: unknown[] | undefined;
+    // Every assistant AND toolResult `message_end`, in order. Primary source
+    // for missing-report diagnostics: Pi emits `message_end` for every message
+    // across all runs, whereas `agent_end.messages` is only that run's new
+    // messages (and may be empty), so it is just the fallback.
+    const streamedMessages: unknown[] = [];
 
     let timedOut = false;
     let aborted = false;
@@ -1296,6 +1301,9 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
       if (event.type === "message_end" && isAssistantMessage(event.message)) {
         assistantMessages.push(event.message);
+        streamedMessages.push(event.message);
+      } else if (event.type === "message_end" && isRecord(event.message) && event.message.role === "toolResult") {
+        streamedMessages.push(event.message);
       } else if (event.type === "agent_end" && Array.isArray(event.messages)) {
         agentEndMessages = event.messages;
       }
@@ -1428,7 +1436,12 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
               finish({ ok: false, reason: withStderr(`pi review failed: ${detail}`), usage });
               return;
             }
-            finish({ ok: false, reason: withStderr("pi did not call report_findings"), usage });
+            // Diagnostics go BEFORE the stderr tail (mostly forwarder spam).
+            const diagnostic = describeMissingReport(
+              streamedMessages.length > 0 ? streamedMessages : (agentEndMessages ?? []),
+              redactGatewayKey,
+            );
+            finish({ ok: false, reason: withStderr(diagnostic), usage });
             return;
           }
 
@@ -1690,6 +1703,77 @@ function extractSummaryText(messages: AssistantMessageLike[]): string {
     }
   }
   return textParts.join("\n\n").trim();
+}
+
+/** Max chars of any single model/tool-derived snippet embedded in a failure reason. */
+const DIAGNOSTIC_SNIPPET_CHARS = 400;
+
+/** Whitespace-collapses, redacts, and length-caps text for embedding in a one-line reason. */
+function boundedSnippet(text: string, redact: (s: string) => string): string {
+  const collapsed = redact(text).replace(/\s+/g, " ").trim();
+  return collapsed.length > DIAGNOSTIC_SNIPPET_CHARS
+    ? `${collapsed.slice(0, DIAGNOSTIC_SNIPPET_CHARS)}...`
+    : collapsed;
+}
+
+/** Joins the text-type parts of a message/tool-result `content` array. */
+function contentText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (isRecord(part) && part.type === "text" && typeof part.text === "string") parts.push(part.text);
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Builds the failure reason for a zero-exit run that never wrote a findings
+ * file and whose last turn was not a provider error. WHY: "pi did not call
+ * report_findings" alone can't distinguish (a) the model ending its turn with
+ * plain text, (b) hitting the output-token limit (stopReason "length", e.g. a
+ * truncated report_findings call), or (c) calling report_findings with args
+ * Pi's schema validation rejected (an `isError` toolResult) and never
+ * retrying successfully. (Pi also reports output-token-limit truncation of a
+ * tool call as an `isError` toolResult — "...was not executed: the response
+ * hit the output token limit..." — so that case surfaces under
+ * `rejected`/`last rejection`.) Pure: takes the conversation (assistant + toolResult
+ * messages, as parsed from Pi's NDJSON) and a redactor; everything embedded
+ * is redacted, whitespace-collapsed and length-capped.
+ */
+export function describeMissingReport(messages: unknown[], redact: (s: string) => string): string {
+  const assistants = filterAssistantMessages(messages);
+  const last = assistants[assistants.length - 1];
+  const stopReason = last?.stopReason ?? "unknown";
+
+  let calls = 0;
+  for (const m of assistants) {
+    for (const part of m.content) {
+      if (isRecord(part) && part.type === "toolCall" && part.name === "report_findings") calls++;
+    }
+  }
+
+  let rejected = 0;
+  let lastRejection = "";
+  for (const m of messages) {
+    if (isRecord(m) && m.role === "toolResult" && m.toolName === "report_findings" && m.isError === true) {
+      rejected++;
+      lastRejection = contentText(m.content);
+    }
+  }
+
+  const finalText = last ? boundedSnippet(extractSummaryText([last]), redact) : "";
+  const parts = [
+    `last turn: stopReason=${stopReason}`,
+    `report_findings calls=${calls}, rejected=${rejected}`,
+  ];
+  if (rejected > 0) parts.push(`last rejection: "${boundedSnippet(lastRejection, redact) || "(empty)"}"`);
+  parts.push(`final text: ${finalText ? `"${finalText}"` : "(none)"}`);
+
+  const lead =
+    stopReason === "length"
+      ? "pi hit the output-token limit before report_findings completed"
+      : "pi did not call report_findings";
+  return `${lead} (${parts.join("; ")})`;
 }
 
 /** Sums usage/cost across every assistant message seen (one per turn). */
