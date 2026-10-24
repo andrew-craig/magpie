@@ -418,11 +418,76 @@ describe("runReview", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // No stderr from this fake, so the reason stays EXACTLY the bare string
-      // — the stderr tail below is only appended when there is something to
-      // append (see the dedicated cases further down).
-      expect(result.reason).toBe("pi did not call report_findings");
+      // No stderr from this fake, so no stderr tail is appended (see the
+      // dedicated cases further down); the diagnostic suffix always is.
+      expect(result.reason).toBe(
+        'pi did not call report_findings (last turn: stopReason=unknown; report_findings calls=0, rejected=0; final text: "some text but no tool call")',
+      );
     }
+  });
+
+  describe("missing-report diagnostics", () => {
+    const withStop = (text: string, stopReason: string) => ({ ...assistantMessage(text), stopReason });
+    const toolCallMsg = (stopReason: string) => ({
+      role: "assistant" as const,
+      content: [{ type: "toolCall", id: "c1", name: "report_findings", arguments: { bogus: 1 } }],
+      stopReason,
+    });
+    const toolResult = (text: string) => ({
+      role: "toolResult" as const,
+      toolCallId: "c1",
+      toolName: "report_findings",
+      isError: true,
+      content: [{ type: "text", text }],
+    });
+
+    it("reports a plain-text stop with the final text snippet", async () => {
+      const result = await runReview(
+        baseParams({ piBinary: writeFakeDockerWithFindings([withStop("All done,\n  looks   fine.", "stop") as never], { kind: "omit" }) }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi did not call report_findings");
+        expect(result.reason).toContain("stopReason=stop");
+        expect(result.reason).toContain("calls=0, rejected=0");
+        expect(result.reason).toContain('final text: "All done, looks fine."');
+      }
+    });
+
+    it("uses a distinct lead phrase when the output-token limit was hit", async () => {
+      const result = await runReview(
+        baseParams({ piBinary: writeFakeDockerWithFindings([withStop("partial", "length") as never], { kind: "omit" }) }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi hit the output-token limit before report_findings completed");
+        expect(result.reason).toContain("stopReason=length");
+      }
+    });
+
+    it("counts a rejected report_findings call and quotes the last rejection, redacting the key", async () => {
+      const result = await runReview(
+        baseParams({
+          piBinary: writeFakeDockerWithFindings(
+            [
+              toolCallMsg("toolUse") as never,
+              toolResult(`Validation failed: unexpected property "bogus" key=${TEST_GATEWAY_API_KEY}`) as never,
+              withStop(`gave up ${TEST_GATEWAY_API_KEY} ${"x".repeat(1000)}`, "stop") as never,
+            ],
+            { kind: "omit" },
+          ),
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("pi did not call report_findings");
+        expect(result.reason).toContain("calls=1, rejected=1");
+        expect(result.reason).toContain('last rejection: "Validation failed: unexpected property "bogus" key=[redacted]"');
+        expect(result.reason).not.toContain(TEST_GATEWAY_API_KEY);
+        expect(result.reason).toContain("...");
+        expect(result.reason.length).toBeLessThan(1200);
+      }
+    });
   });
 
   // --- Guest stderr on ZERO-exit failures -----------------------------------
