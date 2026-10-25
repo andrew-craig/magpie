@@ -117,7 +117,7 @@ fi
 # Give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
 #
 # The crun tier inherits PATH for free from the image's OCI config: the
-# node:22.23.1-slim base sets it, `docker/reviewer/Dockerfile` symlinks
+# node:22.23.4-slim base sets it, `docker/reviewer/Dockerfile` symlinks
 # `/opt/magpie/review-extension/node_modules/.bin/pi` onto `/usr/local/bin/pi`,
 # and `podman run` exports the resulting PATH into the container. A micro-VM
 # guest gets NONE of that: the launcher boots a BARE EXPORTED ROOTFS, which

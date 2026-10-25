@@ -59,11 +59,12 @@ of which live outside `docker/reviewer/`. The default tag is `magpie-reviewer:0.
 `container.image` default in `packages/orchestrator/src/config.ts`; if
 you change the tag here, update that default too.
 
-## Pinned versions (current as of 2026-10-10)
+## Pinned versions (current as of 2026-10-25)
 
 | Component | Pinned to | Where |
 |---|---|---|
-| Base image | `node:22.23.1-slim` | `Dockerfile` `FROM`, pinned by tag **and** digest (`sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf`) |
+| Base image | `node:22.23.4-slim` | `Dockerfile` `FROM`, pinned by tag **and** digest (`sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d`) |
+| Rust builder (vsock-client stage) | `rust:1.99.1-alpine` | `Dockerfile` `FROM`, pinned by tag **and** multi-arch index digest (`sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87`); matches `rust/rust-toolchain.toml` |
 | Pi coding agent | `@earendil-works/pi-coding-agent@1.4.0` | `docker/reviewer/extension-package.json` — matches the host's `pi --version` (1.4.0) at the time this image was built |
 | Extension runtime deps | `@earendil-works/pi-tui@1.4.0`, `typebox@1.3.27` | `docker/reviewer/extension-package.json` — must match `packages/review-extension/package.json`'s resolved versions on the host |
 
