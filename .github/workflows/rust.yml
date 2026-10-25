@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # rustup (preinstalled on GitHub-hosted runners) reads rust/rust-toolchain.toml
       # and installs the pinned channel + targets + components on first use;
@@ -133,7 +133,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pinned toolchain + target
         run: |
@@ -180,7 +180,7 @@ jobs:
       # `defaults.run.working-directory: rust` above only applies to `run:`
       # shell steps, not action inputs), hence the explicit `rust/` prefix.
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-binaries-${{ matrix.target }}
           path: |
@@ -201,16 +201,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
       # Pin npm to match ci.yml/release-host.yml so lockfile handling is identical.
       - name: Pin npm
-        run: npm install -g npm@11.17.0
+        run: npm install -g npm@11.21.1
 
       # Explicit working-directory: this job drives the npm workspace at the
       # repo root, overriding the workflow-level `defaults.run.working-directory:
@@ -220,7 +220,7 @@ jobs:
         run: npm ci
 
       - name: Download the x86_64-unknown-linux-musl binary built by `build`
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rust-binaries-x86_64-unknown-linux-musl
           path: rust-binaries
@@ -246,14 +246,20 @@ jobs:
       id-token: write # OIDC token for cosign keyless signing
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rust-binaries-*
           path: artifacts
           merge-multiple: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
+        with:
+          # Deliberately pinned to the cosign 2.x line (installer v4 would default
+          # to cosign v3, where sign-blob requires --bundle and signatures use the
+          # new bundle format, breaking the documented `.sig`/`.pem` and
+          # `cosign verify` adopter contract). Move to v3 as a deliberate change.
+          cosign-release: 'v2.6.5'
 
       # Keyless sign-blob: mints a short-lived Fulcio cert off this workflow's
       # OIDC identity and logs the signature in Rekor — no stored secrets.
@@ -278,7 +284,7 @@ jobs:
           done
 
       - name: Upload signatures
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-binary-signatures
           path: |
