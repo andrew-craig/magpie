@@ -49,8 +49,8 @@ set -euo pipefail
 #     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP --
 #     the earlier magpie-net design that pointed this at a fixed bridge
 #     address instead has been deleted (see DISTRIBUTION.md §1.6). Required --
-#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 1.1.0 (like
-#     0.80.3 before it -- re-checked against this version's own bundled docs
+#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 1.4.0 (like
+#     0.80.3 and 1.1.0 before it -- re-checked against this version's own bundled docs
 #     on the Pi bump, see docker/reviewer/README.md's "Bumping Pi") still has
 #     no generic env-var base-URL override: a plain OPENAI_BASE_URL is silently
 #     ignored and Pi's request would still go to the real api.openrouter.ai.

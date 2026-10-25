@@ -64,8 +64,8 @@ you change the tag here, update that default too.
 | Component | Pinned to | Where |
 |---|---|---|
 | Base image | `node:22.23.1-slim` | `Dockerfile` `FROM`, pinned by tag **and** digest (`sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf`) |
-| Pi coding agent | `@earendil-works/pi-coding-agent@1.1.0` | `docker/reviewer/extension-package.json` — matches the host's `pi --version` (1.1.0) at the time this image was built |
-| Extension runtime deps | `@earendil-works/pi-tui@1.1.0`, `typebox@1.3.27` | `docker/reviewer/extension-package.json` — must match `packages/review-extension/package.json`'s resolved versions on the host |
+| Pi coding agent | `@earendil-works/pi-coding-agent@1.4.0` | `docker/reviewer/extension-package.json` — matches the host's `pi --version` (1.4.0) at the time this image was built |
+| Extension runtime deps | `@earendil-works/pi-tui@1.4.0`, `typebox@1.3.27` | `docker/reviewer/extension-package.json` — must match `packages/review-extension/package.json`'s resolved versions on the host |
 
 None of these are floating tags or semver ranges. **Re-pinning checklist**, if the
 host's Pi version or the extension's deps ever move:
@@ -97,7 +97,7 @@ path for moving to a new Pi release:
    comments (this README's table, the Dockerfile's version comment,
    `entrypoint.sh`, `reviewer.ts`, `config.ts`, `DISTRIBUTION.md`, the
    extension's own `index.ts`) so a human can update the prose — some of
-   those are factual claims about Pi's behavior (e.g. "Pi 1.1.0 has no
+   those are factual claims about Pi's behavior (e.g. "Pi 1.4.0 has no
    generic base-URL env override"), not just a version number, so re-check
    each one against the new version's docs/changelog rather than
    search-and-replacing the digits.
@@ -175,9 +175,9 @@ args the caller passes (`"$@"`). So the runtime inputs are:
   relays to the gateway's real unix socket bind-mounted read-only at
   `/run/gw/gw.sock`. **Pi itself does not read this env var** — verified
   empirically against a stub HTTP server on Pi 0.80.3 (a bare `OPENAI_BASE_URL`
-  was silently ignored), and reconfirmed against Pi 1.1.0's own bundled docs
+  was silently ignored), and reconfirmed against Pi 1.1.0's and 1.4.0's own bundled docs
   (`docs/custom-provider.md`/`docs/models.md` in the installed package): no
-  generic OpenAI-compatible base-URL env override exists at 1.1.0 either. The
+  generic OpenAI-compatible base-URL env override exists at 1.4.0 either. The
   entrypoint instead writes it into
   `~/.pi/agent/models.json` as an `openrouter` provider `baseUrl` override before
   exec'ing `pi` (see `entrypoint.sh`'s doc comment for the full explanation) — that
@@ -256,7 +256,7 @@ version of the same proof):
 
 A build should be smoke-tested with the following checks:
 
-- `docker run --rm --entrypoint pi magpie-reviewer:0.1.0 --version` prints `1.1.0`
+- `docker run --rm --entrypoint pi magpie-reviewer:0.1.0 --version` prints `1.4.0`
   (the fixed `ENTRYPOINT` runs Pi in review mode and ignores appended args, so
   override `--entrypoint` to invoke Pi directly for a version check).
 - A hand-run of the full entrypoint against a throwaway worktree + `/out` dir, invoked

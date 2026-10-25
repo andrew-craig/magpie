@@ -15,12 +15,12 @@
 #   - Base image:  node:22.23.1-slim, pinned by BOTH tag and digest below.
 #   - Rust builder: rust:1.97.1-alpine, pinned by BOTH tag and digest below
 #                  (matches rust/rust-toolchain.toml's channel).
-#   - Pi:          @earendil-works/pi-coding-agent@1.1.0 (matches the host's
-#                  `pi --version` == 1.1.0 as of 2026-10-10; see
+#   - Pi:          @earendil-works/pi-coding-agent@1.4.0 (matches the host's
+#                  `pi --version` == 1.4.0 as of 2026-10-25; see
 #                  docker/reviewer/extension-package.json). Use
 #                  scripts/bump-pi.sh to bump this and the two deps below
 #                  together -- see docker/reviewer/README.md's "Bumping Pi".
-#   - Extension's own runtime deps: @earendil-works/pi-tui@1.1.0,
+#   - Extension's own runtime deps: @earendil-works/pi-tui@1.4.0,
 #                  typebox@1.3.27 (must match packages/review-extension's
 #                  resolved versions on the host -- see that package's
 #                  package.json / the repo root package-lock.json).
