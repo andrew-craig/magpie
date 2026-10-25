@@ -163,7 +163,7 @@ export interface PublishedComment {
  * Publish exactly one issue comment summarizing a review run.
  *
  * Both branches of `ReviewResult` are handled: a successful run posts
- * `result.summary` (plus a compact usage footer when telemetry is
+ * `result.summary` (plus a compact turns/tokens footer when telemetry is
  * available), and a failed run posts a short, clearly-worded failure note
  * carrying only `errorId` — never `result.reason`, which can be a large
  * stderr/provider dump; the caller logs that locally under the same id. Magpie's publish step
@@ -229,12 +229,17 @@ function buildFailureBody(errorId: string | undefined): string {
 }
 
 /**
- * Compact one-line usage/cost footer (e.g. `_turns=2 tokens=333 cost=$0.0042_`),
- * or `undefined` when no usage telemetry was recorded for the run.
+ * Compact one-line usage footer (e.g. `_turns=2 tokens=333_`), or
+ * `undefined` when no usage telemetry was recorded for the run.
+ *
+ * Cost is deliberately NOT shown: Pi's `usage.costUsd` is an estimate from a
+ * static price table and can diverge several-fold from what OpenRouter
+ * actually bills. The real billed cost is operator-only data recorded in
+ * telemetry (telemetry.ts COST OF RECORD) and doesn't belong on public PRs.
  */
 function formatUsageFooter(usage: ReviewUsage | undefined): string | undefined {
   if (!usage) return undefined;
-  return `_turns=${usage.turns} tokens=${usage.totalTokens} cost=$${usage.costUsd.toFixed(4)}_`;
+  return `_turns=${usage.turns} tokens=${usage.totalTokens}_`;
 }
 
 // ---------------------------------------------------------------------------

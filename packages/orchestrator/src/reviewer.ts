@@ -1385,10 +1385,12 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
 
       const usage = summarizeUsage(messages);
       if (usage) {
+        // est_cost is Pi's static price-table estimate, NOT billed cost (see
+        // telemetry.ts COST OF RECORD).
         console.log(
           `[reviewer] pi run complete: turns=${usage.turns} ` +
             `tokens(in/out/total)=${usage.inputTokens}/${usage.outputTokens}/${usage.totalTokens} ` +
-            `cost=$${usage.costUsd.toFixed(4)}`,
+            `est_cost=$${usage.costUsd.toFixed(4)}`,
         );
       }
 
