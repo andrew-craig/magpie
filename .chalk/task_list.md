@@ -3,6 +3,9 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_d8d6** · P2 · open · Dependency review + version bumps (2026-10)
+- **task_0f1b** · P2 · open · scripts/test-zero-egress.sh references stripped spike/m7-0 gateway-on-socket.mjs
+- **task_253b** · P2 · open · Decide Node 22 -> 24 runtime/base image + TypeScript 7 adoption
+- **task_7e0b** · P2 · open · reviewer.ts: adapt to Pi 1.4 exit-1-on-length and agent_end willRetry
+- **task_8e36** · P2 · open · Migrate CI signing to cosign v3 (bundle format) + update verify docs
 - **bug_0ba7** · P3 · open · Reviewer containers flood journald with Pi streaming deltas
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter

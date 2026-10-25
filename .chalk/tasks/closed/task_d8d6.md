@@ -2,14 +2,14 @@
 id: task_d8d6
 title: Dependency review + version bumps (2026-10)
 type: task
-status: open
+status: closed
 priority: 2
 labels: []
 blocked_by: []
 parent: null
 remote_task_url: null
 created_at: 2026-10-25T05:20:04Z
-updated_at: 2026-10-25T05:20:04Z
+updated_at: 2026-10-25T05:38:54Z
 ---
 
 
@@ -66,3 +66,16 @@ updated_at: 2026-10-25T05:20:04Z
 | Node 22 -> 24 runtime | out of scope | note: this host's `node` is v24.17 |
 
 Local image: localhost/magpie-reviewer:deps-bump-test (id 1273263e4191); pi --version 1.4.0, node v22.23.4; entrypoint-tier-memory.test.sh 22/22; stub-gateway full-entrypoint run (--network none, read-only, user 1000) produced valid findings.json. scripts/test-zero-egress.sh is broken pre-existing (needs spike/m7-0/gateway-on-socket.mjs which was stripped).
+
+## Validation (tech lead, 2026-10-25)
+- Clean `npm ci` + build + tests re-run: 75 / 546 (+4 skipped) / 11 pass; cargo clippy -D warnings + tests pass (incl. launcher, native libkrun).
+- Base-image digests re-checked independently against registry manifest-list digests: match.
+- **Real-model e2e on this host:** built orchestrator `runReview` + local image `localhost/magpie-reviewer:deps-bump-test` (Pi 1.4.0) against the LIVE gateway (minted + revoked a per-job key; production service/config untouched), crun tier, real OpenRouter model `z-ai/glm-5.3`, this branch's diff → `ok: true`, `report_findings` called, 1 finding, 27 turns, 211s, gateway spend $0.145.
+- **octokit 22 / auth-app 8:** read-only live GitHub API check via `createInstallationOctokit` (App JWT → installation token → pulls.list/listFiles/listReviews + GraphQL reviewThreads) — all OK.
+
+## Follow-ups opened
+- Pi 1.4 print mode exits 1 on output-limit truncation (bypasses the #89 length diagnostics); `agent_end.willRetry` may undercount usage on retries.
+- `scripts/test-zero-egress.sh` broken on main (stripped spike path).
+- cosign v3 migration (held at cosign 2.6.5 via installer v4.1.2).
+- Node 22→24 + TypeScript 7 decision.
+- Release: after merge, tag `reviewer-v0.5.0` + host `v*`, bump digest pin (5 live places incl. config.ts default), reinstall host.
