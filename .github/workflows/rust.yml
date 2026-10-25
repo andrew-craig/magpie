@@ -253,7 +253,7 @@ jobs:
           merge-multiple: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
         with:
           # Deliberately pinned to the cosign 2.x line (installer v4 would default
           # to cosign v3, where sign-blob requires --bundle and signatures use the

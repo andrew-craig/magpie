@@ -3,5 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
+- **task_d8d6** · P2 · open · Dependency review + version bumps (2026-10)
 - **bug_0ba7** · P3 · open · Reviewer containers flood journald with Pi streaming deltas
 - **task_9c9d** · P3 · open · Multi-provider support beyond OpenRouter
