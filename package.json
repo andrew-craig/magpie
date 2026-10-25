@@ -17,7 +17,7 @@
     "gateway:start": "npm run start --workspace=@magpie/gateway"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.3",
     "@types/node": "^22.20.5",
     "tsx": "^4.23.15",
     "smee-client": "^5.0.0"
