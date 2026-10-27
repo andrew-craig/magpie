@@ -12,15 +12,15 @@
 #
 # PINNED VERSIONS (bump deliberately -- no floating tags/ranges anywhere in
 # this file; see README.md for the "how to re-pin" checklist):
-#   - Base image:  node:22.23.1-slim, pinned by BOTH tag and digest below.
-#   - Rust builder: rust:1.97.1-alpine, pinned by BOTH tag and digest below
+#   - Base image:  node:22.23.4-slim, pinned by BOTH tag and digest below.
+#   - Rust builder: rust:1.99.1-alpine, pinned by BOTH tag and digest below
 #                  (matches rust/rust-toolchain.toml's channel).
-#   - Pi:          @earendil-works/pi-coding-agent@1.1.0 (matches the host's
-#                  `pi --version` == 1.1.0 as of 2026-10-10; see
+#   - Pi:          @earendil-works/pi-coding-agent@1.4.0 (matches the host's
+#                  `pi --version` == 1.4.0 as of 2026-10-25; see
 #                  docker/reviewer/extension-package.json). Use
 #                  scripts/bump-pi.sh to bump this and the two deps below
 #                  together -- see docker/reviewer/README.md's "Bumping Pi".
-#   - Extension's own runtime deps: @earendil-works/pi-tui@1.1.0,
+#   - Extension's own runtime deps: @earendil-works/pi-tui@1.4.0,
 #                  typebox@1.3.27 (must match packages/review-extension's
 #                  resolved versions on the host -- see that package's
 #                  package.json / the repo root package-lock.json).
@@ -42,7 +42,7 @@
 # smell). `rust:*-alpine`'s default target is already the matching
 # `*-unknown-linux-musl` triple, so no `rustup target add` /
 # `--target` flag is needed here.
-FROM rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS vsock-builder
+FROM rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 AS vsock-builder
 # musl-dev: static-libc headers/archives cargo's linker needs; not already
 # present in the base rust:alpine image.
 RUN apk add --no-cache musl-dev
@@ -56,7 +56,7 @@ WORKDIR /src/rust
 # see rust/vsock-client/Cargo.toml) is all this stage needs.
 RUN cargo build --release --locked -p magpie-vsock-client
 
-FROM node:22.23.1-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf
+FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 
 # git: kept on PATH as defence-in-depth in case Pi or a future tool probes
 # for it, even though the mounted worktree itself is `.git`-free (M3-B strips

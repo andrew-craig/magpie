@@ -55,18 +55,18 @@ jobs:
       IMAGE: ghcr.io/andrew-craig/magpie/reviewer
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # QEMU registers binfmt handlers so the amd64 runner can build the arm64
       # leg under emulation (the Pi/adopter arm64 target).
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -78,7 +78,7 @@ jobs:
       # release `latest`.
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -93,7 +93,7 @@ jobs:
       # image index. `id: build` exposes the pushed digest for signing below.
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/reviewer/Dockerfile
@@ -105,7 +105,13 @@ jobs:
           sbom: true
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Deliberately pinned to the cosign 2.x line (installer v4 would default
+          # to cosign v3, where sign-blob requires --bundle and signatures use the
+          # new bundle format, breaking the documented `.sig`/`.pem` and
+          # `cosign verify` adopter contract). Move to v3 as a deliberate change.
+          cosign-release: 'v2.6.5'
 
       # Sign the pushed image BY DIGEST (never by tag — a tag can move between
       # sign and use). Keyless: cosign mints an OIDC token, gets a short-lived
@@ -119,7 +125,7 @@ jobs:
       # Attach a signed SLSA build-provenance attestation to the pushed image,
       # stored alongside it in the registry.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}

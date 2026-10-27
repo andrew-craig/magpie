@@ -49,8 +49,8 @@ set -euo pipefail
 #     bind-mounted read-only at `/run/gw/gw.sock`. There is no bridge IP --
 #     the earlier magpie-net design that pointed this at a fixed bridge
 #     address instead has been deleted (see DISTRIBUTION.md §1.6). Required --
-#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 1.1.0 (like
-#     0.80.3 before it -- re-checked against this version's own bundled docs
+#     there is no direct-to-OpenRouter fallback. IMPORTANT: Pi 1.4.0 (like
+#     0.80.3 and 1.1.0 before it -- re-checked against this version's own bundled docs
 #     on the Pi bump, see docker/reviewer/README.md's "Bumping Pi") still has
 #     no generic env-var base-URL override: a plain OPENAI_BASE_URL is silently
 #     ignored and Pi's request would still go to the real api.openrouter.ai.
@@ -117,7 +117,7 @@ fi
 # Give the micro-VM guest a PATH -- MICRO-VM TIER ONLY.
 #
 # The crun tier inherits PATH for free from the image's OCI config: the
-# node:22.23.1-slim base sets it, `docker/reviewer/Dockerfile` symlinks
+# node:22.23.4-slim base sets it, `docker/reviewer/Dockerfile` symlinks
 # `/opt/magpie/review-extension/node_modules/.bin/pi` onto `/usr/local/bin/pi`,
 # and `podman run` exports the resulting PATH into the container. A micro-VM
 # guest gets NONE of that: the launcher boots a BARE EXPORTED ROOTFS, which

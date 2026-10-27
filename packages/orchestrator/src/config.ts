@@ -390,7 +390,7 @@ export interface Config {
      * review container's env as `OPENAI_BASE_URL` (see reviewer.ts) and
      * translated by docker/reviewer/entrypoint.sh into a `~/.pi/agent/
      * models.json` `openrouter` provider `baseUrl` override, which is the
-     * mechanism that actually redirects Pi's traffic (Pi 1.1.0 still has no
+     * mechanism that actually redirects Pi's traffic (Pi 1.4.0 still has no
      * generic env-var base-URL override — see reviewer.ts's module doc
      * comment). Deliberately a SEPARATE value from `baseUrl` above: that one
      * is this orchestrator's loopback-only mgmt-plane address; this one is

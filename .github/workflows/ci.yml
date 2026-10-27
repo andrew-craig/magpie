@@ -44,17 +44,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
       # Pin npm to match the release workflows (see release-host.yml) so
       # lockfile handling is identical across CI jobs.
       - name: Pin npm
-        run: npm install -g npm@11.17.0
+        run: npm install -g npm@11.21.1
 
       - name: Install (clean, from lockfile)
         run: npm ci

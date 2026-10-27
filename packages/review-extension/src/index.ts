@@ -1,7 +1,7 @@
 /**
  * Magpie report_findings extension.
  *
- * Pi (v1.1.0, like every version back to v0.80.3) has no JSON-schema
+ * Pi (v1.4.0, like every version back to v0.80.3) has no JSON-schema
  * structured-output mode, so Magpie uses the
  * "tool-call-as-structured-output" pattern documented in Pi's own
  * `examples/extensions/structured-output.ts`: a single custom tool the agent

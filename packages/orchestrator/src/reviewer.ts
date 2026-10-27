@@ -40,11 +40,11 @@
 // `RunReviewParams.gatewayApiKey` below, threaded straight through with no
 // host-side substitution. `OPENAI_BASE_URL` carries
 // `config.gateway.containerBaseUrl`. Pi itself never reads `OPENAI_BASE_URL`
-// directly: Pi 1.1.0 still has no generic OpenAI-compatible base-URL env
+// directly: Pi 1.4.0 still has no generic OpenAI-compatible base-URL env
 // override (empirically verified against a stub HTTP server on 0.80.3 — a
 // plain `OPENAI_BASE_URL` env var was silently ignored and requests still
-// went to the real api.openrouter.ai — and reconfirmed on the Pi bump to
-// 1.1.0 against that version's own bundled docs). The mechanism that
+// went to the real api.openrouter.ai — and reconfirmed on the Pi bumps to
+// 1.1.0 and 1.4.0 against that version's own bundled docs). The mechanism that
 // actually works is a `~/.pi/agent/models.json` provider override
 // (`{"providers":{"openrouter":{"baseUrl":...}}}`, which preserves the
 // provider's built-in models — see Pi's docs/models.md "Configure a
