@@ -3,8 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_0f1b** · P2 · in_progress · Fix dev test scripts broken by spike/ removal (test-zero-egress.sh, microvm smoke-test.sh)
-- **task_7e0b** · P2 · in_progress · reviewer.ts: adapt to Pi 1.4 exit-1-on-length and agent_end willRetry
 - **task_253b** · P2 · open · Upgrade Node runtime 22 -> 24 (host, reviewer base image, CI, @types/node)
 - **task_869b** · P2 · open · Evaluate TypeScript 7 (native tsgo compiler) adoption
 - **task_8e36** · P2 · open · Migrate CI signing to cosign v3 (bundle format) + update verify docs
