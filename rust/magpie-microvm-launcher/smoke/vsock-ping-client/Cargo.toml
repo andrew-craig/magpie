@@ -1,0 +1,18 @@
+[package]
+name = "vsock-ping-client"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone (NOT a member of rust/'s workspace): a throwaway smoke-test
+# helper built by ../../smoke-test.sh into a temp dir.
+[workspace]
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
