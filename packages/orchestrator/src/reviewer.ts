@@ -236,7 +236,7 @@ export interface RunReviewParams {
 
 /** Token/cost telemetry summed across every assistant turn in the run. */
 export interface ReviewUsage {
-  /** Number of assistant turns (message_end/agent_end assistant messages seen). */
+  /** Number of assistant turns (assistant message_ends seen, across retries). */
   turns: number;
   inputTokens: number;
   outputTokens: number;
@@ -1348,7 +1348,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       // Best-effort usage/cost telemetry for the three
       // early-exit failure paths below (timeout, abort, non-zero exit): these
       // return before the code===0 branch's own `usage` computation (which
-      // relies on `agentEndMessages`/a clean finish that never arrived here),
+      // relies on a clean finish that never arrived here),
       // but whatever assistant turns DID stream over stdout before the kill
       // are still in `assistantMessages` — summarize those directly so a
       // run that burned real tokens/cost before being killed still reports
@@ -1370,18 +1370,29 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       if (code !== 0) {
         const signalNote = procSignal ? ` (signal ${procSignal})` : "";
         const stderrNote = redactGatewayKey(stderrTail.trim()) || "(no stderr output)";
+        // Keep the cause when turns streamed before the non-zero exit (e.g. a
+        // truncated or crashed run): diagnostic first, then the stderr tail.
+        const detail =
+          streamedMessages.length > 0
+            ? `${describeMissingReport(streamedMessages, redactGatewayKey)}; stderr: ${stderrNote}`
+            : stderrNote;
         finish({
           ok: false,
-          reason: `review container exited with code ${code ?? "null"}${signalNote}: ${stderrNote}`,
+          reason: `review container exited with code ${code ?? "null"}${signalNote}: ${detail}`,
           usage: earlyUsage,
         });
         return;
       }
 
-      const finalAssistantMessages = agentEndMessages
-        ? filterAssistantMessages(agentEndMessages)
-        : assistantMessages;
-      const messages = finalAssistantMessages.length > 0 ? finalAssistantMessages : assistantMessages;
+      // Streamed `message_end`s span every run (incl. auto-retries), unlike a
+      // single `agent_end`, so usage/last-turn checks use them; the last
+      // `agent_end` is only the fallback when nothing streamed.
+      const messages =
+        assistantMessages.length > 0
+          ? assistantMessages
+          : agentEndMessages
+            ? filterAssistantMessages(agentEndMessages)
+            : [];
 
       const usage = summarizeUsage(messages);
       if (usage) {
@@ -1645,8 +1656,10 @@ export function buildPromptPayload(params: PromptPayloadParams): string {
 // <pi-coding-agent>/docs/json.md: one JSON object per line, starting with a
 // `{"type":"session",...}` header, followed by AgentSessionEvent lines. We
 // only care about two event types here: `message_end` (assistant text/usage
-// for one turn) and `agent_end` (the authoritative final message list for
-// the whole run, per pi-ai's `AssistantMessage`/`Usage` types) — everything
+// for one turn, per pi-ai's `AssistantMessage`/`Usage` types) and `agent_end`
+// (the messages of ONE low-level run — it can be followed by an auto-retry or
+// overflow recovery with more `message_end`s and another `agent_end`, so it
+// is only a fallback, never the whole-session list) — everything
 // else (tool_execution_*, turn_start, queue_update, ...) is ignored. Parsed
 // as `unknown` and narrowed defensively since this is untrusted-shape
 // external process output, not a type this codebase controls. Docker
