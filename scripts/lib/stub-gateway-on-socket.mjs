@@ -42,8 +42,6 @@ if (!socketPath) {
 const config = loadGatewayConfig({
   MAGPIE_GATEWAY_OPENROUTER_KEY: "sk-or-v1-STUB-NOT-A-REAL-KEY",
   MAGPIE_GATEWAY_MASTER_KEY: "stub-master-key-unused",
-  GATEWAY_PROXY_HOST: "127.0.0.1", // unused once we call server.listen(socketPath) ourselves
-  GATEWAY_PROXY_PORT: "4000", // unused, ditto
   GATEWAY_UPSTREAM_BASE_URL: "https://upstream-stub.invalid/api/v1",
 });
 
@@ -135,9 +133,10 @@ proxy.server.on("request", (req) => {
   console.log(`[gateway-on-socket] [socket-request #${requestCount}] ${req.method} ${req.url} from (unix socket, no remote addr)`);
 });
 
-// Bind to the UNIX SOCKET ourselves -- deliberately NOT calling
-// `proxy.listen()` (that binds `config.proxy.host:port`, i.e. TCP). Per
-// DISTRIBUTION.md §2.6, a stale socket file from a previous run must be
+// Bind to the UNIX SOCKET ourselves via `proxy.server.listen(socketPath, cb)`
+// (the config has no TCP proxy host/port any more: the proxy plane is
+// socket-only; `proxy.listen(path)` would also work, but we need the
+// post-bind chmod in the callback). Per DISTRIBUTION.md §2.6, a stale socket file from a previous run must be
 // removed before bind (EADDRINUSE otherwise); the job dir itself is expected
 // to already exist (created by the test script) so this never creates a
 // root-owned directory.

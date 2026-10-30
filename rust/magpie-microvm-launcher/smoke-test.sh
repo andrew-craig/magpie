@@ -70,8 +70,16 @@ GUEST_LOG="$WORKDIR/guest.log"
 ROOTFS="$WORKDIR/rootfs"
 WORK_HOST_DIR="$WORKDIR/work-fixture"
 CONTAINER_NAME="magpie-krun-smoke-$$"
+# Single source of truth for the VMM resources: used by both the launcher
+# invocation and the assertions below.
+VCPUS=2
+RAM_MIB=512
 cleanup() {
-    kill "${LISTENER_PID:-0}" 2>/dev/null || true
+    # Only signal a listener that actually started (`kill 0` would signal the
+    # whole process group if we failed before it was launched).
+    if [ -n "${LISTENER_PID:-}" ]; then
+        kill "$LISTENER_PID" 2>/dev/null || true
+    fi
     "$DOCKER_BIN" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     # An unpacked rootfs can contain mode-000 dirs; make it removable first.
     chmod -R u+rwX "$WORKDIR" 2>/dev/null || true
@@ -147,7 +155,7 @@ install -m 0755 "$SMOKE_DIR/smoke-probe.sh" "$ROOTFS/smoke-probe.sh"
 echo "=== booting micro-VM (rootfs=$ROOTFS) ===" >&2
 set +e
 sg kvm -c "'$BIN' --rootfs '$ROOTFS' --exec /bin/sh --arg /smoke-probe.sh \
-    --vcpus 2 --ram-mib 512 --uid \$(id -u) --gid \$(id -g) \
+    --vcpus $VCPUS --ram-mib $RAM_MIB --uid \$(id -u) --gid \$(id -g) \
     --vsock-port 1234 --vsock-uds '$UDS_PATH' \
     --work-mount '$WORK_HOST_DIR:work'" 2>&1 | tee "$GUEST_LOG"
 BOOT_STATUS=${PIPESTATUS[0]}
@@ -160,6 +168,40 @@ cat "$LISTENER_LOG" >&2
 echo "" >&2
 echo "=== automated assertions ===" >&2
 FAIL=0
+# First line after the ===SECTION=== header in $GUEST_LOG, whitespace-trimmed
+# (empty if the section is missing or has no following line).
+section_first_line() {
+    awk -v hdr="===$1===" '
+        found { gsub(/^[ \t\r]+|[ \t\r]+$/, ""); print; exit }
+        { line = $0; gsub(/^[ \t\r]+|[ \t\r]+$/, "", line); if (line == hdr) found = 1 }
+    ' "$GUEST_LOG"
+}
+# Exact comparison of a section's first value line (grep -F with a multi-line
+# needle would be OR'd per line, i.e. vacuous).
+assert_section_value() {
+    local actual
+    actual="$(section_first_line "$2")"
+    if [ -n "$actual" ] && [ "$actual" = "$3" ]; then
+        echo "PASS: $1" >&2
+    else
+        echo "FAIL: $1 (section $2: expected '$3', got '${actual:-<missing>}')" >&2
+        FAIL=1
+    fi
+}
+# MemTotal (kB) must be > 0, <= requested RAM, and >= 75% of it.
+assert_memtotal_in_range() {
+    local line kb max_kb min_kb
+    line="$(section_first_line MEMTOTAL)"
+    kb="$(printf '%s\n' "$line" | sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p')"
+    max_kb=$((RAM_MIB * 1024))
+    min_kb=$((RAM_MIB * 1024 * 3 / 4))
+    if [ -n "$kb" ] && [ "$kb" -gt 0 ] && [ "$kb" -le "$max_kb" ] && [ "$kb" -ge "$min_kb" ]; then
+        echo "PASS: $1 (${kb} kB in [${min_kb}, ${max_kb}])" >&2
+    else
+        echo "FAIL: $1 (MemTotal='${kb:-<unparsed: $line>}' kB, want [${min_kb}, ${max_kb}])" >&2
+        FAIL=1
+    fi
+}
 assert_contains() {
     if grep -qF "$2" "$GUEST_LOG"; then
         echo "PASS: $1" >&2
@@ -168,13 +210,11 @@ assert_contains() {
         FAIL=1
     fi
 }
-assert_contains "dummy0 is administratively down" "===DUMMY0-OPERSTATE===
-down"
-assert_contains "route table is empty" "===ROUTE-COUNT===
-0"
+assert_section_value "dummy0 is administratively down" DUMMY0-OPERSTATE down
+assert_section_value "route table is empty" ROUTE-COUNT 0
 assert_contains "egress connect() is blocked, not a hang" "blocked:"
-assert_contains "vcpu count is exactly the requested 2" "===NPROC===
-2"
+assert_section_value "vcpu count is exactly the requested $VCPUS" NPROC "$VCPUS"
+assert_memtotal_in_range "guest MemTotal reflects the requested ${RAM_MIB} MiB, not host RAM"
 assert_contains "vsock round-trip completed" "vsock round-trip OK"
 assert_contains "guest uid is root despite krun_setuid (see src/krun.rs)" "uid=0(root)"
 assert_contains "/work virtiofs mount succeeded and is visible" "hello"
