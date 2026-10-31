@@ -375,6 +375,75 @@ describe("runReview", () => {
     }
   });
 
+  it("sums usage across a Pi auto-retry (agent_end willRetry) and still succeeds", async () => {
+    const failed = { ...assistantMessage(""), stopReason: "error", errorMessage: "transient 529" };
+    const ok1 = assistantMessage("retry turn 1");
+    const ok2 = assistantMessage("retry turn 2");
+    const piBinary = writeFakeDocker(
+      [
+        `const w = (o) => process.stdout.write(JSON.stringify(o) + "\\n");`,
+        `fs.writeFileSync(nodepath.join(outHost, "findings.json"), ${JSON.stringify(
+          JSON.stringify({ findings: [], summary: "Retry summary.", verdict: "comment" }),
+        )});`,
+        `const failed = ${JSON.stringify(failed)};`,
+        `const ok1 = ${JSON.stringify(ok1)};`,
+        `const ok2 = ${JSON.stringify(ok2)};`,
+        `w({type:"message_end",message:failed});`,
+        `w({type:"agent_end",messages:[failed],willRetry:true});`,
+        `w({type:"message_end",message:ok1});`,
+        `w({type:"message_end",message:ok2});`,
+        `w({type:"agent_end",messages:[ok1,ok2]});`,
+      ].join("\n"),
+    );
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.usage).toEqual({
+        turns: 3,
+        inputTokens: 333,
+        outputTokens: 666,
+        totalTokens: 999,
+        costUsd: 0.0126,
+      });
+    }
+  });
+
+  it("keeps the output-token-limit diagnostic and usage when the container exits non-zero after a length turn", async () => {
+    const truncated = { ...assistantMessage("partial"), stopReason: "length" };
+    const piBinary = writeFakeDocker(
+      [
+        `process.stdout.write(JSON.stringify({type:"message_end",message:${JSON.stringify(truncated)}}) + "\\n");`,
+        `process.stderr.write("pi: response truncated\\n");`,
+        `process.exit(1);`,
+      ].join("\n"),
+    );
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("exited with code 1");
+      expect(result.reason).toContain("pi hit the output-token limit before report_findings completed");
+      expect(result.reason).toContain("stderr: pi: response truncated");
+      expect(result.usage?.turns).toBe(1);
+      expect(result.usage?.totalTokens).toBe(333);
+    }
+  });
+
+  it("leaves the non-zero-exit reason as `exited with code N: <stderr>` when no messages streamed", async () => {
+    const piBinary = writeFakeDocker([`process.stderr.write("boom\\n");`, `process.exit(1);`].join("\n"));
+
+    const result = await runReview(baseParams({ piBinary }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("review container exited with code 1: boom");
+      expect(result.usage).toBeUndefined();
+    }
+  });
+
   it("falls back to the final assistant text when the findings file's summary is empty", async () => {
     const text = "Fallback summary text from the assistant turn.";
     const piBinary = writeFakeDockerWithFindings([assistantMessage(text)], {

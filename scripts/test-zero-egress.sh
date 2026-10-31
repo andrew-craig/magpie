@@ -7,12 +7,11 @@ set -euo pipefail
 # the gateway's per-job unix socket, and that socket is a genuinely working
 # path (not just an unreachable one masquerading as fine).
 #
-# Builds on the feasibility spike (spike/m7-0/run-spike.sh proved the
-# transport works end-to-end; this script additionally proves everything
-# ELSE is unreachable, which the spike didn't need to check).
+# Proves both halves: the one permitted path (the gateway socket) works
+# end-to-end, AND everything else is unreachable.
 #
 # What it does:
-#   1. Starts a stub gateway (spike/m7-0/gateway-on-socket.mjs -- the REAL
+#   1. Starts a stub gateway (scripts/lib/stub-gateway-on-socket.mjs -- the REAL
 #      packages/gateway proxy-server code, upstream OpenRouter call stubbed,
 #      bound to a per-job unix socket) so this test spends zero tokens and
 #      needs no real API key.
@@ -36,22 +35,37 @@ set -euo pipefail
 # Usage:
 #   ./scripts/test-zero-egress.sh
 #
-# Requires: docker, and the magpie-reviewer:latest image already built
-# (./scripts/build-reviewer-image.sh) -- this script deliberately does NOT
-# auto-build (a build can take minutes and shouldn't be a surprise side
-# effect of running a test).
+# Requires: docker (or podman via DOCKER_BIN=podman), node, a built
+# packages/gateway (`npm run gateway:build`), and the reviewer image already
+# built (./scripts/build-reviewer-image.sh) -- this script deliberately does
+# NOT auto-build (a build can take minutes and shouldn't be a surprise side
+# effect of running a test). Not part of CI; a manual developer check.
+#
+# The container launch flags mirror buildReviewDockerArgs() in
+# packages/orchestrator/src/reviewer.ts (hardening flags, memory/cpu/pids
+# limits, /work + /out + /run/gw mounts, podman's --userns=keep-id); keep them
+# in sync if that function changes.
 #
 # Env vars (all optional):
 #   MAGPIE_REVIEWER_IMAGE   Image to test. Default: magpie-reviewer:latest
-#   DOCKER_BIN              docker CLI to use. Default: docker
+#   DOCKER_BIN              docker CLI to use (docker or podman). Default: docker
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPIKE_DIR="${REPO_ROOT}/spike/m7-0"
+STUB_GATEWAY="${REPO_ROOT}/scripts/lib/stub-gateway-on-socket.mjs"
 
 IMAGE="${MAGPIE_REVIEWER_IMAGE:-magpie-reviewer:latest}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
-MODEL="z-ai/glm-5.2" # matches spike/m7-0/run-spike.sh's fixture model -- not billed, upstream is stubbed.
+MODEL="z-ai/glm-5.2" # fixture model name -- not billed, upstream is stubbed.
 PROBE_TIMEOUT_SECONDS=3
+
+# Mirrors reviewer.ts's resource limits (config.ts defaults).
+MEMORY_LIMIT="4g"
+CPU_LIMIT="2"
+PIDS_LIMIT="256"
+
+# Podman-only uid-mapping shim, as in reviewer.ts (real docker hard-errors on it).
+USERNS_FLAGS=()
+case "$(basename "${DOCKER_BIN}")" in podman*) USERNS_FLAGS=(--userns=keep-id) ;; esac
 
 log() { printf '[test-zero-egress] %s\n' "$*"; }
 die() { printf '[test-zero-egress] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,8 +95,8 @@ if ! "${DOCKER_BIN}" image inspect "${IMAGE}" >/dev/null 2>&1; then
 fi
 log "using image: ${IMAGE}"
 
-command -v node >/dev/null 2>&1 || die "'node' not found on PATH -- needed on the HOST to run the stub gateway (spike/m7-0/gateway-on-socket.mjs)"
-[[ -f "${REPO_ROOT}/packages/gateway/dist/proxy-server.js" ]] || die "packages/gateway is not built (missing dist/proxy-server.js) -- run 'npm run gateway:build' first; gateway-on-socket.mjs imports the real compiled proxy-server code"
+command -v node >/dev/null 2>&1 || die "'node' not found on PATH -- needed on the HOST to run the stub gateway (scripts/lib/stub-gateway-on-socket.mjs)"
+[[ -f "${REPO_ROOT}/packages/gateway/dist/proxy-server.js" ]] || die "packages/gateway is not built (missing dist/proxy-server.js) -- run 'npm run gateway:build' first; the stub gateway imports the real compiled proxy-server code"
 
 # ---------------------------------------------------------------------------
 # Workspace + cleanup.
@@ -117,8 +131,8 @@ log "job dir: ${JOB_DIR}"
 # 1. Start the stub gateway bound to the unix socket.
 # ---------------------------------------------------------------------------
 
-log "starting gateway-on-socket.mjs on ${SOCKET_PATH}"
-node "${SPIKE_DIR}/gateway-on-socket.mjs" "${SOCKET_PATH}" > "${GATEWAY_LOG}" 2>&1 &
+log "starting stub-gateway-on-socket.mjs on ${SOCKET_PATH}"
+node "${STUB_GATEWAY}" "${SOCKET_PATH}" > "${GATEWAY_LOG}" 2>&1 &
 GATEWAY_PID=$!
 
 ready=""
@@ -207,6 +221,7 @@ set +e
   --read-only \
   --tmpfs /tmp \
   --user "$(id -u):$(id -g)" \
+  ${USERNS_FLAGS[@]+"${USERNS_FLAGS[@]}"} \
   -v "${JOB_DIR}:/run/gw:ro" \
   -v "${PROBE_SCRIPT}:/probe.sh:ro" \
   -e "MAGPIE_PROBE_TIMEOUT_SECONDS=${PROBE_TIMEOUT_SECONDS}" \
@@ -300,6 +315,15 @@ Review the diff above per your system instructions. When you are done, call
 the report_findings tool EXACTLY ONCE, as your final action.
 EOF
 
+  # Per-job mounts as reviewer.ts passes them: a read-only PR checkout at
+  # /work, a writable findings dir at /out. The key travels name-only via the
+  # environment (-e OPENROUTER_API_KEY), never on the argv.
+  WORK_MOUNT="${WORK_DIR}/work"
+  OUT_MOUNT="${WORK_DIR}/out"
+  mkdir -p "${WORK_MOUNT}" "${OUT_MOUNT}"
+  echo "old line" > "${WORK_MOUNT}/fixture.txt"
+  export OPENROUTER_API_KEY="${VKEY}"
+
   set +e
   "${DOCKER_BIN}" run --rm \
     --network none \
@@ -308,9 +332,16 @@ EOF
     --read-only \
     --tmpfs /tmp \
     --user "$(id -u):$(id -g)" \
+    ${USERNS_FLAGS[@]+"${USERNS_FLAGS[@]}"} \
+    --memory="${MEMORY_LIMIT}" \
+    --cpus="${CPU_LIMIT}" \
+    --pids-limit="${PIDS_LIMIT}" \
+    -v "${WORK_MOUNT}:/work:ro" \
+    -v "${OUT_MOUNT}:/out" \
     -v "${JOB_DIR}:/run/gw:ro" \
-    -e OPENROUTER_API_KEY="${VKEY}" \
+    -e OPENROUTER_API_KEY \
     -e OPENAI_BASE_URL=http://127.0.0.1:4000/v1 \
+    -e MAGPIE_REQUIRE_MEMORY_LIMIT=true \
     -i \
     "${IMAGE}" \
     --provider openrouter \

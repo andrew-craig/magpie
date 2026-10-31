@@ -3,9 +3,7 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_0f1b** · P2 · open · scripts/test-zero-egress.sh references stripped spike/m7-0 gateway-on-socket.mjs
 - **task_253b** · P2 · open · Upgrade Node runtime 22 -> 24 (host, reviewer base image, CI, @types/node)
-- **task_7e0b** · P2 · open · reviewer.ts: adapt to Pi 1.4 exit-1-on-length and agent_end willRetry
 - **task_869b** · P2 · open · Evaluate TypeScript 7 (native tsgo compiler) adoption
 - **task_8e36** · P2 · open · Migrate CI signing to cosign v3 (bundle format) + update verify docs
 - **bug_0ba7** · P3 · open · Reviewer containers flood journald with Pi streaming deltas

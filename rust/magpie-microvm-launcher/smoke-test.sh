@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 # Live boot smoke test for magpie-krun-launch.
 #
-# NOT part of `cargo test` — this actually boots a real micro-VM via
-# /dev/kvm, so it needs real hardware virtualization and kvm-group access,
-# same as spike/m8-a1's own experiments. Run it directly:
+# NOT part of `cargo test` or CI -- this actually boots a real micro-VM via
+# /dev/kvm, so it needs real hardware virtualization and kvm-group access.
+# Run it directly:
 #
-#   sg kvm -c 'rust/magpie-microvm-launcher/smoke-test.sh'
+#   MAGPIE_REVIEWER_IMAGE=<local reviewer image> \
+#     sg kvm -c 'rust/magpie-microvm-launcher/smoke-test.sh'
 #
 # (or just run it directly if your shell session's group list already
-# includes `kvm` — check with `id`; a fresh login after `usermod -aG kvm`
-# needs `sg kvm`/`newgrp kvm` or a re-login to take effect, per
-# spike/m8-a1/provision.sh step 3.)
+# includes `kvm` -- check with `id`; a fresh login after `usermod -aG kvm`
+# needs `sg kvm`/`newgrp kvm` or a re-login to take effect. `sg` inherits the
+# calling environment, so MAGPIE_REVIEWER_IMAGE set on the command line or
+# exported beforehand reaches the script.)
+#
+# SELF-CONTAINED: the script builds its own throwaway guest rootfs in a
+# mktemp dir (a `podman create` + `podman export` of the reviewer image named
+# by $MAGPIE_REVIEWER_IMAGE -- the same "export the reviewer image to an
+# unpacked rootfs directory" step docs/INSTALL.md describes for the
+# production micro-VM tier's `[microvm] rootfs_path`), adds the tiny
+# smoke/vsock-ping-client (built for the host arch, statically linked) and
+# smoke/smoke-probe.sh, and removes everything on exit. The reviewer image
+# must already exist locally (./scripts/build-reviewer-image.sh); it is never
+# built or pulled here.
+#
+# Env vars:
+#   MAGPIE_REVIEWER_IMAGE   Reviewer image to export. REQUIRED, no default.
+#   DOCKER_BIN              podman/docker CLI used for create/export.
+#                           Default: podman
 #
 # WHAT THIS PROVES:
 #   1. TSI is OFF: the guest's only non-loopback interface (dummy0) is
@@ -19,8 +36,8 @@
 #      succeeding.
 #   2. A working per-VM vsock round-trip: the guest dials the configured
 #      vsock port and gets a reply from a host-side UNIX socket listener
-#      that this script starts (spike/m8-a1/vsock-host-listener.py) --
-#      never a host-global listener, a fresh per-job socket path.
+#      that this script starts (smoke/vsock-host-listener.py) -- never a
+#      host-global listener, a fresh per-job socket path.
 #   3. VMM-enforced vcpu/RAM: `nproc`/MemTotal inside the guest match
 #      exactly what was requested, not the host's own values.
 #   4. The guest's ACTUAL uid despite krun_setuid/krun_setgid being called
@@ -28,41 +45,68 @@
 #      guest" finding. Expect `uid=0(root)`.
 #   5. The read-only /work virtiofs contract: the mount succeeds, its
 #      content is visible, and a write attempt fails (EROFS).
-#
-# Reuses spike/m8-a1's already-exported reviewer rootfs (a real `podman
-# export` of the actual magpie-reviewer image -- see spike/m8-a1/rootfs/,
-# which already carries /vsock-client, /probe.sh, /netdump.sh from the
-# spike's own addenda) rather than re-exporting it, and
-# spike/m8-a1/vsock-host-listener.py as the host-side listener.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SPIKE_DIR="$REPO_ROOT/spike/m8-a1"
 LAUNCHER_DIR="$REPO_ROOT/rust/magpie-microvm-launcher"
+SMOKE_DIR="$LAUNCHER_DIR/smoke"
 BIN="$REPO_ROOT/rust/target/release/magpie-krun-launch"
+DOCKER_BIN="${DOCKER_BIN:-podman}"
+IMAGE="${MAGPIE_REVIEWER_IMAGE:-}"
 
-ROOTFS="$SPIKE_DIR/rootfs"
-WORK_HOST_DIR="$SPIKE_DIR/work-fixture"
+[ -n "$IMAGE" ] || { echo "MAGPIE_REVIEWER_IMAGE is required (a locally built reviewer image; see ./scripts/build-reviewer-image.sh)" >&2; exit 1; }
+command -v "$DOCKER_BIN" >/dev/null 2>&1 || { echo "'$DOCKER_BIN' not found on PATH" >&2; exit 1; }
+"$DOCKER_BIN" image inspect "$IMAGE" >/dev/null 2>&1 || { echo "image '$IMAGE' not found locally (build it first: ./scripts/build-reviewer-image.sh)" >&2; exit 1; }
 
 if [ ! -x "$BIN" ]; then
     echo "building release binary..." >&2
     (cd "$REPO_ROOT/rust" && cargo build -p magpie-microvm-launcher --release)
 fi
 
-if [ ! -d "$ROOTFS" ]; then
-    echo "missing $ROOTFS -- this smoke test reuses the spike's already-exported" >&2
-    echo "reviewer rootfs rather than re-exporting it; see spike/m8-a1/provision.sh." >&2
-    exit 1
-fi
-
 WORKDIR="$(mktemp -d /tmp/magpie-krun-smoke.XXXXXX)"
 UDS_PATH="$WORKDIR/gw.sock"
 LISTENER_LOG="$WORKDIR/host-listener.log"
 GUEST_LOG="$WORKDIR/guest.log"
-trap 'kill "${LISTENER_PID:-0}" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
+ROOTFS="$WORKDIR/rootfs"
+WORK_HOST_DIR="$WORKDIR/work-fixture"
+CONTAINER_NAME="magpie-krun-smoke-$$"
+# Single source of truth for the VMM resources: used by both the launcher
+# invocation and the assertions below.
+VCPUS=2
+RAM_MIB=512
+cleanup() {
+    # Only signal a listener that actually started (`kill 0` would signal the
+    # whole process group if we failed before it was launched).
+    if [ -n "${LISTENER_PID:-}" ]; then
+        kill "$LISTENER_PID" 2>/dev/null || true
+    fi
+    "$DOCKER_BIN" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    # An unpacked rootfs can contain mode-000 dirs; make it removable first.
+    chmod -R u+rwX "$WORKDIR" 2>/dev/null || true
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+echo "=== building throwaway rootfs from $IMAGE ===" >&2
+mkdir -p "$ROOTFS"
+"$DOCKER_BIN" create --name "$CONTAINER_NAME" "$IMAGE" >/dev/null
+# Device nodes can't be created unprivileged (and the guest kernel provides
+# /dev itself), so skip them.
+"$DOCKER_BIN" export "$CONTAINER_NAME" | tar -x -C "$ROOTFS" --no-same-owner --exclude='./dev/*' --exclude='dev/*'
+"$DOCKER_BIN" rm -f "$CONTAINER_NAME" >/dev/null
+mkdir -p "$ROOTFS/work" "$ROOTFS/out" "$ROOTFS/tmp" "$ROOTFS/dev" "$ROOTFS/proc" "$ROOTFS/sys"
+
+echo "=== building guest vsock ping client (static, host arch) ===" >&2
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+CARGO_TARGET_DIR="$WORKDIR/ping-target" RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build --release --locked --target "$HOST_TRIPLE" \
+    --manifest-path "$SMOKE_DIR/vsock-ping-client/Cargo.toml" >&2
+install -m 0755 "$WORKDIR/ping-target/$HOST_TRIPLE/release/vsock-ping-client" "$ROOTFS/vsock-client"
+
+cp -r "$SMOKE_DIR/work-fixture" "$WORK_HOST_DIR"
 
 echo "=== starting host-side vsock listener (uds=$UDS_PATH) ===" >&2
-python3 "$SPIKE_DIR/vsock-host-listener.py" "$UDS_PATH" >"$LISTENER_LOG" 2>&1 &
+python3 -I "$SMOKE_DIR/vsock-host-listener.py" "$UDS_PATH" >"$LISTENER_LOG" 2>&1 &
 LISTENER_PID=$!
 # Give the listener a moment to bind before the guest tries to dial it.
 for _ in $(seq 1 50); do
@@ -75,8 +119,8 @@ if [ ! -S "$UDS_PATH" ]; then
 fi
 
 # The guest probe lives as a real multi-line FILE
-# (rust/magpie-microvm-launcher/smoke-probe.sh, git-tracked) rather than an
-# inline `--arg`-packed one-liner: libkrun's kernel-cmdline packing requires
+# (rust/magpie-microvm-launcher/smoke/smoke-probe.sh, git-tracked) rather than
+# an inline `--arg`-packed one-liner: libkrun's kernel-cmdline packing requires
 # plain ASCII with no newlines (src/config.rs's cmdline-ASCII guard enforces
 # this on argv/env), and an inline script here would also have to survive
 # being quoted through THREE shell layers (this script -> `sg kvm -c "..."`
@@ -85,12 +129,8 @@ fi
 # synthesized cmdline argument. Only the `--exec /smoke-probe.sh` argv entry
 # itself needs to be (and is) a short, plain-ASCII path.
 #
-# Copied into the rootfs at run time, rather than committed inside it
-# directly: `spike/m8-a1/rootfs/` is entirely gitignored
-# (`spike/m8-a1/.gitignore`: "front-end experiment artifacts (throwaway)" --
-# it's a `podman export` output, regenerable via `provision.sh`), so a
-# script living only inside it would never actually be version-controlled.
-install -m 0755 "$LAUNCHER_DIR/smoke-probe.sh" "$ROOTFS/smoke-probe.sh"
+# Copied into the throwaway rootfs just before boot.
+install -m 0755 "$SMOKE_DIR/smoke-probe.sh" "$ROOTFS/smoke-probe.sh"
 
 # --uid/--gid: krun_setuid/krun_setgid are applied via a plain host-side
 # setuid(2)/setgid(2) call INSIDE krun_start_enter (see src/krun.rs's module
@@ -115,7 +155,7 @@ install -m 0755 "$LAUNCHER_DIR/smoke-probe.sh" "$ROOTFS/smoke-probe.sh"
 echo "=== booting micro-VM (rootfs=$ROOTFS) ===" >&2
 set +e
 sg kvm -c "'$BIN' --rootfs '$ROOTFS' --exec /bin/sh --arg /smoke-probe.sh \
-    --vcpus 2 --ram-mib 512 --uid \$(id -u) --gid \$(id -g) \
+    --vcpus $VCPUS --ram-mib $RAM_MIB --uid \$(id -u) --gid \$(id -g) \
     --vsock-port 1234 --vsock-uds '$UDS_PATH' \
     --work-mount '$WORK_HOST_DIR:work'" 2>&1 | tee "$GUEST_LOG"
 BOOT_STATUS=${PIPESTATUS[0]}
@@ -128,6 +168,40 @@ cat "$LISTENER_LOG" >&2
 echo "" >&2
 echo "=== automated assertions ===" >&2
 FAIL=0
+# First line after the ===SECTION=== header in $GUEST_LOG, whitespace-trimmed
+# (empty if the section is missing or has no following line).
+section_first_line() {
+    awk -v hdr="===$1===" '
+        found { gsub(/^[ \t\r]+|[ \t\r]+$/, ""); print; exit }
+        { line = $0; gsub(/^[ \t\r]+|[ \t\r]+$/, "", line); if (line == hdr) found = 1 }
+    ' "$GUEST_LOG"
+}
+# Exact comparison of a section's first value line (grep -F with a multi-line
+# needle would be OR'd per line, i.e. vacuous).
+assert_section_value() {
+    local actual
+    actual="$(section_first_line "$2")"
+    if [ -n "$actual" ] && [ "$actual" = "$3" ]; then
+        echo "PASS: $1" >&2
+    else
+        echo "FAIL: $1 (section $2: expected '$3', got '${actual:-<missing>}')" >&2
+        FAIL=1
+    fi
+}
+# MemTotal (kB) must be > 0, <= requested RAM, and >= 75% of it.
+assert_memtotal_in_range() {
+    local line kb max_kb min_kb
+    line="$(section_first_line MEMTOTAL)"
+    kb="$(printf '%s\n' "$line" | sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p')"
+    max_kb=$((RAM_MIB * 1024))
+    min_kb=$((RAM_MIB * 1024 * 3 / 4))
+    if [ -n "$kb" ] && [ "$kb" -gt 0 ] && [ "$kb" -le "$max_kb" ] && [ "$kb" -ge "$min_kb" ]; then
+        echo "PASS: $1 (${kb} kB in [${min_kb}, ${max_kb}])" >&2
+    else
+        echo "FAIL: $1 (MemTotal='${kb:-<unparsed: $line>}' kB, want [${min_kb}, ${max_kb}])" >&2
+        FAIL=1
+    fi
+}
 assert_contains() {
     if grep -qF "$2" "$GUEST_LOG"; then
         echo "PASS: $1" >&2
@@ -136,11 +210,11 @@ assert_contains() {
         FAIL=1
     fi
 }
-assert_contains "dummy0 is administratively down" "===DUMMY0-OPERSTATE===
-down"
-assert_contains "route table is empty" "===ROUTE-COUNT===
-0"
+assert_section_value "dummy0 is administratively down" DUMMY0-OPERSTATE down
+assert_section_value "route table is empty" ROUTE-COUNT 0
 assert_contains "egress connect() is blocked, not a hang" "blocked:"
+assert_section_value "vcpu count is exactly the requested $VCPUS" NPROC "$VCPUS"
+assert_memtotal_in_range "guest MemTotal reflects the requested ${RAM_MIB} MiB, not host RAM"
 assert_contains "vsock round-trip completed" "vsock round-trip OK"
 assert_contains "guest uid is root despite krun_setuid (see src/krun.rs)" "uid=0(root)"
 assert_contains "/work virtiofs mount succeeded and is visible" "hello"
