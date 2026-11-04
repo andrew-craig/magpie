@@ -246,8 +246,8 @@ deliberately never reachable from the sandbox or the gateway.
 ### Operability
 
 Every job — success, dedup skip, force-push skip, timeout, abort, or a thrown error — writes
-exactly one durable, greppable telemetry record (outcome, cost, duration, usage), logged as
-structured JSON and appended to a JSONL file. `GET /healthz` reports the resolved isolation tier
+exactly one durable, greppable telemetry record (outcome, cost, duration, usage, effective model,
+`report_findings` calls and rejections), logged as structured JSON and appended to a JSONL file. `GET /healthz` reports the resolved isolation tier
 and probe evidence for the operator; the process drains in-flight jobs on `SIGINT`/`SIGTERM`
 before exiting.
 

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Config } from "./config.js";
 import type { Finding } from "./findings.js";
-import { buildPromptPayload, runReview } from "./reviewer.js";
+import { buildPromptPayload, runReview, summarizeReportFindingsAttempts } from "./reviewer.js";
 
 // NOTE: everything here runs fully offline — no real Docker daemon, no
 // `magpie-reviewer` image, no network, no live LLM call. `runReview`
@@ -579,6 +579,100 @@ describe("runReview", () => {
         expect(result.reason).toContain("...");
         expect(result.reason.length).toBeLessThan(1200);
       }
+    });
+  });
+
+  describe("report_findings attempt summary", () => {
+    const redact = (t: string) => t.split(TEST_GATEWAY_API_KEY).join("[redacted]");
+    const call = (id: string, args: Record<string, unknown>) => ({
+      role: "assistant" as const,
+      content: [{ type: "toolCall", id, name: "report_findings", arguments: args }],
+      stopReason: "toolUse",
+    });
+    const rejection = (id: string, text: string) => ({
+      role: "toolResult" as const,
+      toolCallId: id,
+      toolName: "report_findings",
+      isError: true,
+      content: [{ type: "text", text }],
+    });
+
+    it("extracts the verdict of the call the LAST rejection answers, matched by id", () => {
+      const summary = summarizeReportFindingsAttempts(
+        [
+          call("a", { verdict: '"approve"' }),
+          call("b", { verdict: "Comment" }),
+          // Rejections arrive out of call order: the last rejection answers "a".
+          rejection("b", "bad b"),
+          rejection("a", "bad a"),
+        ],
+        redact,
+      );
+      expect(summary).toEqual({
+        calls: 2,
+        rejected: 2,
+        lastRejection: "bad a",
+        lastRejectedVerdict: JSON.stringify('"approve"'),
+      });
+    });
+
+    it("omits lastRejectedVerdict when the rejected call had no verdict, or no id matches", () => {
+      expect(summarizeReportFindingsAttempts([call("a", { summary: "x" }), rejection("a", "r")], redact)).toEqual({
+        calls: 1,
+        rejected: 1,
+        lastRejection: "r",
+      });
+      expect(
+        summarizeReportFindingsAttempts([call("a", { verdict: "x" }), rejection("zzz", "r")], redact).lastRejectedVerdict,
+      ).toBeUndefined();
+    });
+
+    it("redacts the gateway key inside a rejected value and bounds the length", () => {
+      const summary = summarizeReportFindingsAttempts(
+        [call("a", { verdict: `${TEST_GATEWAY_API_KEY}${"y".repeat(2000)}` }), rejection("a", "z".repeat(2000))],
+        redact,
+      );
+      expect(summary.lastRejectedVerdict).toContain("[redacted]");
+      expect(summary.lastRejectedVerdict).not.toContain(TEST_GATEWAY_API_KEY);
+      expect(summary.lastRejectedVerdict!.length).toBeLessThanOrEqual(403);
+      expect(summary.lastRejection!.length).toBeLessThanOrEqual(403);
+    });
+
+    it("puts last rejected verdict before last rejection in the missing-report reason", async () => {
+      const piBinary = writeFakeDockerWithFindings(
+        [call("a", { verdict: '"approve"' }) as never, rejection("a", "must be equal to constant") as never],
+        { kind: "omit" },
+      );
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain('last rejected verdict: "\\"approve\\""; last rejection: "must be equal to constant"');
+        expect(result.reportFindings).toMatchObject({ calls: 1, rejected: 1, lastRejectedVerdict: '"\\"approve\\""' });
+      }
+    });
+
+    it("carries the counts on a SUCCESSFUL result after earlier rejections", async () => {
+      const piBinary = writeFakeDockerWithFindings(
+        [
+          call("a", { verdict: "nope" }) as never,
+          rejection("a", "bad") as never,
+          call("b", { verdict: "comment" }) as never,
+        ],
+        { kind: "valid", value: { findings: [], summary: "ok", verdict: "comment" } },
+      );
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(true);
+      expect(result.reportFindings).toMatchObject({ calls: 2, rejected: 1, lastRejection: "bad", lastRejectedVerdict: '"nope"' });
+    });
+
+    it("carries the counts on an invalid-findings-file failure", async () => {
+      const piBinary = writeFakeDockerWithFindings(
+        [call("a", { verdict: "nope" }) as never, rejection("a", "bad") as never],
+        { kind: "raw", value: "not json" },
+      );
+      const result = await runReview(baseParams({ piBinary }));
+      expect(result.ok).toBe(false);
+      expect(result.reportFindings).toMatchObject({ calls: 1, rejected: 1 });
     });
   });
 

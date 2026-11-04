@@ -22,16 +22,42 @@
  * it; `path`/`message`/`suggestion` etc. are treated purely as data and
  * written verbatim to a JSON file for the orchestrator to parse and render
  * (e.g. as PR comment text) later.
+ *
+ * `prepareArguments` (see below) runs before Pi's schema validation purely to
+ * turn an out-of-enum `verdict`/`severity` into an error that names the
+ * received value and every acceptable one. It never repairs a value: invalid
+ * input is rejected so the model retries with a correct one.
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
+import { Type, type Static, type TUnsafe } from "typebox";
 
 /** Default output path used only when the host forgot to set MAGPIE_FINDINGS_PATH. */
 const FALLBACK_FINDINGS_PATH = "./magpie-findings.json";
+
+/** Allowed `verdict` values; shared by the schema and the rejection message. */
+export const VERDICTS = ["approve", "comment"] as const;
+/** Allowed finding `severity` values; shared by the schema and the rejection message. */
+export const SEVERITIES = ["blocking", "important", "nit"] as const;
+
+/**
+ * Flat `{type:"string", enum:[...]}` schema. `Type.Union([Type.Literal...])`
+ * serialises to `anyOf`/`const`, which some providers handle poorly and which
+ * produces the opaque "must match a schema in anyOf" validation error that
+ * hid the acceptable values from the model. This mirrors `StringEnum` from
+ * `@earendil-works/pi-ai`, re-implemented locally because pi-ai is not a
+ * direct dependency of this package (the reviewer image pins an explicit
+ * dependency set). `Static<>` stays the precise literal union.
+ */
+function stringEnum<const T extends readonly string[]>(
+  values: T,
+  description: string,
+): TUnsafe<T[number]> {
+  return Type.Unsafe<T[number]>({ type: "string", enum: [...values], description });
+}
 
 // NOTE: these constraints (minLength/minimum, additionalProperties:false) are
 // kept in lockstep with the orchestrator's zod schema in findings.ts, which is
@@ -57,12 +83,9 @@ const findingSchema = Type.Object(
           "1-based end line (inclusive, right side of the diff) for multi-line findings. Must be >= line. Omit for single-line findings.",
       }),
     ),
-    severity: Type.Union(
-      [Type.Literal("blocking"), Type.Literal("important"), Type.Literal("nit")],
-      {
-        description:
-          "How serious the finding is: 'blocking' (must fix before merge), 'important' (should fix), or 'nit' (minor/optional polish).",
-      },
+    severity: stringEnum(
+      SEVERITIES,
+      "How serious the finding is. Exactly one of: blocking (must fix before merge), important (should fix), nit (minor/optional polish). Pass the bare string with no extra quotes.",
     ),
     category: Type.String({
       minLength: 1,
@@ -89,10 +112,10 @@ const reportFindingsParams = Type.Object(
     summary: Type.String({
       description: "Overall review summary for the PR, as markdown.",
     }),
-    verdict: Type.Union([Type.Literal("approve"), Type.Literal("comment")], {
-      description:
-        "Overall verdict. Magpie never blocks or approves on GitHub itself (a human always decides) — this is informational input to the posted review only.",
-    }),
+    verdict: stringEnum(
+      VERDICTS,
+      'Overall verdict. Must be exactly one of: "approve", "comment" (pass the bare string, with no extra quotes). Magpie never blocks or approves on GitHub itself (a human always decides) — this is informational input to the posted review only.',
+    ),
   },
   { additionalProperties: false },
 );
@@ -118,6 +141,70 @@ function resolveFindingsPath(): string {
   return FALLBACK_FINDINGS_PATH;
 }
 
+/** Cap on how much of a received value is echoed back, so a huge junk value cannot bloat the tool result. */
+const MAX_ECHOED_VALUE_CHARS = 100;
+
+function echoValue(value: unknown): string {
+  // JSON.stringify makes stray quote characters visible (e.g. "\"approve\"").
+  // It returns undefined for undefined/functions, and throws on BigInt; args
+  // come from JSON.parse so neither is expected, but never throw a TypeError.
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return text.length > MAX_ECHOED_VALUE_CHARS ? `${text.slice(0, MAX_ECHOED_VALUE_CHARS)}...` : text;
+}
+
+function problemFor(path: string, value: unknown, allowed: readonly string[]): string | undefined {
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) {
+    return undefined;
+  }
+  const choices = allowed.map((v) => JSON.stringify(v)).join(", ");
+  return `${path}: received ${echoValue(value)}, must be exactly one of ${choices} (pass the bare string, with no extra quotes).`;
+}
+
+/**
+ * Pre-validation hook: if `verdict` or any `findings[i].severity` is present
+ * but outside its enum, throw one error listing every such problem so the model
+ * can fix them all in a single retry. Pi's own validator only says "must be
+ * equal to constant", never the acceptable values. Anything else — including
+ * valid args — is returned unchanged (same reference) for Pi's validator.
+ *
+ * A MISSING verdict/severity is deliberately NOT reported here: this hook runs
+ * before Pi checks `toolCall.argumentsError`, so for malformed/truncated tool
+ * call JSON (partial args) a "missing verdict" message from here would mask the
+ * real cause. Missing fields fall through to Pi's validator, which reports
+ * argumentsError first.
+ *
+ * Values are treated purely as data (see SECURITY NOTE) and never normalised.
+ */
+export function prepareReportFindingsArguments(args: unknown): ReportFindingsParams {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return args as ReportFindingsParams;
+  }
+  const record = args as Record<string, unknown>;
+  const problems: string[] = [];
+  if ("verdict" in record && record.verdict !== undefined) {
+    const p = problemFor("verdict", record.verdict, VERDICTS);
+    if (p) problems.push(p);
+  }
+  if (Array.isArray(record.findings)) {
+    record.findings.forEach((entry: unknown, i: number) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return;
+      const severity = (entry as Record<string, unknown>).severity;
+      if (severity === undefined) return;
+      const p = problemFor(`findings[${i}].severity`, severity, SEVERITIES);
+      if (p) problems.push(p);
+    });
+  }
+  if (problems.length > 0) {
+    throw new Error(`report_findings rejected: ${problems.join(" ")}`);
+  }
+  return args as ReportFindingsParams;
+}
+
 export const reportFindingsTool = defineTool({
   name: "report_findings",
   label: "Report Findings",
@@ -130,6 +217,7 @@ export const reportFindingsTool = defineTool({
     "Every finding's line (and end_line, if present) must refer to the NEW file's line numbers (the right-hand side of the diff), not the old file.",
   ],
   parameters: reportFindingsParams,
+  prepareArguments: prepareReportFindingsArguments,
 
   async execute(_toolCallId, params) {
     const findingsPath = resolveFindingsPath();

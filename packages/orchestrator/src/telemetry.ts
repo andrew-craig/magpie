@@ -38,7 +38,7 @@
 
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { ReviewUsage } from "./reviewer.js";
+import type { ReportFindingsAttempts, ReviewUsage } from "./reviewer.js";
 
 /**
  * Distinct terminal classes for a job, chosen so a "runaway cost" pattern
@@ -90,6 +90,19 @@ export interface JobTelemetryRecord {
   gateway?: TelemetryGatewaySpend;
   /** Failure/skip detail. Present on every non-`success` outcome; absent on `success`. */
   reason?: string;
+  /**
+   * The EFFECTIVE LLM model for this job (after any repo `.magpie.toml`
+   * override). Absent when the job ended before repo config was resolved.
+   * Operator-only: never published to the PR.
+   */
+  model?: string;
+  /**
+   * Counts of the model's `report_findings` calls and rejections, plus the last
+   * rejection text and the `verdict` it sent (see reviewer.ts's
+   * `ReportFindingsAttempts`). Present on successes too (a run can succeed after
+   * many rejected calls); absent when no `ReviewResult` carried it. Operator-only.
+   */
+  reportFindings?: ReportFindingsAttempts;
 }
 
 /** Minimal structured logger this module needs. Defaults to console JSON, mirroring pipeline.ts's own `consoleLogger`. */
