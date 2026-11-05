@@ -253,8 +253,34 @@ export interface ReviewUsage {
  * structured findings.
  */
 export type ReviewResult =
-  | { ok: true; summary: string; findings: Finding[]; verdict: "approve" | "comment"; usage?: ReviewUsage }
-  | { ok: false; reason: string; usage?: ReviewUsage };
+  | {
+      ok: true;
+      summary: string;
+      findings: Finding[];
+      verdict: "approve" | "comment";
+      usage?: ReviewUsage;
+      reportFindings?: ReportFindingsAttempts;
+    }
+  | { ok: false; reason: string; usage?: ReviewUsage; reportFindings?: ReportFindingsAttempts };
+
+/**
+ * Operator-only summary of the model's `report_findings` tool calls in one
+ * run (see {@link summarizeReportFindingsAttempts}). WHY it exists on every
+ * result, not just failures: a run can burn many rejected calls and still
+ * succeed, and a run that fails afterwards needs the rejected value to be
+ * diagnosable. Strings are redacted, whitespace-collapsed and length-capped.
+ * Never published to the PR.
+ */
+export interface ReportFindingsAttempts {
+  /** Number of `report_findings` tool calls the model made. */
+  calls: number;
+  /** Number of those that Pi answered with an error tool result. */
+  rejected: number;
+  /** Bounded text of the last rejection, if any. */
+  lastRejection?: string;
+  /** JSON-stringified (so stray quotes show) `verdict` argument of the call the last rejection answered; absent if that call had no verdict. */
+  lastRejectedVerdict?: string;
+}
 
 /** Docker's allowed container/name-component charset. */
 const DOCKER_NAME_UNSAFE_RE = /[^a-zA-Z0-9_.-]/g;
@@ -1356,14 +1382,21 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
       // "runaway cost" cases this telemetry exists to surface. `undefined`
       // when no assistant turn was ever parsed (see summarizeUsage).
       const earlyUsage = summarizeUsage(assistantMessages);
+      // Same message source as the missing-report diagnostic below. Computed
+      // once so every result (success included) carries the attempt counts.
+      const diagnosticMessages = streamedMessages.length > 0 ? streamedMessages : (agentEndMessages ?? []);
+      const reportFindings =
+        diagnosticMessages.length > 0
+          ? summarizeReportFindingsAttempts(diagnosticMessages, redactGatewayKey)
+          : undefined;
 
       if (timedOut) {
-        finish({ ok: false, reason: `timeout after ${jobTimeoutSeconds}s`, usage: earlyUsage });
+        finish({ ok: false, reason: `timeout after ${jobTimeoutSeconds}s`, usage: earlyUsage, reportFindings });
         return;
       }
 
       if (aborted) {
-        finish({ ok: false, reason: "aborted", usage: earlyUsage });
+        finish({ ok: false, reason: "aborted", usage: earlyUsage, reportFindings });
         return;
       }
 
@@ -1380,6 +1413,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
           ok: false,
           reason: `review container exited with code ${code ?? "null"}${signalNote}: ${detail}`,
           usage: earlyUsage,
+          reportFindings,
         });
         return;
       }
@@ -1446,15 +1480,12 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             const last = messages[messages.length - 1];
             if (last && (last.stopReason === "error" || last.errorMessage)) {
               const detail = last.errorMessage?.trim() || last.stopReason || "unknown error";
-              finish({ ok: false, reason: withStderr(`pi review failed: ${detail}`), usage });
+              finish({ ok: false, reason: withStderr(`pi review failed: ${detail}`), usage, reportFindings });
               return;
             }
             // Diagnostics go BEFORE the stderr tail (mostly forwarder spam).
-            const diagnostic = describeMissingReport(
-              streamedMessages.length > 0 ? streamedMessages : (agentEndMessages ?? []),
-              redactGatewayKey,
-            );
-            finish({ ok: false, reason: withStderr(diagnostic), usage });
+            const diagnostic = describeMissingReport(diagnosticMessages, redactGatewayKey);
+            finish({ ok: false, reason: withStderr(diagnostic), usage, reportFindings });
             return;
           }
 
@@ -1464,6 +1495,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
               ok: false,
               reason: withStderr(`pi wrote an invalid findings file: ${parsed.error}`),
               usage,
+              reportFindings,
             });
             return;
           }
@@ -1495,9 +1527,10 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             findings,
             verdict: parsed.value.verdict,
             usage,
+            reportFindings,
           });
         } catch (err) {
-          finish({ ok: false, reason: withStderr(`failed to process findings: ${errorMessage(err)}`) });
+          finish({ ok: false, reason: withStderr(`failed to process findings: ${errorMessage(err)}`), usage, reportFindings });
         }
       })();
     });
@@ -1742,6 +1775,53 @@ function contentText(content: unknown): string {
 }
 
 /**
+ * Counts the model's `report_findings` calls and Pi's error answers to them,
+ * and captures what the last rejected call sent as `verdict` (matched by
+ * toolCall `id` -> toolResult `toolCallId`). WHY: production saw 25 rejected
+ * calls on `verdict` with no record of which value was sent; the schema error
+ * text is truncated before reaching `verdict`. Pure; every embedded string is
+ * redacted, whitespace-collapsed and length-capped. Takes the parsed Pi
+ * conversation (assistant + toolResult messages) and a redactor.
+ */
+export function summarizeReportFindingsAttempts(
+  messages: unknown[],
+  redact: (s: string) => string,
+): ReportFindingsAttempts {
+  let calls = 0;
+  const callArgs = new Map<string, unknown>();
+  for (const m of filterAssistantMessages(messages)) {
+    for (const part of m.content) {
+      if (isRecord(part) && part.type === "toolCall" && part.name === "report_findings") {
+        calls++;
+        if (typeof part.id === "string") callArgs.set(part.id, part.arguments);
+      }
+    }
+  }
+
+  let rejected = 0;
+  let lastRejectionText = "";
+  let lastRejectedId: string | undefined;
+  for (const m of messages) {
+    if (isRecord(m) && m.role === "toolResult" && m.toolName === "report_findings" && m.isError === true) {
+      rejected++;
+      lastRejectionText = contentText(m.content);
+      lastRejectedId = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
+    }
+  }
+
+  const result: ReportFindingsAttempts = { calls, rejected };
+  if (rejected > 0) {
+    result.lastRejection = boundedSnippet(lastRejectionText, redact);
+    const args = lastRejectedId !== undefined ? callArgs.get(lastRejectedId) : undefined;
+    if (isRecord(args) && args.verdict !== undefined) {
+      // JSON.stringify so stray quote characters in the sent value are visible.
+      result.lastRejectedVerdict = boundedSnippet(JSON.stringify(args.verdict) ?? String(args.verdict), redact);
+    }
+  }
+  return result;
+}
+
+/**
  * Builds the failure reason for a zero-exit run that never wrote a findings
  * file and whose last turn was not a provider error. WHY: "pi did not call
  * report_findings" alone can't distinguish (a) the model ending its turn with
@@ -1760,28 +1840,19 @@ export function describeMissingReport(messages: unknown[], redact: (s: string) =
   const last = assistants[assistants.length - 1];
   const stopReason = last?.stopReason ?? "unknown";
 
-  let calls = 0;
-  for (const m of assistants) {
-    for (const part of m.content) {
-      if (isRecord(part) && part.type === "toolCall" && part.name === "report_findings") calls++;
-    }
-  }
-
-  let rejected = 0;
-  let lastRejection = "";
-  for (const m of messages) {
-    if (isRecord(m) && m.role === "toolResult" && m.toolName === "report_findings" && m.isError === true) {
-      rejected++;
-      lastRejection = contentText(m.content);
-    }
-  }
+  const { calls, rejected, lastRejection, lastRejectedVerdict } = summarizeReportFindingsAttempts(messages, redact);
 
   const finalText = last ? boundedSnippet(extractSummaryText([last]), redact) : "";
   const parts = [
     `last turn: stopReason=${stopReason}`,
     `report_findings calls=${calls}, rejected=${rejected}`,
   ];
-  if (rejected > 0) parts.push(`last rejection: "${boundedSnippet(lastRejection, redact) || "(empty)"}"`);
+  if (rejected > 0) {
+    // Verdict first: the rejection text itself is capped and Pi's schema errors
+    // list verdict last, so a long rejection can hide the offending value.
+    if (lastRejectedVerdict !== undefined) parts.push(`last rejected verdict: ${lastRejectedVerdict}`);
+    parts.push(`last rejection: "${lastRejection || "(empty)"}"`);
+  }
   parts.push(`final text: ${finalText ? `"${finalText}"` : "(none)"}`);
 
   const lead =

@@ -1496,6 +1496,9 @@ describe("per-job cost telemetry", () => {
       // Gateway's tracked spend (0.031), NOT Pi's self-reported cost (0.001).
       costUsd: 0.031,
       gateway: { keyId: "gw-live-key-id", spentUsd: 0.031, budgetUsd: 0.5 },
+      // Effective model (no repo override here) + attempt counts on a success.
+      model: "some/model",
+      reportFindings: { calls: 0, rejected: 0 },
     });
     // Pi's self-reported usage is still carried alongside for cross-checking.
     expect(record.usage).toMatchObject({ costUsd: 0.001, totalTokens: 30 });
@@ -1536,6 +1539,68 @@ describe("per-job cost telemetry", () => {
     const record = soleTelemetryRecord(events);
     expect(record.outcome).toBe("error");
     expect(typeof record.reason).toBe("string");
+  });
+
+  it("records the repo-overridden EFFECTIVE model, and the rejected report_findings verdict on a failed run, without leaking either into the PR", async () => {
+    const { octokit, createComment, createReview } = fakeOctokit({
+      title: "Add feature",
+      body: "Some PR body",
+      files: [{ filename: "src/a.ts", additions: 5, deletions: 1 }],
+      diffText: "diff --git a/src/a.ts b/src/a.ts\n+hello\n",
+      defaultBranch: "main",
+      magpieTomlByRef: { main: '[llm]\nmodel = "repo/allowed-model"\n' },
+    });
+    const { factory } = fakeWorkspaceFactory();
+    const call = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "c1", name: "report_findings", arguments: { verdict: '"approve"' } }],
+      stopReason: "toolUse",
+    };
+    const rejection = {
+      role: "toolResult",
+      toolCallId: "c1",
+      toolName: "report_findings",
+      isError: true,
+      content: [{ type: "text", text: "must be equal to constant" }],
+    };
+    const piBinary = writeFakePi(
+      [call, rejection]
+        .map((m) => `process.stdout.write(JSON.stringify({type:"message_end",message:${JSON.stringify(m)}}) + "\\n");`)
+        .join("\n"),
+    );
+    const { logger, events } = capturingLogger();
+    const { mintGatewayKey, revokeGatewayKey } = gatewaySpiesWithSpend({ spentUsd: 0.01, budgetUsd: 0.5 });
+    const config = telemetryConfig();
+    config.llm.allowedModels = ["repo/allowed-model"];
+
+    const { runJob } = createReviewPipeline(config, {
+      mintToken: vi.fn(async () => ({ token: FAKE_TOKEN })),
+      mintGatewayKey,
+      revokeGatewayKey,
+      getBotLogin: fakeGetBotLogin,
+      makeOctokit: () => octokit as unknown as Octokit,
+      createWorkspace: factory,
+      piBinary,
+      logger,
+    });
+
+    await runJob(testJob(), new AbortController().signal);
+
+    const record = soleTelemetryRecord(events);
+    expect(record.outcome).toBe("error");
+    expect(record.model).toBe("repo/allowed-model");
+    expect(record.reportFindings).toEqual({
+      calls: 1,
+      rejected: 1,
+      lastRejection: "must be equal to constant",
+      lastRejectedVerdict: JSON.stringify('"approve"'),
+    });
+
+    // Operator-only: the published failure note carries neither the model nor the rejected value.
+    const posted = JSON.stringify([...createComment.mock.calls, ...createReview.mock.calls]);
+    expect(posted).not.toContain("repo/allowed-model");
+    expect(posted).not.toContain("must be equal to constant");
+    expect(posted).not.toContain("approve");
   });
 
   it("reclassifies a failure as 'budget-exhausted' when the gateway's spend reached the budget", async () => {

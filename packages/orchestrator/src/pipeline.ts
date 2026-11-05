@@ -366,6 +366,10 @@ export function createReviewPipeline(
     let diffTooLarge = false;
     let gatewaySpend: TelemetryGatewaySpend | undefined;
     let thrownReason: string | undefined;
+    // The EFFECTIVE model (after any repo `.magpie.toml` override), hoisted out
+    // of the try so the `finally` telemetry can read it. Stays undefined if the
+    // job ended before repo config was resolved.
+    let effectiveModel: string | undefined;
 
     try {
       if (job.installationId === undefined) {
@@ -493,6 +497,7 @@ export function createReviewPipeline(
           error: serializeError(err),
         });
       }
+      effectiveModel = effectiveConfig.llm.model;
 
       if (signal.aborted) {
         earlyOutcome = "aborted";
@@ -947,6 +952,8 @@ export function createReviewPipeline(
           usage,
           gateway: gatewaySpend,
           reason,
+          model: effectiveModel,
+          reportFindings: reviewResult?.reportFindings,
         },
         path: config.telemetry.path,
         logger,

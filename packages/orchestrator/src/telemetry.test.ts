@@ -101,6 +101,21 @@ describe("recordJobTelemetry", () => {
     expect(parsed.outcome).toBe("budget-exhausted");
   });
 
+  it("carries model and reportFindings through to the JSONL record", async () => {
+    const path = join(root, "telemetry.jsonl");
+    const record: RecordJobTelemetryParams["record"] = {
+      ...BASE_RECORD,
+      model: "acme/some-model",
+      reportFindings: { calls: 25, rejected: 25, lastRejection: "bad", lastRejectedVerdict: '"\\"approve\\""' },
+    };
+
+    await recordJobTelemetry({ record, path, logger: recordingLogger() });
+
+    const parsed = JSON.parse((await readFile(path, "utf-8")).trim()) as JobTelemetryRecord;
+    expect(parsed.model).toBe("acme/some-model");
+    expect(parsed.reportFindings).toEqual(record.reportFindings);
+  });
+
   it("degrades gracefully when the JSONL path is unwritable: log line still emitted, write failure logged, never throws", async () => {
     // Point the JSONL append at a path whose parent is a FILE, not a
     // directory — mkdir(dirname(path), {recursive:true}) fails in a way that
