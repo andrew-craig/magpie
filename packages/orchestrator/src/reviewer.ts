@@ -1530,7 +1530,7 @@ export async function runReview(params: RunReviewParams): Promise<ReviewResult> 
             reportFindings,
           });
         } catch (err) {
-          finish({ ok: false, reason: withStderr(`failed to process findings: ${errorMessage(err)}`) });
+          finish({ ok: false, reason: withStderr(`failed to process findings: ${errorMessage(err)}`), usage, reportFindings });
         }
       })();
     });
