@@ -82,7 +82,7 @@ describe("loadConfig", () => {
     expect(config.repoAllowlist).toEqual(["my-org/my-repo"]);
     expect(config.workspace.workDir).toBe("/var/lib/magpie/work");
     expect(config.container.image).toBe(
-      "ghcr.io/andrew-craig/magpie/reviewer:0.5.0@sha256:fc601a79075441f6b8a9a213634d27db2a361a75c0e8d97af9cdf0d5b6731708",
+      "ghcr.io/andrew-craig/magpie/reviewer:0.5.1@sha256:ceb2af63a6cf8e4584ceb7ff1ac706d1cb733c00d2254e7cd955efe3f86c95a8",
     );
     expect(config.container.memory).toBe("4g");
     // Fail-closed-by-default escape hatch for the cgroup

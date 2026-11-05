@@ -129,7 +129,7 @@ const rawConfigSchema = z
         // the `docker run` invocation uses this value directly
         // as the image to run. The default is PINNED BY DIGEST (the `@sha256:`
         // below is the multi-arch image-index digest published by the
-        // `reviewer-v0.5.0` tag) so a re-tagged upstream image can't silently
+        // `reviewer-v0.5.1` tag) so a re-tagged upstream image can't silently
         // swap the untrusted-content runtime under you — the tag portion is
         // human-readable provenance only; the digest is what docker resolves.
         // `0.3.0` was the first image with micro-VM-tier support baked in
@@ -138,7 +138,8 @@ const rawConfigSchema = z
         // during live micro-VM validation; `0.3.2` adds the M8-E8
         // image-config drift guard (no runtime behavior change); `0.4.0`
         // bumps Pi 0.80.3 -> 1.1.0 (newer model registry); `0.5.0` bumps
-        // Pi 1.1.0 -> 1.4.0 (dependency refresh); `0.2.0`
+        // Pi 1.1.0 -> 1.4.0 (dependency refresh); `0.5.1` fixes report_findings
+        // schema + rejection diagnostics; `0.2.0`
         // supported the crun floor only.
         // `scripts/build-reviewer-image.sh` still builds a local
         // `magpie-reviewer:*` image for development (override this to use it).
@@ -146,7 +147,7 @@ const rawConfigSchema = z
           .string()
           .min(1)
           .default(
-            "ghcr.io/andrew-craig/magpie/reviewer:0.5.0@sha256:fc601a79075441f6b8a9a213634d27db2a361a75c0e8d97af9cdf0d5b6731708",
+            "ghcr.io/andrew-craig/magpie/reviewer:0.5.1@sha256:ceb2af63a6cf8e4584ceb7ff1ac706d1cb733c00d2254e7cd955efe3f86c95a8",
           ),
         memory: z.string().min(1).default("4g"),
         // Whether Magpie refuses to start (and refuses to launch review
