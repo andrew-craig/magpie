@@ -3,7 +3,6 @@
 
 _Active tasks, highest priority first. Closed tasks live in .chalk/tasks/closed/._
 
-- **task_8f90** · P2 · in_progress · Release reviewer-v0.5.1 + host v0.3.6 and reinstall hub
 - **task_253b** · P2 · open · Upgrade Node runtime 22 -> 24 (host, reviewer base image, CI, @types/node)
 - **task_869b** · P2 · open · Evaluate TypeScript 7 (native tsgo compiler) adoption
 - **task_8e36** · P2 · open · Migrate CI signing to cosign v3 (bundle format) + update verify docs
