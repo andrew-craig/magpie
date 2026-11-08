@@ -1,7 +1,7 @@
 import type { Octokit } from "@octokit/rest";
 import { describe, expect, it, vi } from "vitest";
 import { buildReviewedShaMarker, MAGPIE_REVIEW_MARKER } from "./publisher.js";
-import { minimizeOutdated, readReviewState, resolveOutdatedThreads } from "./rereview.js";
+import { minimizeOutdated, readReviewState } from "./rereview.js";
 
 // NOTE: fully offline — no real Octokit, no network. `readReviewState` and
 // `minimizeOutdated` only ever touch `octokit.paginate` (keyed by function
@@ -94,7 +94,7 @@ describe("readReviewState", () => {
   it("returns an empty state (no lastReviewedSha, no minimizable nodes) when there's no prior magpie activity", async () => {
     const { octokit } = fakeOctokit({});
     const state = await readReviewState({ octokit, ...BASE_PARAMS });
-    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [], resolvableReviewCommentNodeIds: [] });
+    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [] });
   });
 
   it("parses lastReviewedSha from the most recent (by timestamp) magpie post, across mixed issue-comments and reviews", async () => {
@@ -210,10 +210,6 @@ describe("readReviewState", () => {
     // PullRequestReview is not GitHub's `Minimizable` interface (see
     // rereview.ts's module doc comment / SCOPE CONSTRAINT).
     expect(state.minimizableNodeIds).not.toContain("PRR_magpie_1");
-    // resolvableReviewCommentNodeIds is the inline-review-comment-only
-    // subset — excludes the issue comment (see THREAD RESOLUTION in the
-    // module doc comment).
-    expect(state.resolvableReviewCommentNodeIds).toEqual(["RC_magpie_1"]);
   });
 
   // SECURITY (spoof + wrong-bot): the marker `<!-- magpie-review -->` is a
@@ -303,7 +299,7 @@ describe("readReviewState", () => {
 
     const state = await readReviewState({ octokit, owner: "acme", repo: "widgets", prNumber: 7, botLogin: "" });
 
-    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [], resolvableReviewCommentNodeIds: [] });
+    expect(state).toEqual({ lastReviewedSha: undefined, minimizableNodeIds: [] });
     // Fails toward doing the review, not just toward an empty result: an
     // unresolved identity short-circuits BEFORE even paginating GitHub's
     // API, since there's no point reading state that's going to be discarded
@@ -353,178 +349,5 @@ describe("minimizeOutdated", () => {
     expect(graphql).toHaveBeenCalledTimes(2);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ event: "minimize-outdated-failed", nodeId: "IC_fails" });
-  });
-});
-
-describe("resolveOutdatedThreads", () => {
-  // Fixture shape mirrors a REAL response (trimmed) from:
-  //   gh api graphql -f query='{repository(owner:"andrew-craig",name:"magpie"){pullRequest(number:86){
-  //     reviewThreads(first:3){pageInfo{hasNextPage endCursor} nodes{id isResolved
-  //     comments(first:2){nodes{id}}}}}}}'
-  // NOTE: `PullRequestReviewComment` has no `pullRequestReviewThread` field --
-  // never mock a lookup from comment -> thread; only PR.reviewThreads exists.
-  const threadsPage = (
-    nodes: Array<{ id: string; isResolved: boolean; commentIds: string[] }>,
-    next?: string,
-  ) => ({
-    repository: {
-      pullRequest: {
-        reviewThreads: {
-          pageInfo: { hasNextPage: next !== undefined, endCursor: next ?? null },
-          nodes: nodes.map((n) => ({
-            id: n.id,
-            isResolved: n.isResolved,
-            comments: { nodes: n.commentIds.map((id) => ({ id })) },
-          })),
-        },
-      },
-    },
-  });
-  const target = { owner: "acme", repo: "widgets", prNumber: 7 };
-
-  it("lists the PR's review threads once and resolves only unresolved threads containing Magpie comments", async () => {
-    const { octokit, graphql } = fakeOctokit({
-      graphqlImpl: async (query) => {
-        if (query.includes("MagpieReviewThreads")) {
-          return threadsPage([
-            { id: "PRRT_ours", isResolved: false, commentIds: ["PRRC_ours", "PRRC_human_reply"] },
-            { id: "PRRT_done", isResolved: true, commentIds: ["PRRC_ours2"] },
-            { id: "PRRT_human", isResolved: false, commentIds: ["PRRC_human"] },
-          ]);
-        }
-        if (query.includes("resolveReviewThread")) return { resolveReviewThread: { thread: { isResolved: true } } };
-        throw new Error(`unexpected query: ${query}`);
-      },
-    });
-
-    const logger = { info: vi.fn(), error: vi.fn() };
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_ours", "PRRC_ours2"], logger });
-
-    expect(logger.info).toHaveBeenCalledWith({
-      event: "resolve-outdated-threads",
-      prNumber: target.prNumber,
-      requested: 2,
-      matched: 2,
-      alreadyResolved: 1,
-      resolved: 1,
-      failed: 0,
-    });
-    expect(graphql).toHaveBeenCalledTimes(2);
-    const calls = graphql.mock.calls as unknown as [string, Record<string, unknown>][];
-    expect(calls[0]![0]).toContain("reviewThreads");
-    expect(calls[0]![1]).toEqual({ ...target, cursor: null });
-    expect(calls[1]![0]).toContain("resolveReviewThread");
-    expect(calls[1]![1]).toEqual({ threadId: "PRRT_ours" });
-  });
-
-  it("paginates reviewThreads and resolves matching threads on later pages", async () => {
-    const { octokit, graphql } = fakeOctokit({
-      graphqlImpl: async (query, vars) => {
-        if (query.includes("MagpieReviewThreads")) {
-          return (vars as { cursor: string | null }).cursor === null
-            ? threadsPage([{ id: "PRRT_1", isResolved: false, commentIds: ["PRRC_a"] }], "CUR1")
-            : threadsPage([{ id: "PRRT_2", isResolved: false, commentIds: ["PRRC_b"] }]);
-        }
-        return { resolveReviewThread: { thread: { isResolved: true } } };
-      },
-    });
-
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a", "PRRC_b"] });
-
-    const calls = graphql.mock.calls as unknown as [string, Record<string, unknown>][];
-    expect(calls.filter((c) => c[0].includes("MagpieReviewThreads")).map((c) => c[1]!.cursor)).toEqual([null, "CUR1"]);
-    expect(calls.filter((c) => c[0].includes("resolveReviewThread")).map((c) => c[1]!.threadId)).toEqual([
-      "PRRT_1",
-      "PRRT_2",
-    ]);
-  });
-
-  it("tolerates an empty/missing repository payload without resolving anything", async () => {
-    const { octokit, graphql } = fakeOctokit({ graphqlImpl: async () => ({ repository: null }) });
-
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a"] });
-
-    expect(graphql).toHaveBeenCalledTimes(1);
-  });
-
-  it("never calls graphql when commentNodeIds is empty", async () => {
-    const { octokit, graphql } = fakeOctokit({});
-
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: [] });
-
-    expect(graphql).not.toHaveBeenCalled();
-  });
-
-  it("swallows a per-thread resolve error, logs it, and still resolves the remaining threads", async () => {
-    const { octokit, graphql } = fakeOctokit({
-      graphqlImpl: async (query, vars) => {
-        if (query.includes("MagpieReviewThreads")) {
-          return threadsPage([
-            { id: "PRRT_fails", isResolved: false, commentIds: ["PRRC_a"] },
-            { id: "PRRT_ok", isResolved: false, commentIds: ["PRRC_b"] },
-          ]);
-        }
-        if ((vars as { threadId: string }).threadId === "PRRT_fails") throw new Error("permission denied");
-        return { resolveReviewThread: { thread: { isResolved: true } } };
-      },
-    });
-    const errors: Record<string, unknown>[] = [];
-    const logger = { info: vi.fn(), error: (p: Record<string, unknown>) => errors.push(p) };
-
-    await expect(
-      resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a", "PRRC_b"], logger }),
-    ).resolves.toBeUndefined();
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ event: "resolve-outdated-thread-failed", threadId: "PRRT_fails" });
-    expect(graphql).toHaveBeenCalledTimes(3);
-  });
-
-  it("logs and gives up (never throws) when listing threads fails", async () => {
-    const { octokit, graphql } = fakeOctokit({
-      graphqlImpl: async () => {
-        throw new Error("Field 'x' doesn't exist");
-      },
-    });
-    const errors: Record<string, unknown>[] = [];
-    const logger = { info: vi.fn(), error: (p: Record<string, unknown>) => errors.push(p) };
-
-    await expect(
-      resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a"], logger }),
-    ).resolves.toBeUndefined();
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ event: "list-review-threads-failed" });
-    expect(graphql).toHaveBeenCalledTimes(1);
-    // Nothing was processed before the first page failed, so no summary.
-    expect(logger.info).not.toHaveBeenCalled();
-  });
-
-  it("still logs the partial summary when a later page's listing fails", async () => {
-    const { octokit } = fakeOctokit({
-      graphqlImpl: async (query, vars) => {
-        if (query.includes("MagpieReviewThreads")) {
-          if ((vars as { cursor: string | null }).cursor === null) {
-            return threadsPage([{ id: "PRRT_1", isResolved: false, commentIds: ["PRRC_a"] }], "CUR1");
-          }
-          throw new Error("secondary rate limit");
-        }
-        return { resolveReviewThread: { thread: { isResolved: true } } };
-      },
-    });
-    const logger = { info: vi.fn(), error: vi.fn() };
-
-    await resolveOutdatedThreads({ octokit, ...target, commentNodeIds: ["PRRC_a", "PRRC_b"], logger });
-
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "list-review-threads-failed" }));
-    expect(logger.info).toHaveBeenCalledWith({
-      event: "resolve-outdated-threads",
-      prNumber: target.prNumber,
-      requested: 2,
-      matched: 1,
-      alreadyResolved: 0,
-      resolved: 1,
-      failed: 0,
-    });
   });
 });
